@@ -33,6 +33,22 @@ bands:
   amber:
     min_confidence: 0.50
 
+# CoDD holds itself to the invariant it ships: an acceptance criterion in
+# docs/requirements must reach evidence a machine runs. Strict = those findings
+# are red here, not advisories.
+acceptance_evidence:
+  mode: strict
+
+# §6 of the system requirements is the table that holds CoDD to its own
+# acceptance-evidence invariant; name the heading so the criteria there are in
+# scope without having to cite an operation_flow id CoDD does not have.
+requirement_reconciliation:
+  enabled: true
+  docs:
+    - docs/requirements/system-requirements.md
+  sections:
+    - "Acceptance criteria (machine-checked)"
+
 propagation:
   max_depth: 10
   stop_at_contract_boundary: true

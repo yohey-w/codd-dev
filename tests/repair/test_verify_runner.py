@@ -76,8 +76,11 @@ def test_verify_runner_runs_default_dag_checks(tmp_path, monkeypatch):
     VerifyRunner(tmp_path, {"project": {"type": "generic"}}).run()
 
     assert calls["checks"][0] == DEFAULT_CHECKS
-    assert len(calls["checks"][0]) == 8
+    assert len(calls["checks"][0]) == 9
     assert calls["checks"][0][-2:] == ("user_journey_coherence", "environment_coverage")
+    # `acceptance_evidence` runs here too — amber by default, so it fails nothing
+    # that was passing.
+    assert "acceptance_evidence" in calls["checks"][0]
 
 
 def test_verify_runner_pass_returns_verification_result(tmp_path, monkeypatch):

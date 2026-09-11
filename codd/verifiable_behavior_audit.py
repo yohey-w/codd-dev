@@ -1069,6 +1069,31 @@ def coverage_gate_enabled(config: dict[str, Any] | None) -> bool:
     return True
 
 
+def require_vb_table(config: dict[str, Any] | None) -> bool:
+    """Whether a project with NO VB table FAILS the implement-time coverage gate.
+
+    The old behaviour — "projects with no VB table pass with a one-line notice" —
+    made the EMPTY registry the safest registry: a project that never declared a
+    verifiable behavior was permanently green, and every acceptance criterion it
+    wrote stayed unconnected to any test.
+
+    That is still reported, but it is not a hard failure by default. Failing an
+    existing project the moment it upgrades CoDD is a change nobody asked for, so
+    the gate follows the project's declared posture: ON when
+    ``acceptance_evidence.mode: strict``, OFF otherwise. The state never becomes
+    invisible either way — the ``acceptance_evidence`` check reports the missing
+    registry as an amber finding in advisory mode. Explicit
+    ``test_coverage.require_vb_table`` always wins over the mode.
+    """
+
+    section = (config or {}).get("test_coverage")
+    if isinstance(section, dict) and "require_vb_table" in section:
+        return bool(section["require_vb_table"])
+    from codd.acceptance_evidence import acceptance_settings
+
+    return acceptance_settings(config or {}).strict
+
+
 def coverage_gate_max_retries(config: dict[str, Any] | None) -> int:
     """Bounded re-implementation attempts before the gate fails (default 2)."""
 
@@ -1294,6 +1319,20 @@ def run_implement_coverage_gate(
     emit_error = echo_error or echo
     report = build_vb_coverage_audit(project_root, config=config)
     if not report.rows:
+        if require_vb_table(config) and _project_has_something_to_certify(project_root, config):
+            emit_error(
+                "Test coverage gate FAILED: no VB table found in any test document, but this "
+                "project has behaviour to certify (it declares acceptance criteria and/or a "
+                "canonical test-strategy document). An empty registry is not a clean run — it "
+                "is an unverified one."
+            )
+            emit_error(
+                "Declare the verifiable behaviors in `docs/test/test_strategy.md` (run "
+                "`codd acceptance sync` to derive them from the acceptance criteria), or set "
+                "`test_coverage.require_vb_table: false` to declare that this project verifies "
+                "its criteria some other way."
+            )
+            return False
         echo("Test coverage gate: no VB table found in test documents — nothing to audit.")
         return True
 
@@ -1350,6 +1389,27 @@ def run_implement_coverage_gate(
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+
+def _project_has_something_to_certify(project_root: Path, config: dict[str, Any] | None) -> bool:
+    """Whether an empty VB registry is a REAL gap rather than a minimal project.
+
+    Two structural signals, either of which is enough: the project expects a
+    canonical VB registry (planned/pinned/present), or its requirement documents
+    declare acceptance criteria. A project with neither has nothing to verify and
+    is left alone, exactly as before.
+    """
+
+    if project_expects_vb_registry(project_root, config):
+        return True
+    # Deferred import: acceptance_evidence imports requirement_reconciliation,
+    # which is a heavier dependency than this gate needs on the common path.
+    from codd.acceptance_evidence import project_declares_acceptance_criteria
+
+    try:
+        return project_declares_acceptance_criteria(project_root, config or {})
+    except (OSError, ValueError):
+        return False
 
 
 

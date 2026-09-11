@@ -38,6 +38,11 @@ from codd.test_detection import detect_test_command
 
 
 DEFAULT_CHECKS: tuple[str, ...] = (
+    # `acceptance_evidence` is amber by default (advisory mode), so adding it here
+    # makes the acceptance-criteria findings VISIBLE in a plain `codd verify`
+    # without failing any project that has not opted into
+    # `acceptance_evidence.mode: strict`.
+    "acceptance_evidence",
     "node_completeness",
     "edge_validity",
     "depends_on_consistency",

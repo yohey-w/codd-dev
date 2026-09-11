@@ -242,3 +242,14 @@ CoDD (Coherence-Driven Development) is a Python CLI tool (v1.3.0) that maintains
 - **OQ-6** [review needed]: Several modules have high change-risk scores with 100% uncovered symbols (e.g., `generator`: 0.72 risk, `validator`: 0.57, `planner`: 0.57). Is the absence of test coverage for these critical modules a known gap?
 
 - **OQ-7** [speculative]: The `condition` field on graph edges (e.g., `"when API version >= 2.0"`) suggests conditional dependency support, but it is unclear how conditions are evaluated or enforced at runtime. Is this currently used or reserved for future use?
+
+## 6. Acceptance criteria (machine-checked)
+
+CoDD ships the acceptance-evidence invariant; this table is where CoDD is held to
+it. Each row is a requirement of CoDD's own behaviour, stated so that a machine
+can decide it, and wired to the test that decides it — the same `verified_by`
+column the invariant asks every project to write.
+
+| ID | Requirement | Acceptance criteria | verified_by | params |
+| --- | --- | --- | --- | --- |
+| AC-ACC-1 | Adopting the acceptance-evidence check must never turn an existing project red by itself | On a brownfield project with acceptance criteria, no `verified_by` column and no verifiable-behavior registry, the check reports its findings and still passes: severity `amber`, status `warn`, and the missing registry is named rather than silently tolerated | test:test_acceptance_evidence | |

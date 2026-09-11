@@ -3218,6 +3218,160 @@ def contract_apply_cmd(project_path: str, output: str | None, dry_run: bool, ena
         click.echo("artifact_contract.enabled left unchanged (opt-in; pass --enable to turn on).")
 
 
+@main.group("acceptance")
+def acceptance_cmd() -> None:
+    """Acceptance criteria — the customer's list, wired to machine-checked evidence.
+
+    An acceptance criterion is what the customer signed. CoDD reconciles design
+    against implementation and test docs against test markers, but a criterion
+    that reaches neither is invisible: written down, agreed, connected to
+    nothing. These commands make the connection, and the ``acceptance_evidence``
+    check enforces it.
+
+    ``list``    what each criterion is bound to right now.
+    ``sync``    derive verifiable-behavior rows from the criteria (deterministic).
+    ``record``  register a MANUAL verdict, bound to the implementation it accepted.
+    """
+
+
+def _acceptance_context(project_path: str):
+    """Resolve (project_root, config, evidence context) or exit with a message."""
+    from codd.acceptance_evidence import build_evidence_context
+
+    project_root = Path(project_path).resolve()
+    try:
+        config = load_project_config(project_root)
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"Error: {exc}")
+        raise SystemExit(1)
+    return project_root, config, build_evidence_context(project_root, config)
+
+
+@acceptance_cmd.command("list")
+@project_root_option()
+def acceptance_list(path: str) -> None:
+    """List every declared acceptance criterion and what it is bound to."""
+    from codd.acceptance_record import load_ledger
+
+    project_root, _config, context = _acceptance_context(path)
+    if not context.criteria:
+        click.echo(
+            "No acceptance criteria found. A criterion is a requirement-table row whose "
+            "table has an acceptance column (受入条件 / 検収条件 / Acceptance / ...) and "
+            "which is in scope for requirement reconciliation."
+        )
+        return
+    ledger = load_ledger(project_root)
+    click.echo(f"{len(context.criteria)} acceptance criterion/criteria:")
+    for criterion in context.criteria:
+        declared = ", ".join(str(ref) for ref in criterion.verified_by) or "-"
+        tests = ", ".join(context.anchored_tests(criterion.req_id)) or "-"
+        implementers = ", ".join(context.implementers(criterion.req_id)) or "-"
+        record = ledger.get(criterion.req_id)
+        manual = f"{record.status} by {record.by}" if record else "-"
+        click.echo(f"  {criterion.req_id} ({criterion.source})")
+        click.echo(f"    verified_by : {declared}")
+        click.echo(f"    implementers: {implementers}")
+        click.echo(f"    tests naming the id: {tests}")
+        click.echo(f"    manual record: {manual}")
+
+
+@acceptance_cmd.command("sync")
+@project_root_option()
+@click.option("--dry-run", is_flag=True, default=False, help="Show what would be written, write nothing")
+def acceptance_sync(path: str, dry_run: bool) -> None:
+    """Derive verifiable-behavior rows from the acceptance criteria (no AI)."""
+    from codd.acceptance_sync import sync_vb_registry
+
+    project_root, config, context = _acceptance_context(path)
+    if not context.criteria:
+        click.echo("No acceptance criteria to derive a registry from — nothing to do.")
+        return
+    result = sync_vb_registry(
+        project_root, context.criteria, config=config, dry_run=dry_run
+    )
+    target = _display_path(result.path, project_root)
+    if not result.added:
+        click.echo(f"{target}: already declares all {len(result.already_present)} criterion id(s).")
+        return
+    verb = "would add" if dry_run else ("created with" if result.created else "added")
+    click.echo(f"{target}: {verb} {len(result.added)} verifiable-behavior row(s): {', '.join(result.added)}")
+    if result.already_present:
+        click.echo(f"  ({len(result.already_present)} already declared, left untouched)")
+    click.echo(
+        "Each row is a declaration, not a proof: write the test and mark it "
+        "`codd: covers vb=<id>` so the coverage audit can see it."
+    )
+
+
+@acceptance_cmd.command("record")
+@click.argument("req_id")
+@click.argument("status", type=click.Choice(["pass", "fail"]))
+@project_root_option()
+@click.option("--by", "owner", required=True, help="Who checked it (an owner, not a team)")
+@click.option("--note", default="", help="What exactly was checked")
+@click.option(
+    "--file",
+    "files",
+    multiple=True,
+    help="Implementation file this verdict is about (repeatable). "
+    "Default: every file that writes the requirement id as a token.",
+)
+def acceptance_record(
+    req_id: str, status: str, path: str, owner: str, note: str, files: tuple[str, ...]
+) -> None:
+    """Record a MANUAL verdict on an acceptance criterion.
+
+    The verdict is stored together with the content hashes of the implementation
+    files it was about. When that implementation changes, the record goes stale
+    and the criterion is unaccepted again — which is the honest state, because
+    nobody has looked at the new implementation.
+    """
+    from codd.acceptance_record import record_acceptance
+
+    project_root, _config, context = _acceptance_context(path)
+    known = {criterion.req_id for criterion in context.criteria}
+    if req_id not in known:
+        click.echo(
+            f"Error: `{req_id}` is not a declared acceptance criterion "
+            f"({len(known)} found). Run `codd acceptance list` to see them."
+        )
+        raise SystemExit(1)
+
+    # Default to the implementation the CHECK will re-hash (the anchored files
+    # plus what they import), so a record is not stale the moment it is written.
+    implementation = list(files) or list(context.accepted_implementation(req_id))
+    if not implementation:
+        click.echo(
+            f"Error: no implementation is anchored to `{req_id}`, so the verdict could not be "
+            "bound to anything and would never expire. Write the requirement id into the "
+            "file(s) that implement it, or pass --file explicitly."
+        )
+        raise SystemExit(1)
+
+    anchored = set(context.implementers(req_id))
+    if files and anchored - set(implementation):
+        # The check re-hashes what the REQUIREMENT points at, so a record over a
+        # different file set reads as stale the moment it is written. Say so now
+        # rather than letting it look accepted and then expire silently.
+        click.echo(
+            "WARN: --file does not cover "
+            + ", ".join(sorted(anchored - set(implementation)))
+            + ", which the requirement id anchors to; this record will read as stale."
+        )
+    record = record_acceptance(
+        project_root,
+        req_id,
+        status=status,
+        by=owner,
+        implementation_paths=implementation,
+        note=note,
+    )
+    click.echo(f"Recorded {req_id} = {record.status} by {record.by} at {record.recorded_at}")
+    for relative in sorted(record.implementation):
+        click.echo(f"  bound to {relative} ({record.implementation[relative][:12]})")
+
+
 @main.group("canon", cls=_AliasedGroup, aliases={"refresh": "accept", "check": "status"})
 def canon_cmd() -> None:
     """Canon integrity ledger — byte-identity of the accepted requirement documents.
@@ -5167,7 +5321,10 @@ def _enforce_implement_coverage_gate(
     Applies only when the run targets test artifacts (output under a test dir
     or a test-type design node). Uncovered VBs trigger bounded re-implementation
     with gap feedback; remaining gaps are reported on stderr with a non-zero
-    exit. Projects without a VB table get a one-line notice and pass.
+    exit. A project with NO VB table fails when it has something to certify
+    (test_coverage.require_vb_table, default true); a project that declares
+    neither acceptance criteria nor a canonical registry still passes with a
+    one-line notice.
     """
 
     from codd.verifiable_behavior_audit import run_implement_coverage_gate
@@ -9864,6 +10021,16 @@ def _dag_result_message(result: Any) -> str:
     return str(_dag_result_value(result, "message") or "")
 
 
+def _dag_finding_text(item: Any) -> str:
+    """Render one finding for the text summary, preferring its own message."""
+
+    if isinstance(item, dict):
+        message = item.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    return str(item)
+
+
 def _dag_result_details(result: Any) -> list[str]:
     details: list[str] = []
     for key in (
@@ -9880,10 +10047,13 @@ def _dag_result_details(result: Any) -> list[str]:
         if not value:
             continue
         if isinstance(value, list):
-            rendered = ", ".join(str(item) for item in value[:5])
+            # One finding per line, rendered by its own human-readable `message`
+            # when it carries one: a comma-joined blob of dict reprs buries the
+            # sentence the check wrote for the reader.
+            details.append(f"{key}: {len(value)}")
+            details.extend(f"- {_dag_finding_text(item)}" for item in value[:5])
             if len(value) > 5:
-                rendered += f", ... {len(value) - 5} more"
-            details.append(f"{key}: {rendered}")
+                details.append(f"- ... {len(value) - 5} more")
         else:
             details.append(f"{key}: {value}")
     common_count = _dag_result_value(result, "common_node_count")

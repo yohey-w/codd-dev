@@ -176,7 +176,11 @@ def dag_to_dict(dag: DAG, project_root: Path) -> dict[str, Any]:
     payload = {
         "version": "1",
         "built_at": datetime.now(timezone.utc).isoformat(),
-        "project_root": str(Path(project_root).resolve()),
+        # RELATIVE on purpose: an absolute path bakes the builder's machine into a
+        # committed artifact (`.codd/dag.json`), so the same tree serialized on two
+        # machines produced two different files and a worktree path that exists for
+        # nobody else shipped in a public repo.
+        "project_root": ".",
         "nodes": [
             {
                 "id": node.id,
