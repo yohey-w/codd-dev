@@ -23,6 +23,7 @@ if TYPE_CHECKING:  # import-time-free type hints (no cycle, no runtime cost)
 
 import yaml
 
+from codd.ansi import strip_ansi
 from codd.config import find_codd_dir, load_project_config
 from codd.dag import DAG, reset_dag_cache
 from codd.dag.builder import build_dag, load_dag_settings
@@ -511,7 +512,7 @@ class VerifyRunner:
             )
         if completed.returncode == 0:
             return None
-        output = _command_output_tail(completed.stdout, completed.stderr)
+        output = _command_output_tail(strip_ansi(completed.stdout), strip_ansi(completed.stderr))
         return VerificationFailure(
             check_name="install_preflight",
             source="install_preflight",
@@ -925,7 +926,7 @@ class VerifyRunner:
             message_lines.append(
                 "failed/skipped test file(s): [" + ", ".join(failed_files) + "]"
             )
-        captured = _command_output_tail(result.stdout, result.stderr)
+        captured = _command_output_tail(strip_ansi(result.stdout), strip_ansi(result.stderr))
         if captured:
             details["output"] = captured
             # The parsed report has no assertion text; the captured output does.
@@ -936,7 +937,9 @@ class VerifyRunner:
         # verdict class / code-addressability (that would flip the T1 routing class
         # and hand the engine an inferred source target the contract path
         # deliberately withholds). Best-effort; never aborts verify.
-        self._attach_contract_failure_evidence(details, command, result.stdout, result.stderr)
+        self._attach_contract_failure_evidence(
+            details, command, strip_ansi(result.stdout), strip_ansi(result.stderr)
+        )
 
         failure = VerificationFailure(
             check_name="test_command",
@@ -1049,11 +1052,18 @@ class VerifyRunner:
             observation.finished_at = datetime.now(timezone.utc).isoformat()
         observation.executed = True
         observation.exit_code = completed.returncode
-        observation.stdout = completed.stdout or ""
-        observation.stderr = completed.stderr or ""
+        # Sanitize at the capture boundary. Everything downstream — the
+        # zero-tests markers, the JS "tests ran" regex, and the B0 failure
+        # attributor — is a regex over this text, and a colouring runner
+        # (``FORCE_COLOR``, a PTY, ``--color=yes`` in addopts) makes all of them
+        # miss. See :mod:`codd.ansi`.
+        stdout = strip_ansi(completed.stdout)
+        stderr = strip_ansi(completed.stderr)
+        observation.stdout = stdout
+        observation.stderr = stderr
         observation.verdict = "fail" if completed.returncode else "command_pass"
-        output = _command_output_tail(completed.stdout, completed.stderr)
-        full_output = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
+        output = _command_output_tail(stdout, stderr)
+        full_output = "\n".join(part for part in (stdout, stderr) if part)
         # ANTI-FALSE-GREEN (#4): a JS test runner (vitest/jest/playwright) that
         # collected/ran ZERO tests is a HARD FAIL even on exit 0 — these runners
         # exit 0 with "No test files found" / "No tests found", which must never
@@ -1086,7 +1096,7 @@ class VerifyRunner:
             # unknown collection/skip coverage must not resolve a prior test NG.
             if check_name != "test_command":
                 observation.verdict = "pass"
-            return True, _last_line(completed.stdout) or "passed", None
+            return True, _last_line(stdout) or "passed", None
         if completed.returncode == 5 and "pytest" in command:
             observation.verdict = "zero_tests"
             # pytest exit code 5 = "no tests collected": the runner started
@@ -1134,7 +1144,9 @@ class VerifyRunner:
         """
         try:
             full_output = "\n".join(
-                part for part in (completed.stdout, completed.stderr) if part
+                part
+                for part in (strip_ansi(completed.stdout), strip_ansi(completed.stderr))
+                if part
             )
             attribution = attribute_command_failure(
                 command=command,
@@ -1191,7 +1203,7 @@ class VerifyRunner:
         if command:
             attribution = attribute_command_failure(
                 command=command,
-                output=str(result.get("output") or ""),
+                output=strip_ansi(str(result.get("output") or "")),
                 project_root=self.project_root,
                 check_name="verification_test_runtime",
             )

@@ -29,6 +29,7 @@ from typing import Any
 
 import yaml
 
+from codd.ansi import strip_ansi
 from codd.deployment.providers import (
     VerificationResult,
     VerificationTemplate,
@@ -117,10 +118,17 @@ class PytestHttpTemplate(VerificationTemplate):
         except subprocess.TimeoutExpired as exc:
             duration = time.monotonic() - started_at
             output = exc.stderr or exc.stdout or f"Timed out after {self.timeout:g}s"
-            return VerificationResult(passed=False, output=str(output), duration=duration)
+            return VerificationResult(passed=False, output=strip_ansi(str(output)), duration=duration)
 
         duration = time.monotonic() - started_at
-        combined = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
+        # Sanitize at the capture boundary: every check below (and the caller's
+        # evidence parsing) is a regex over this text, and a colouring runner
+        # (``FORCE_COLOR`` is exported by Claude Code) would defeat both the
+        # positive-execution evidence check (false RED) and the zero-collected
+        # guard (false GREEN). See :mod:`codd.ansi`.
+        stdout = strip_ansi(completed.stdout)
+        stderr = strip_ansi(completed.stderr)
+        combined = "\n".join(part for part in (stdout, stderr) if part)
         # ANTI-FALSE-GREEN: pytest exits 5 with "no tests ran" — a collected/ran
         # count of ZERO is a HARD FAIL regardless of exit code (even 0).
         if completed.returncode == _PYTEST_NO_TESTS_EXIT_CODE or _collected_zero(combined):
@@ -150,10 +158,10 @@ class PytestHttpTemplate(VerificationTemplate):
                     ),
                     duration=duration,
                 )
-            return VerificationResult(passed=True, output=completed.stdout, duration=duration)
+            return VerificationResult(passed=True, output=stdout, duration=duration)
         return VerificationResult(
             passed=False,
-            output=completed.stderr or completed.stdout,
+            output=stderr or stdout,
             duration=duration,
         )
 

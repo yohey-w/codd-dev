@@ -64,6 +64,8 @@ import subprocess  # noqa: S404 — argv is from the trusted language profile, s
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from codd.ansi import strip_ansi
+
 from .builtin_adapters import ensure_builtin_adapters_registered
 from .registry import AdapterRegistry, default_adapter_registry
 from .verify_plan import VerifyClass, VerifyRunPlan
@@ -320,7 +322,10 @@ def execute_verify_plan(
     # can surface the actual assertion text into repair evidence (the parsed report
     # has none). Green results carry it harmlessly; the repair runner only reads it
     # on a failure. Only reachable when the command actually spawned (``completed``).
-    return replace(result, stdout=completed.stdout or "", stderr=completed.stderr or "")
+    # Sanitized (see :mod:`codd.ansi`): these fields exist to be *parsed* by the
+    # repair layer's failure attributor, which anchors on ``^``/``\b`` — colour
+    # escapes from a ``FORCE_COLOR``-style runner would blank the attribution.
+    return replace(result, stdout=strip_ansi(completed.stdout), stderr=strip_ansi(completed.stderr))
 
 
 def _norm_rel_posix(path: str) -> str:
