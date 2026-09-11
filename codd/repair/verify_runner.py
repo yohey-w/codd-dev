@@ -203,6 +203,44 @@ class _RuntimeVerificationState:
     cdp_browser_config: dict[str, Any] | None = None
 
 
+NODE_MODULES_DIRNAME = "node_modules"
+
+
+def _linked_installed_dependencies(project_root: Path) -> Path | None:
+    """The project's dependency directory when it is a populated SYMLINK, else ``None``.
+
+    Worktree- and cache-sharing workflows materialize ``node_modules`` as a LINK to
+    a store outside the project instead of a real directory. Package managers
+    refuse to reconcile such a tree and exit nonzero, which made the blocking
+    install preflight record the whole test stage as
+    ``skipped (dependency install failed)`` — a real test run silently downgraded
+    to a skip, with the SHAPE of the dependency directory (link vs directory)
+    nowhere in the message (issue #37).
+
+    Anti-false-green: only a link that resolves to a NON-EMPTY directory counts as
+    an already-installed tree. A dangling link, or one pointing at an empty
+    directory, is NOT installed and must still reach the installer so a genuinely
+    missing dependency tree stays red.
+    """
+    candidate = Path(project_root) / NODE_MODULES_DIRNAME
+    try:
+        if not candidate.is_symlink() or not candidate.is_dir():
+            return None
+        if not any(candidate.iterdir()):
+            return None
+    except OSError:
+        return None
+    return candidate
+
+
+def _link_target_note(path: Path) -> str:
+    """``node_modules -> /some/store`` for an operator-readable message."""
+    try:
+        return f"{NODE_MODULES_DIRNAME} -> {os.readlink(path)}"
+    except OSError:
+        return NODE_MODULES_DIRNAME
+
+
 class VerifyRunner:
     """Run CoDD verification inside the current Python process."""
 
@@ -231,6 +269,9 @@ class VerifyRunner:
         self._fallback_used: bool = False
         self._fallback_reason: str | None = None
         self._observations: list[VerificationObservation] = []
+        # Reason the blocking install preflight did NOT run the installer, if any.
+        # Surfaced on the result's warnings so a skipped install is never silent.
+        self._install_preflight_note: str | None = None
 
     def run(self) -> VerificationResult:
         """Reset DAG state, run C1-C7 checks, then run executable verification tests.
@@ -244,6 +285,7 @@ class VerifyRunner:
         """
 
         self._observations = []
+        self._install_preflight_note = None
         self.reset_dag_cache()
         if not self._has_codd_yaml():
             return self._error_result("codd_config", f"codd.yaml not found in {self.project_root}")
@@ -293,7 +335,8 @@ class VerifyRunner:
             install_failure = self._run_install_preflight(settings)
             if install_failure is not None:
                 failures.append(install_failure)
-                tests_summary = "skipped (dependency install failed)"
+                cause = install_failure.details.get("skip_reason") or "dependency install failed"
+                tests_summary = f"skipped ({cause})"
             else:
                 typecheck_executed, typecheck_failure = self._run_typecheck_command(settings)
                 if typecheck_failure is not None:
@@ -337,6 +380,8 @@ class VerifyRunner:
         coverage_warning = incomplete_verification_warning(runtime_results)
         if coverage_warning is not None:
             result.warnings.append(coverage_warning)
+        if self._install_preflight_note is not None:
+            result.warnings.append(self._install_preflight_note)
         return result
 
     def reset_dag_cache(self) -> None:
@@ -491,6 +536,18 @@ class VerifyRunner:
             return None
         if not self._is_node_project(settings):
             return None
+        # An already-installed dependency tree reached through a LINK is a valid
+        # installation, but package managers cannot reconcile it in place. Treat it
+        # as installed and SKIP the installer — stating why, so the skip is never
+        # mistaken for a silent pass (issue #37).
+        linked = _linked_installed_dependencies(self.project_root)
+        if linked is not None:
+            self._install_preflight_note = (
+                "dependency install skipped: "
+                f"{_link_target_note(linked)} is a symlink to an existing, non-empty "
+                "dependency tree (treated as already installed)"
+            )
+            return None
         command = node_install_command(self.project_root)
         timeout = _install_timeout_seconds(settings)
         try:
@@ -517,17 +574,32 @@ class VerifyRunner:
             )
         if completed.returncode == 0:
             return None
+        # ANSI stripped at the capture boundary (#40) — the operator-facing tail and
+        # every regex over it must see plain text.
         output = _command_output_tail(strip_ansi(completed.stdout), strip_ansi(completed.stderr))
+        # Name the SHAPE of the dependency directory when it is a link: a failure
+        # against a linked tree is not a dependency/network/lockfile problem, and
+        # the generic message sent operators hunting the wrong cause (issue #37).
+        link_path = self.project_root / NODE_MODULES_DIRNAME
+        linked_cause = link_path.is_symlink()
+        skip_reason = "dependency install failed"
+        cause_note = ""
+        if linked_cause:
+            cause_note = f" [{_link_target_note(link_path)} is a symlink, not a directory]"
+            skip_reason = f"dependency install failed: {NODE_MODULES_DIRNAME} is a symlink"
         return VerificationFailure(
             check_name="install_preflight",
             source="install_preflight",
             message=(
-                f"dependency install failed (exit {completed.returncode}): {command}\n{output}"
+                f"dependency install failed (exit {completed.returncode}):"
+                f"{cause_note} {command}\n{output}"
             ).rstrip(),
             details={
                 "command": command,
                 "exit_code": completed.returncode,
                 "output": output,
+                "node_modules_is_symlink": linked_cause,
+                "skip_reason": skip_reason,
                 # Honest environment failure — NOT a code-repair target.
                 "failure_class": "environment_build_error",
                 "code_addressable": False,

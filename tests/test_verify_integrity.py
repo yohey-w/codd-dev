@@ -530,3 +530,77 @@ def test_defaults_yaml_declares_the_fx3_verify_keys() -> None:
     assert verify["test_timeout_seconds"] == 600
     assert verify["install_preflight"] is True
     assert verify["install_timeout_seconds"] == 900
+
+
+# ═══════════════════════════════════════════════════════════
+# #37 — a LINKED dependency tree is installed, not a failed install
+# ═══════════════════════════════════════════════════════════
+
+
+def _link_dependencies(tmp_path: Path, *, populated: bool) -> Path:
+    """Materialize ``node_modules`` as a SYMLINK to an external store."""
+    # Unique per test: the store must not be inherited from a sibling test.
+    store = tmp_path.parent / f"{tmp_path.name}-store" / "node_modules"
+    store.mkdir(parents=True, exist_ok=True)
+    if populated:
+        package = store / "left-pad"
+        package.mkdir(exist_ok=True)
+        (package / "index.js").write_text("module.exports = 1;\n", encoding="utf-8")
+    link = tmp_path / "node_modules"
+    link.symlink_to(store, target_is_directory=True)
+    return link
+
+
+def test_symlinked_node_modules_counts_as_installed_and_tests_run(tmp_path, monkeypatch) -> None:
+    # A worktree/cache-sharing setup links the dependency tree instead of copying
+    # it. The installer cannot reconcile a link and exits nonzero — which used to
+    # record the whole test stage as "skipped (dependency install failed)".
+    _patch_dag_pipeline_green(monkeypatch)
+    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    _link_dependencies(tmp_path, populated=True)
+    # The installer would FAIL if it ran at all.
+    monkeypatch.setattr(verify_runner_module, "node_install_command", lambda root: "false")
+
+    result = VerifyRunner(tmp_path, _node_settings(test_command="true")).run()
+
+    assert not [f for f in result.failures if f.check_name == "install_preflight"]
+    assert result.tests_executed is True  # the real test run is no longer downgraded
+    # The skip is never silent: the reason is on the result, not just on stdout.
+    assert any("symlink" in w for w in result.warnings)
+
+
+def test_empty_linked_node_modules_still_runs_the_installer(tmp_path, monkeypatch) -> None:
+    # Anti-false-green: a link to an EMPTY tree is not an installation. The
+    # installer must still run (and its failure stay honest), and the message must
+    # name the link SHAPE instead of sending operators after a network/lockfile
+    # cause.
+    _patch_dag_pipeline_green(monkeypatch)
+    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    _link_dependencies(tmp_path, populated=False)
+    monkeypatch.setattr(verify_runner_module, "node_install_command", lambda root: "false")
+
+    result = VerifyRunner(tmp_path, _node_settings()).run()
+
+    install_failures = [f for f in result.failures if f.check_name == "install_preflight"]
+    assert install_failures, "an empty linked tree must still reach the installer"
+    failure = install_failures[0]
+    assert failure.details["node_modules_is_symlink"] is True
+    assert "symlink" in failure.message
+    assert "symlink" in result.tests_summary  # the skip reason names the real cause
+
+
+def test_real_directory_node_modules_is_unaffected(tmp_path, monkeypatch) -> None:
+    # The ordinary case is untouched: a real dependency directory still runs the
+    # installer, and its failure keeps the generic (non-link) reason.
+    _patch_dag_pipeline_green(monkeypatch)
+    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    (tmp_path / "node_modules" / "left-pad").mkdir(parents=True)
+    monkeypatch.setattr(verify_runner_module, "node_install_command", lambda root: "false")
+
+    result = VerifyRunner(tmp_path, _node_settings()).run()
+
+    install_failures = [f for f in result.failures if f.check_name == "install_preflight"]
+    assert install_failures
+    assert install_failures[0].details["node_modules_is_symlink"] is False
+    assert result.tests_summary == "skipped (dependency install failed)"
+    assert not any("symlink" in w for w in result.warnings)
