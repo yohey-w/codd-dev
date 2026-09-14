@@ -339,10 +339,13 @@ def _regex_foreign_keys(
     """
     matches: list[dict[str, Any]] = []
 
-    # 表制約は文字列の中身を空白で潰した版に対して探す。
-    # `default 'FOREIGN KEY (fake) REFERENCES fake (id)'` のような値を
-    # 外部キーとして数えないため。長さは変わらないので位置はずれない。
-    for match in _TABLE_LEVEL_FK.finditer(_blank_string_literals(statement_text)):
+    # 表制約は元の文をそのまま探す＝本PR以前とまったく同じ手続き。
+    # 文字列の中身を空白で潰せば `default 'FOREIGN KEY (fk) REFERENCES fake (id)'`
+    # のような偽の外部キーは消せるが、SQLite が受け付ける
+    # `REFERENCES 'parent'(id)`（単一引用符の識別子）まで巻き添えで消える。
+    # 偽FKは本PR以前からある誤検出で、本PRの主題ではない。
+    # ここを触らないと決めておけば、表制約の検出結果は構造的に減らない。
+    for match in _TABLE_LEVEL_FK.finditer(statement_text):
         matches.append(
             {
                 "name": match.group("name") or "",

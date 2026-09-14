@@ -200,12 +200,33 @@ def test_references_inside_a_string_default_is_not_a_foreign_key() -> None:
     ]
 
 
-def test_table_level_foreign_key_written_inside_a_string_is_not_counted() -> None:
+def test_single_quoted_identifier_after_references_is_still_a_foreign_key() -> None:
+    """SQLite は識別子を単一引用符でも書ける（`REFERENCES \'parent\'(id)`）。
+
+    文字列リテラルを空白で潰してから表制約を探すと、これを巻き添えで消す。
+    表制約は元の文をそのまま探す＝本PR以前と同じ手続きにしてある。
+    """
+    statement = (
+        "CREATE TABLE child(parent_id INTEGER, "
+        "FOREIGN KEY(parent_id) REFERENCES 'parent'(id));"
+    )
+    assert len(_regex_foreign_keys(statement, "child")) == 1
+
+
+def test_table_level_foreign_key_written_inside_a_string_is_still_counted() -> None:
+    """既知の未対応（本PR以前からの誤検出・回帰ではない）。
+
+    文字列の中に表制約の形が書いてあると外部キーとして数える。
+    潰すと上の SQLite の識別子まで消えるので、本PRでは触らない。
+    """
     statement = (
         "create table t (note text default 'FOREIGN KEY (fake) REFERENCES fake (id)', "
         "p uuid references parent (id));"
     )
-    assert [fk["columns"][0] for fk in _regex_foreign_keys(statement, "t")] == ["p"]
+    assert sorted(fk["columns"][0] for fk in _regex_foreign_keys(statement, "t")) == [
+        "fake",
+        "p",
+    ]
 
 
 @pytest.mark.parametrize(
