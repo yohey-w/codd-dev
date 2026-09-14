@@ -581,6 +581,42 @@ def test_name_folding_does_not_merge_names_that_differ_by_a_separator(tmp_path):
     assert found and found[0]["reason"] == "target_not_executed"
 
 
+def test_changing_fail_fast_does_expire_a_run(tmp_path):
+    """`fail_fast` decides whether the checks after the first failure run at all,
+    which is the execution PLAN, not the output location."""
+
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root)
+    config_path = root / "codd" / "codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["runtime_smoke"]["report"] = {"fail_fast": True}
+    config_path.write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["reason"] == "config_changed"
+
+
+def test_a_record_that_names_no_target_does_not_certify_a_configured_one(tmp_path):
+    """Every record CoDD writes carries the target; a blank one came from elsewhere."""
+
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root, target_url="")
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["reason"] == "target_changed"
+
+
+def test_the_word_false_is_not_a_pass(tmp_path):
+    """The ledger is hand-editable and `bool("false")` is True."""
+
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root)
+    ledger = root / "codd" / "runtime_ledger.json"
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    payload["passed"] = "false"
+    ledger.write_text(json.dumps(payload), encoding="utf-8")
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["reason"] == "run_failed"
+
+
 def test_a_malformed_execution_record_reads_as_no_evidence(tmp_path):
     root = _runtime_project(tmp_path)
     (root / "codd" / "runtime_ledger.json").write_text("{not json", encoding="utf-8")
@@ -664,7 +700,7 @@ def _record_runtime_run(
     checks: list[tuple[str, str, bool, bool]] | None = None,
     hours_ago: float = 0.0,
     config_digest: str | None = None,
-    target_url: str = "",
+    target_url: str | None = None,
 ) -> Path:
     """Seed the execution record a real runtime run would have left behind.
 
@@ -681,6 +717,11 @@ def _record_runtime_run(
     )
 
     rows = checks if checks is not None else [("Smoke connectivity", "connectivity", True, True)]
+    if target_url is None:
+        # By default the run went where the project points: a real run records
+        # the effective dev-server URL, and a blank one means "somewhere else".
+        config = yaml.safe_load((root / "codd" / "codd.yaml").read_text(encoding="utf-8")) or {}
+        target_url = str(((config.get("runtime_smoke") or {}).get("dev_server") or {}).get("url") or "")
     record = RuntimeExecutionRecord(
         recorded_at=datetime.now(timezone.utc) - timedelta(hours=hours_ago),
         passed=all(passed or not executed for _name, _category, executed, passed in rows),

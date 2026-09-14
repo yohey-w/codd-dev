@@ -1607,3 +1607,77 @@ runtime_smoke:
     record = _ledger(project)
     assert record is not None
     assert record.target_url == "http://staging.internal:8080"
+
+
+def test_t48_a_failed_write_does_not_leave_an_older_record_standing(tmp_path, monkeypatch):
+    """Yesterday's green ledger must not survive a run that could not overwrite it."""
+
+    project = _project(
+        tmp_path,
+        """
+runtime_smoke:
+  enabled: true
+  db_check:
+    command: "check-db"
+  dev_server:
+    url: "http://127.0.0.1:3000"
+  report:
+    log_to_file: false
+""",
+    )
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+    )
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.httpx.get",
+        lambda *args, **kwargs: SimpleNamespace(status_code=200),
+    )
+
+    run_runtime_smoke(project)  # leaves a record behind
+    assert _ledger(project) is not None
+
+    monkeypatch.setattr("codd.runtime_record.write_runtime_ledger", lambda *a, **k: None)
+    result = run_runtime_smoke(project)
+
+    assert result.ledger_status == "write_failed"
+    assert _ledger(project) is None  # the older record is gone, not standing
+
+
+def test_t49_an_unremovable_older_record_is_reported_as_such(tmp_path, monkeypatch):
+    project = _project(
+        tmp_path,
+        """
+runtime_smoke:
+  enabled: true
+  db_check:
+    command: "check-db"
+  dev_server:
+    url: "http://127.0.0.1:3000"
+  report:
+    log_to_file: false
+""",
+    )
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+    )
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.httpx.get",
+        lambda *args, **kwargs: SimpleNamespace(status_code=200),
+    )
+    run_runtime_smoke(project)
+
+    monkeypatch.setattr("codd.runtime_record.write_runtime_ledger", lambda *a, **k: None)
+
+    real_unlink = Path.unlink
+
+    def refuse(self, *args, **kwargs):
+        if self.name == "runtime_ledger.json":
+            raise PermissionError("read-only")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    result = run_runtime_smoke(project)
+
+    assert result.ledger_status == "stale_record_left"

@@ -500,12 +500,15 @@ def runtime_execution_evidence(
             EXECUTION_REASON_TEXT[EXECUTION_CONFIG_CHANGED].format(ledger=display),
         )
     configured = _configured_target(config)
-    if record.target_url and configured and record.target_url != configured:
+    # A record that names no target while the project configures one is not a
+    # match either: every record this CoDD writes carries the target it went
+    # against, so a blank one is a record from somewhere else.
+    if configured and record.target_url != configured:
         return (
             record,
             EXECUTION_TARGET_CHANGED,
             EXECUTION_REASON_TEXT[EXECUTION_TARGET_CHANGED].format(
-                recorded=record.target_url, configured=configured
+                recorded=record.target_url or "(unrecorded)", configured=configured
             ),
         )
     if max_age_hours is not None:

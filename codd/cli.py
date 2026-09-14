@@ -6190,10 +6190,23 @@ def _run_runtime_smoke_gate(path: str, runtime_base_url: str | None, runtime_ski
             "[codd verify] Runtime execution record: "
             f"{_display_path(smoke_result.ledger_path, Path(path).resolve())} (commit it)"
         )
-    elif smoke_result.ledger_status:
-        # Not a false green — the next verification will honestly report that no
-        # run is on record — but the evidence this run produced is gone, and a
-        # silent loss is how the acceptance gate goes quiet again.
+    elif smoke_result.ledger_status == "stale_record_left":
+        # The one branch that IS a false green: an older, passing record survived
+        # a run that could not overwrite it, so the next verification would read
+        # yesterday's verdict as today's. Fail rather than leave that standing.
+        click.echo(
+            "[FAIL] Step 8 could not write the runtime execution record, and the "
+            "EARLIER record could not be removed either. The next `codd verify` would "
+            "read that stale record as current evidence. Remove "
+            f"`{_display_path(Path(path).resolve() / 'codd' / 'runtime_ledger.json', Path(path).resolve())}` "
+            "(or fix the permissions) before relying on this run.",
+            err=True,
+        )
+        raise SystemExit(1)
+    elif smoke_result.ledger_status == "write_failed":
+        # Not a false green — no record now stands, so the next verification
+        # honestly reports that no run is on record — but the evidence this run
+        # produced is gone, and a silent loss is how the gate goes quiet again.
         click.echo(
             "[WARN] Runtime execution record could NOT be written. This run's evidence "
             "is lost: the next `codd verify` will report `runtime_evidence_not_executed` "

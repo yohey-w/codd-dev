@@ -42,10 +42,11 @@ LEDGER_VERSION = 1
 # change to either means an earlier run no longer covers what is declared today.
 DIGESTED_SECTIONS = ("runtime_smoke", "runtime")
 
-# ...minus the sub-key that decides only where OUTPUT is written. Moving a report
+# ...minus the keys that decide only where OUTPUT is written. Moving a report
 # file does not change what was exercised, and expiring a run over it would train
-# owners to ignore the finding.
-UNDIGESTED_SUBKEYS = {"runtime_smoke": ("report",)}
+# owners to ignore the finding. `report.fail_fast` is NOT among them: it decides
+# whether the checks after the first failure run at all, which is the plan.
+UNDIGESTED_REPORT_KEYS = ("log_to_file", "file_path")
 
 # Fold only the separators one NAME is spelled with. `.` and `/` are left alone:
 # collapsing them would make `a.b`, `a/b` and `ab` one name.
@@ -168,12 +169,22 @@ def runtime_config_digest(project_root: Path | str) -> str:
     payload: dict[str, Any] = {}
     for section in DIGESTED_SECTIONS:
         value = config.get(section)
-        if isinstance(value, Mapping):
-            value = {
-                key: item
-                for key, item in value.items()
-                if key not in UNDIGESTED_SUBKEYS.get(section, ())
-            }
+        if section == "runtime_smoke" and isinstance(value, Mapping):
+            report = value.get("report")
+            if isinstance(report, Mapping):
+                kept = {
+                    key: item
+                    for key, item in report.items()
+                    if key not in UNDIGESTED_REPORT_KEYS
+                }
+                value = dict(value)
+                # An empty remainder is dropped, not stored: `report: {file_path:
+                # ...}` must hash the same as no `report:` at all, or declaring
+                # where output goes would expire the run after all.
+                if kept:
+                    value["report"] = kept
+                else:
+                    value.pop("report", None)
         payload[section] = value
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -192,6 +203,16 @@ def ledger_path(project_root: Path | str, codd_dir: Path | None = None) -> Path:
     except Exception:  # pragma: no cover - config-less project
         resolved = None
     return (Path(resolved) if resolved else root / "codd") / LEDGER_FILENAME
+
+
+def _strict_bool(raw: Any) -> bool:
+    """Only a real JSON ``true`` is true.
+
+    ``bool("false")`` is ``True``, so coercing a hand-edited string would read the
+    word "false" as a pass.
+    """
+
+    return raw is True
 
 
 def _parse_recorded_at(raw: Any) -> datetime | None:
@@ -243,15 +264,15 @@ def load_runtime_ledger(
             RuntimeCheckRecord(
                 name=str(raw.get("name", "")),
                 category=str(raw.get("category", "")),
-                passed=bool(raw.get("passed", False)),
-                skipped=bool(raw.get("skipped", False)),
+                passed=_strict_bool(raw.get("passed")),
+                skipped=_strict_bool(raw.get("skipped")),
             )
         )
     if not any(check.executed for check in checks):
         return None
     return RuntimeExecutionRecord(
         recorded_at=recorded_at,
-        passed=bool(payload.get("passed", False)),
+        passed=_strict_bool(payload.get("passed")),
         config_digest=str(payload.get("config_digest", "")),
         checks=tuple(checks),
         target_url=str(payload.get("target_url", "")),
@@ -302,6 +323,7 @@ def write_runtime_ledger(
 
 NOTHING_EXECUTED = "nothing_executed"
 WRITE_FAILED = "write_failed"
+STALE_RECORD_LEFT = "stale_record_left"
 
 
 def record_runtime_execution(
@@ -342,4 +364,17 @@ def record_runtime_execution(
         target_url=target_url or "",
     )
     written = write_runtime_ledger(project_root, record, codd_dir)
-    return (written, "") if written is not None else (None, WRITE_FAILED)
+    if written is not None:
+        return written, ""
+    # The write failed. An OLDER record must not survive this run: yesterday's
+    # green ledger plus today's unrecordable run reads as evidence for a system
+    # that has since been proved otherwise. Remove it, and if even that is
+    # refused, say the stale record is still standing.
+    stale = ledger_path(project_root, codd_dir)
+    try:
+        stale.unlink()
+    except FileNotFoundError:
+        return None, WRITE_FAILED
+    except OSError:
+        return None, STALE_RECORD_LEFT
+    return None, WRITE_FAILED

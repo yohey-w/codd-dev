@@ -143,11 +143,13 @@ never adopted the `verified_by` column) declares no such mapping, so a passing
 run of the project's own stage satisfies it. CoDD does not invent a
 correspondence the project never wrote down.
 
-The digest is taken over the project's **own** `runtime_smoke` (minus its
-`report:` block, which decides where output is written and not what is
-exercised) and `runtime` sections, read from `codd.yaml` itself rather than from
-the defaults-merged view — so upgrading CoDD, or moving a report file, does not
-expire a run that still covers what the project targets.
+The digest is taken over the project's **own** `runtime_smoke` and `runtime`
+sections, read from `codd.yaml` itself rather than from the defaults-merged view
+— so upgrading CoDD does not expire every recorded run in every project at once.
+Only `report.log_to_file` and `report.file_path` are left out of it: they decide
+where output is written, not what is exercised. `report.fail_fast` stays IN,
+because it decides whether the checks after the first failure run at all, and
+that is the plan rather than the paperwork.
 
 Like the manual ledger, this file is a project artifact meant to be committed
 and read in diffs: it is the standing answer to "when did the declared runtime
@@ -185,5 +187,24 @@ ran can honestly write.
   OFF the ordinary `unbound_severity` applies, because such a project has no
   runtime path to run at all.
 - A ledger the runner could not write (a read-only checkout, a full disk) is a
-  lost artifact, not a false green: the next verification honestly reports
-  `no_record`. Step 8 says so loudly on stderr rather than failing the run.
+  lost artifact, not a false green: the run's own record simply does not exist,
+  and the next verification honestly reports `no_record`. Step 8 says so loudly
+  on stderr rather than failing the run. The one branch that IS a false green —
+  an EARLIER, passing record surviving a run that could not overwrite it, so
+  yesterday's verdict reads as today's — is not left standing: the stale record
+  is removed, and if even that is refused, Step 8 FAILS and names the file.
+- A `--runtime-skip` narrows what a run proves, and the ledger records exactly
+  which checks were skipped, but the check does not yet reason about the gap: a
+  run in which one category passed and the rest were skipped by the operator
+  still reads as a passing run for an inferred obligation. What is auditable is
+  in the file; what is judged is only pass/fail.
+- The ledger is a JSON file in the repository, so it is **hand-editable**, and
+  nothing here pretends otherwise. What the loader refuses is the accident and
+  the shortcut, not the forgery: an unknown format version, a record listing no
+  executed check, a `"passed": "false"` that Python's `bool()` would read as
+  true. Proof against a deliberate edit would need signing and provenance, which
+  is a different mechanism from this one.
+- Runtime evidence is **not bound to implementation content** (see above). This
+  is the largest remaining gap and it is deliberate for now: closing it needs a
+  digest both the runner and the gate can compute over the same file set, and
+  the runner has no dependency graph.
