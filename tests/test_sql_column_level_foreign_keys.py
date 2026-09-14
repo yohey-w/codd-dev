@@ -1,0 +1,316 @@
+"""列制約で書かれた外部キーの抽出。
+
+SQL は外部キーを2通りで書ける:
+  表制約:  FOREIGN KEY (a) REFERENCES parent (id)
+  列制約:  a uuid not null references parent (id)   ← FOREIGN KEY 語が無い
+
+列制約は PostgreSQL / MySQL / SQLite いずれでも一般的な書き方であり、
+これを取りこぼすと「参照整合性が無い」という誤った所見が出る
+（実例: 45本の FK を持つスキーマを「FK数0」と報告した）。
+"""
+
+import pytest
+
+from codd.parsing.schemas import _regex_foreign_keys
+
+
+@pytest.mark.parametrize(
+    "label, statement, expected",
+    [
+        (
+            "列制約・参照列あり",
+            "create table child (id uuid primary key, parent_id uuid not null references parent (id));",
+            1,
+        ),
+        (
+            "列制約・参照列を省略（親の主キーに解決される）",
+            "create table child (parent_id uuid references parent);",
+            1,
+        ),
+        (
+            "表制約（従来から拾えていた形）",
+            "create table child (id uuid, foreign key (parent_id) references parent (id));",
+            1,
+        ),
+        (
+            "1行にまとめた定義でも拾う",
+            "create table t (id uuid primary key, a_id uuid references a (id), b_id uuid references b (id));",
+            2,
+        ),
+        (
+            "引用符つき識別子",
+            'create table t ("parent_id" uuid references "parent" ("id"));',
+            1,
+        ),
+        (
+            "スキーマ修飾された親テーブル",
+            "create table t (tenant_id uuid not null references public.tenant (id));",
+            1,
+        ),
+        (
+            "外部キーが無ければ0",
+            "create table t (id uuid primary key, name text not null);",
+            0,
+        ),
+    ],
+)
+def test_foreign_key_count(label: str, statement: str, expected: int) -> None:
+    assert len(_regex_foreign_keys(statement, "t")) == expected, label
+
+
+def test_table_level_and_column_level_are_both_counted() -> None:
+    statement = """create table t (
+        id uuid primary key,
+        a_id uuid not null references a (id),
+        b_id uuid references b (id) on delete cascade,
+        foreign key (c_id) references c (id)
+    );"""
+    assert len(_regex_foreign_keys(statement, "t")) == 3
+
+
+def test_column_level_extraction_records_the_reference() -> None:
+    result = _regex_foreign_keys(
+        "create table child (parent_id uuid not null references public.parent (id));",
+        "child",
+    )
+    assert result == [
+        {
+            "name": "",
+            "table": "child",
+            "columns": ["parent_id"],
+            "references_table": "public.parent",
+            "references_columns": ["id"],
+        }
+    ]
+
+
+def test_comment_before_a_column_does_not_hide_its_foreign_key() -> None:
+    """列定義の直前にコメントが挟まっても取りこぼさない。
+
+    "," と列名の間に別行が入ると、コメントを除去しない実装では
+    その列の外部キーだけが静かに欠落する。
+    """
+    statement = """create table facility (
+        id uuid primary key default gen_random_uuid(),
+        tenant_id uuid not null references tenant (id),
+        -- ER図の "||" 側をNOT NULL FKとして表現する
+        item_set_id uuid not null references item_set (id),
+        /* ブロックコメントでも同じ */
+        report_definition_id uuid not null references report_definition (id)
+    );"""
+    columns = [fk["columns"][0] for fk in _regex_foreign_keys(statement, "facility")]
+    assert columns == ["tenant_id", "item_set_id", "report_definition_id"]
+
+
+def test_references_inside_a_comment_is_not_counted() -> None:
+    statement = "create table t (id uuid primary key); -- references nothing"
+    assert _regex_foreign_keys(statement, "t") == []
+
+
+def test_double_dash_inside_a_string_literal_is_not_a_comment() -> None:
+    """文字列リテラルの中の "--" を行コメントと誤認すると、後続が丸ごと消える。
+
+    コメント除去を文字列リテラルを跨いで行うと、本PR以前は拾えていた
+    表制約の外部キーまで検出できなくなる（回帰）。
+    """
+    statement = (
+        "create table t (sep text default '--', "
+        "foreign key (parent_id) references parent (id));"
+    )
+    assert len(_regex_foreign_keys(statement, "t")) == 1
+
+    column_level = (
+        "create table t (sep text default '--', parent_id uuid references parent (id));"
+    )
+    assert [fk["columns"][0] for fk in _regex_foreign_keys(column_level, "t")] == [
+        "parent_id"
+    ]
+
+
+def test_block_comment_opener_inside_a_string_literal_is_not_a_comment() -> None:
+    statement = (
+        "create table t (glob text default '/*', "
+        "foreign key (parent_id) references parent (id));"
+    )
+    assert len(_regex_foreign_keys(statement, "t")) == 1
+
+
+def test_doubled_quote_inside_a_string_literal_does_not_end_it() -> None:
+    """SQL のエスケープは引用符の二重化。'' を終端と誤ると以降の解釈がずれる。"""
+    statement = (
+        "create table t (note text default 'it''s -- fine', "
+        "parent_id uuid references parent (id));"
+    )
+    assert [fk["columns"][0] for fk in _regex_foreign_keys(statement, "t")] == [
+        "parent_id"
+    ]
+
+
+def test_double_dash_inside_a_quoted_identifier_is_not_a_comment() -> None:
+    statement = (
+        'create table t ("odd--name" text, '
+        "foreign key (parent_id) references parent (id));"
+    )
+    assert len(_regex_foreign_keys(statement, "t")) == 1
+
+
+def test_column_name_is_not_taken_from_inside_a_type_parameter_list() -> None:
+    """`numeric(10,2)` のカンマを列区切りと誤ると、列名が "2" になる。
+
+    外部キーの本数は合っていても、どの列が親を参照しているかが誤る。
+    """
+    result = _regex_foreign_keys(
+        "create table t (amount numeric(10,2) references currency (code));", "t"
+    )
+    assert [fk["columns"][0] for fk in result] == ["amount"]
+
+
+def test_column_name_is_not_taken_from_inside_a_string_default() -> None:
+    result = _regex_foreign_keys(
+        "create table t (tag text default 'a,b' references taglist (code));", "t"
+    )
+    assert [fk["columns"][0] for fk in result] == ["tag"]
+
+
+def test_public_path_keeps_foreign_keys_after_a_real_comment_line() -> None:
+    """公開の抽出経路は改行を空白に潰す。潰したあとにコメントを除去すると、
+    行コメント "--" の終端が失われ、文の残り全部（既存の表制約FKを含む）が消える。
+    """
+    from codd.parsing.schemas import _extract_sql_schema
+
+    content = """create table facility (
+        id uuid primary key,
+        -- ER図の "||" 側をNOT NULL FKとして表現する
+        tenant_id uuid not null references tenant (id),
+        item_set_id uuid not null references item_set (id),
+        foreign key (report_definition_id) references report_definition (id)
+    );"""
+    schema = _extract_sql_schema(content, "schema.sql")
+    columns = sorted(fk["columns"][0] for fk in schema.foreign_keys)
+    assert columns == ["item_set_id", "report_definition_id", "tenant_id"]
+
+
+def test_references_inside_a_string_default_is_not_a_foreign_key() -> None:
+    statement = (
+        "create table t (note text default 'references parent (id)', "
+        "parent_id uuid references parent (id));"
+    )
+    assert [fk["columns"][0] for fk in _regex_foreign_keys(statement, "t")] == [
+        "parent_id"
+    ]
+
+
+def test_single_quoted_identifier_after_references_is_still_a_foreign_key() -> None:
+    """SQLite は識別子を単一引用符でも書ける（`REFERENCES \'parent\'(id)`）。
+
+    文字列リテラルを空白で潰してから表制約を探すと、これを巻き添えで消す。
+    表制約は元の文をそのまま探す＝本PR以前と同じ手続きにしてある。
+    """
+    statement = (
+        "CREATE TABLE child(parent_id INTEGER, "
+        "FOREIGN KEY(parent_id) REFERENCES 'parent'(id));"
+    )
+    assert len(_regex_foreign_keys(statement, "child")) == 1
+
+
+def test_table_level_foreign_key_written_inside_a_string_is_still_counted() -> None:
+    """既知の未対応（本PR以前からの誤検出・回帰ではない）。
+
+    文字列の中に表制約の形が書いてあると外部キーとして数える。
+    潰すと上の SQLite の識別子まで消えるので、本PRでは触らない。
+    """
+    statement = (
+        "create table t (note text default 'FOREIGN KEY (fake) REFERENCES fake (id)', "
+        "p uuid references parent (id));"
+    )
+    assert sorted(fk["columns"][0] for fk in _regex_foreign_keys(statement, "t")) == [
+        "fake",
+        "p",
+    ]
+
+
+@pytest.mark.parametrize(
+    "label, statement",
+    [
+        (
+            "PostgreSQL のドル引用",
+            "create table t (s text default $$--$$, "
+            "foreign key (p) references parent (id));",
+        ),
+        (
+            "MySQL のバックスラッシュエスケープ",
+            "create table t (s text default 'it\\'s -- fine', "
+            "foreign key (p) references parent (id));",
+        ),
+        (
+            "T-SQL の角括弧識別子",
+            "create table t ([odd--name] text, "
+            "foreign key (p) references parent (id));",
+        ),
+    ],
+)
+def test_dialect_quoting_does_not_swallow_a_following_foreign_key(
+    label: str, statement: str
+) -> None:
+    """方言ごとの引用の中の "--" を行コメントと誤ると、後続の表制約FKが消える。
+
+    いずれも本PR以前は拾えていたケースなので、取りこぼしは回帰になる。
+    """
+    assert len(_regex_foreign_keys(statement, "t")) == 1, label
+
+
+def test_trailing_backslash_in_a_standard_string_still_closes_it() -> None:
+    """バックスラッシュは方言の分かれ道。
+
+    MySQL では `\\'` がエスケープ、PostgreSQL の標準文字列ではただの文字。
+    エスケープと読んだ結果、文字列が閉じなくなる（＝残り全部を飲み込む）なら、
+    閉じる読み方を採る。どちらの方言でも後続の外部キーを失わない。
+    """
+    postgres = "create table t (s text default '\\', foreign key (p) references parent (id));"
+    mysql = "create table t (s text default 'it\\'s -- fine', foreign key (p) references parent (id));"
+    assert len(_regex_foreign_keys(postgres, "t")) == 1
+    assert len(_regex_foreign_keys(mysql, "t")) == 1
+
+
+def test_double_minus_between_operands_is_subtraction_not_a_comment() -> None:
+    """`default 1--2` は「1 から -2 を引く」。コメントと誤ると後続FKが消える。
+
+    直後が文字なら（`--コメント`）コメントのまま。空白の有無では切らない——
+    PostgreSQL / SQLite は空白なしの `--コメント` もコメントだから。
+    """
+    from codd.parsing.schemas import _extract_sql_schema
+
+    subtraction = (
+        "create table t (n int default 1--2, foreign key (p) references parent (id));"
+    )
+    assert len(_regex_foreign_keys(subtraction, "t")) == 1
+    assert len(_extract_sql_schema(subtraction, "schema.sql").foreign_keys) == 1
+
+    comment = (
+        "create table t (a int,\n--コメント\n foreign key (p) references parent (id));"
+    )
+    assert len(_extract_sql_schema(comment, "schema.sql").foreign_keys) == 1
+
+
+@pytest.mark.parametrize(
+    "label, statement",
+    [
+        ("生成列の減算 a--b", "create table t (a int, b int, c int as (a--b), "
+         "foreign key (p) references parent (id));"),
+        ("ブロックコメントを挟んだ減算 a-/*gap*/-b",
+         "create table t (a int, b int, c int as (a-/*gap*/-b), "
+         "foreign key (p) references parent (id));"),
+    ],
+)
+def test_comment_lexing_never_costs_a_table_level_foreign_key(
+    label: str, statement: str
+) -> None:
+    """表制約はコメント除去を通さない経路で拾う。
+
+    コメント除去は列制約のためだけに要る仕組み。方言の字句を読み違えても、
+    本PR以前から拾えていた表制約まで道連れにしてはいけない。
+    """
+    from codd.parsing.schemas import _extract_sql_schema
+
+    assert len(_regex_foreign_keys(statement, "t")) == 1, label
+    assert len(_extract_sql_schema(statement, "schema.sql").foreign_keys) == 1, label
