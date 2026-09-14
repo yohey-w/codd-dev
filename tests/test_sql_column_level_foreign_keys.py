@@ -236,3 +236,16 @@ def test_dialect_quoting_does_not_swallow_a_following_foreign_key(
     いずれも本PR以前は拾えていたケースなので、取りこぼしは回帰になる。
     """
     assert len(_regex_foreign_keys(statement, "t")) == 1, label
+
+
+def test_trailing_backslash_in_a_standard_string_still_closes_it() -> None:
+    """バックスラッシュは方言の分かれ道。
+
+    MySQL では `\\'` がエスケープ、PostgreSQL の標準文字列ではただの文字。
+    エスケープと読んだ結果、文字列が閉じなくなる（＝残り全部を飲み込む）なら、
+    閉じる読み方を採る。どちらの方言でも後続の外部キーを失わない。
+    """
+    postgres = "create table t (s text default '\\', foreign key (p) references parent (id));"
+    mysql = "create table t (s text default 'it\\'s -- fine', foreign key (p) references parent (id));"
+    assert len(_regex_foreign_keys(postgres, "t")) == 1
+    assert len(_regex_foreign_keys(mysql, "t")) == 1

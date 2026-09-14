@@ -177,13 +177,24 @@ def _skip_sql_quoted(text: str, index: int) -> int:
         return len(text) if end == -1 else end + len(tag)
 
     quote = text[index]
-    closer = _SQL_QUOTES[quote]
+    if quote == "\'":
+        # バックスラッシュを方言差の分かれ道として扱う。
+        #   MySQL:      'it\\'s'  → \\' はエスケープで、文字列はまだ閉じない
+        #   PostgreSQL: 'C:\\'    → \\ はただの文字で、次の ' で閉じる
+        # 見分けはつかないので、まずエスケープありで読み、それだと
+        # 閉じないときだけエスケープなしで読み直す。
+        # 「閉じない」＝残り全部を文字列とみなす＝後続のFKを全部失う、なので
+        # 閉じる読み方があるならそちらを採る。
+        escaped = _scan_quoted(text, index, quote, quote, backslash_escapes=True)
+        if escaped < len(text):
+            return escaped
+        return _scan_quoted(text, index, quote, quote, backslash_escapes=False)
+    return _scan_quoted(text, index, quote, _SQL_QUOTES[quote], backslash_escapes=False)
+
+def _scan_quoted(text: str, index: int, quote: str, closer: str, *, backslash_escapes: bool) -> int:
     cursor = index + 1
     while cursor < len(text):
-        # MySQL はバックスラッシュでエスケープする（'it\\'s'）。
-        # PostgreSQL の標準文字列ではバックスラッシュはただの文字だが、
-        # 誤って飛ばしても失うのは1文字で、引用の終端は取り違えない。
-        if quote == "\'" and text[cursor] == "\\" and cursor + 1 < len(text):
+        if backslash_escapes and text[cursor] == "\\" and cursor + 1 < len(text):
             cursor += 2
             continue
         if text[cursor] == closer:
@@ -214,6 +225,10 @@ def _strip_sql_comments(statement_text: str) -> str:
             out.append(statement_text[cursor:end])
             cursor = end
             continue
+        # 注: MySQL は "--" の直後に空白が要るので `default 1--2` は減算だが、
+        # PostgreSQL / SQLite は空白なしの `--コメント` もコメント。
+        # 空白を必須にすると後者（実務で最も多い書き方）を取りこぼすので、
+        # ここでは空白を要求しない。`1--2` は取りこぼす（既知・方言の分かれ道）。
         if statement_text.startswith("--", cursor):
             newline = statement_text.find("\n", cursor)
             cursor = length if newline == -1 else newline  # 改行は残す
