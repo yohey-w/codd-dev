@@ -26,6 +26,7 @@ class SmokeResult:
     overall_passed: bool
     markdown_section: str
     report_path: Path | None = None
+    ledger_path: Path | None = None
 
     @property
     def passed(self) -> bool:
@@ -147,7 +148,36 @@ def _finish(runtime_config: RuntimeSmokeConfig, checks: list[CheckResult], *, wr
     result = SmokeResult(checks=checks, overall_passed=overall_passed, markdown_section=markdown)
     if write_report and runtime_config.report.log_to_file:
         result.report_path = write_markdown_report(result, _report_path(runtime_config))
+    if runtime_config.enabled:
+        result.ledger_path = _record_execution(runtime_config, checks)
     return result
+
+
+def _record_execution(runtime_config: RuntimeSmokeConfig, checks: list[CheckResult]) -> Path | None:
+    """Leave a machine-readable record that this stage RAN.
+
+    ``runtime_smoke.enabled: true`` only declares the stage; the acceptance
+    gate needs proof it executed, and a Markdown report under a timestamped
+    (and switch-offable) path is not something a check can read. So each run
+    that executed at least one check writes ``<codd-dir>/runtime_ledger.json``
+    — what ran, whether it passed, and the digest of the configuration it ran
+    against. A run that executed nothing writes nothing.
+
+    Never fails the run: a project whose configuration cannot be re-read, or a
+    filesystem that refuses the write, loses the evidence, not the verdict.
+    """
+
+    from codd.config import load_project_config
+    from codd.runtime_record import record_runtime_execution
+
+    try:
+        config = load_project_config(runtime_config.project_root)
+    except (FileNotFoundError, ValueError, OSError):
+        config = {}
+    try:
+        return record_runtime_execution(runtime_config.project_root, config, checks)
+    except OSError:  # pragma: no cover - defensive: evidence is never worth the run
+        return None
 
 
 def _should_stop(runtime_config: RuntimeSmokeConfig, checks: list[CheckResult]) -> bool:

@@ -1454,3 +1454,92 @@ def test_t42_doctor_accepts_business_screen_with_ancestor_navigation(tmp_path):
 
     assert result.exit_code == 0
     assert "escape route/navigation evidence" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# execution ledger — the record that turns a declaration into evidence
+# ---------------------------------------------------------------------------
+
+
+def _ledger(project):
+    from codd.runtime_record import load_runtime_ledger
+
+    return load_runtime_ledger(project)
+
+
+def test_t43_an_executed_run_records_what_ran_and_against_which_config(tmp_path, monkeypatch):
+    project = _project(
+        tmp_path,
+        """
+runtime_smoke:
+  enabled: true
+  db_check:
+    command: "check-db"
+  dev_server:
+    url: "http://127.0.0.1:3000"
+  report:
+    log_to_file: false
+""",
+    )
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+    )
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.httpx.get",
+        lambda *args, **kwargs: SimpleNamespace(status_code=200),
+    )
+
+    result = run_runtime_smoke(project)
+
+    assert result.ledger_path is not None and result.ledger_path.exists()
+    record = _ledger(project)
+    assert record is not None
+    # A run that FAILED is still a run: the verdict is recorded as it was, and
+    # Step 8 already reported the failure in red. What the ledger certifies is
+    # execution, not success.
+    assert record.passed == result.overall_passed
+    assert record.executed_checks  # at least one check actually ran
+
+    # The digest is the one the acceptance gate recomputes from the same config.
+    from codd.config import load_project_config
+    from codd.runtime_record import runtime_config_digest
+
+    assert record.config_digest == runtime_config_digest(load_project_config(project))
+
+
+def test_t44_a_disabled_stage_records_nothing(tmp_path):
+    project = _project(tmp_path, "runtime_smoke:\n  enabled: false\n")
+
+    result = run_runtime_smoke(project)
+
+    assert result.ledger_path is None
+    assert _ledger(project) is None
+
+
+def test_t45_a_run_that_executed_nothing_records_nothing(tmp_path):
+    """A record of nothing is not a record — it would re-open the hole."""
+
+    project = _project(
+        tmp_path,
+        """
+runtime_smoke:
+  enabled: true
+  db_check:
+    command: "check-db"
+  dev_server:
+    url: "http://127.0.0.1:3000"
+  e2e:
+    command: "npx playwright test"
+  report:
+    log_to_file: false
+""",
+    )
+
+    result = run_runtime_smoke(
+        project, skip_checks=["db", "dev-server", "connectivity", "e2e", "crud-flow", "action-outcome", "global-action"]
+    )
+
+    assert all(check.skipped for check in result.checks)
+    assert result.ledger_path is None
+    assert _ledger(project) is None

@@ -448,12 +448,27 @@ acceptance_evidence:
   # the one class it has already cleaned up, or run strict with one class still
   # amber while it migrates. Commented out = follow the mode.
   #   runtime_severity            runtime obligation, runtime stage disabled
+  #   runtime_execution_severity  runtime stage ENABLED but never recorded a run
   #   unbound_severity            AC bound to no machine-checked evidence
   #   vacuous_severity            evidence that runs nothing / asserts nothing
   #   param_severity              declared parameter absent from its evidence
   #   undeclared_numeric_severity literal number in an AC with no params
   #   reachability_severity       evidence off the shipped path / unknown
   #   freshness_severity          manual evidence stale against its implementation
+  # `runtime_execution_severity` is the one class that stays amber even under
+  # `mode: strict` unless set explicitly. `enabled: true` is a DECLARATION; the
+  # evidence is the execution record the runtime smoke runner writes to
+  # <codd-dir>/runtime_ledger.json (existence + matching `config_digest` +
+  # freshness +, for an explicit `verified_by: runtime:<case>`, a non-skipped
+  # check of that name). Without a record the criterion is unproven, not proven
+  # wrong — and upgrading CoDD must not turn an existing build red on its own.
+  # Commit the ledger like any other evidence artifact; `codd verify --runtime`
+  # refreshes it.
+  #
+  # Age at which a recorded runtime run stops counting as evidence. Unset =
+  # never expires by clock alone (a configuration change still expires it via
+  # `config_digest`). Set a number of hours to require a recent run.
+  # runtime_max_age_hours: <unset: no age limit>
   # A requirement legitimately spans layers, so several files claiming the same
   # id is normal. The finding fires only when a requirement is implemented on
   # BOTH sides of the shipped path and the evidence proves the off-path side.

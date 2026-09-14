@@ -11,6 +11,8 @@ Findings, by the half of the invariant they defend:
 
 * (a) ``runtime_evidence_not_executable`` — a runtime obligation in a project
   whose runtime stage is switched off (a silent skip that used to read green);
+  ``runtime_evidence_not_executed`` — the stage is switched ON but nothing ever
+  recorded a run of it, so the switch is a declaration standing in for evidence;
   ``unbound_acceptance`` / ``unresolved_evidence`` / ``manual_evidence_missing``
   — a criterion that reaches no machine-checked evidence at all.
 * (b) ``off_shipped_path`` / ``multiple_implementers`` / ``reachability_unknown``
@@ -23,7 +25,8 @@ Findings, by the half of the invariant they defend:
 See ``docs/design/acceptance-evidence-invariant.md``.
 
 Generality: the check reads the project's own declarations (requirement tables,
-``operation_flow``, ``runtime_smoke``) and carries no project, framework or
+``operation_flow``, ``runtime_smoke``) and the project's own execution record
+(``<codd-dir>/runtime_ledger.json``), and carries no project, framework or
 language literal. It is dormant for a project that declares no acceptance
 criteria — there is nothing to certify — and every severity is configurable, so
 a project may downgrade a class to amber without losing the finding.
@@ -48,8 +51,10 @@ from codd.acceptance_evidence import (
     read_test_text,
     requirement_anchor_pattern,
     resolve_test_targets,
+    runtime_execution_evidence,
     runtime_obligations,
     runtime_smoke_enabled,
+    unexecuted_runtime_targets,
     scan_requirement_anchor_hits,
     substance_at,
     substantive_tests,
@@ -139,21 +144,19 @@ class AcceptanceEvidenceCheck(DagCheck):
         anchors = {req_id: set(by_path) for req_id, by_path in anchor_hits.items()}
 
         violations: list[dict[str, Any]] = []
-        violations.extend(
-            _runtime_violations(criteria, declared_ids, config, resolved.runtime_severity)
+        # Only an EXECUTED runtime obligation counts as a binding. When the
+        # runtime stage is off — or on but never run — the criterion really is
+        # proved by nothing, and the findings ask for different remedies (turn
+        # the stage on / run it / write a test) — that is two defects, not one
+        # reported twice.
+        runtime_findings, runtime_bound_ids = _runtime_violations(
+            criteria,
+            declared_ids,
+            config,
+            resolved,
+            project_root=root,
         )
-        # Only an EXECUTABLE runtime obligation counts as a binding. When the
-        # runtime stage is off, the criterion really is proved by nothing, and
-        # the two findings ask for two different remedies (turn the stage on /
-        # write a test) — that is two defects, not one reported twice.
-        runtime_bound_ids = (
-            frozenset(
-                criterion.req_id
-                for criterion, _targets in runtime_obligations(criteria, declared_ids)
-            )
-            if runtime_smoke_enabled(config)
-            else frozenset()
-        )
+        violations.extend(runtime_findings)
         binding_violations, bound_by_req = _binding_violations(
             root,
             criteria,
@@ -195,24 +198,42 @@ def _runtime_violations(
     criteria: Iterable[AcceptanceCriterion],
     declared_ids: frozenset[str],
     config: Mapping[str, Any],
-    severity: str,
-) -> list[dict[str, Any]]:
-    """Runtime-evidence obligations in a project whose runtime stage cannot run.
+    settings: Any,
+    *,
+    project_root: Path,
+) -> tuple[list[dict[str, Any]], frozenset[str]]:
+    """Runtime-evidence obligations that no run has actually discharged.
 
-    This is the *demotion* hole: ``codd verify`` runs Step 8 only when the
-    project's ``runtime_smoke`` section is enabled, and an absent section made
-    the step vanish without a word. A criterion whose evidence is "the running
-    system does X" then had NO evidence while the run still reported green.
+    Two holes of the same shape, one behind the other:
+
+    * the *demotion* hole — ``codd verify`` runs Step 8 only when the project's
+      ``runtime_smoke`` section is enabled, and an absent section made the step
+      vanish without a word. A criterion whose evidence is "the running system
+      does X" then had NO evidence while the run still reported green.
+    * the *declaration* hole — turning the section on costs one line of YAML and
+      used to be read as evidence by itself. Measured on a real project: adding
+      ``enabled: true``, with no dev server and no ``codd verify --runtime``,
+      moved this finding 56 -> 0 and ``unbound_acceptance`` 57 -> 19. The
+      cheapest way to clear the gate was to declare rather than to verify.
+
+    So the question is not "is the stage switched on" but "did it RUN": a
+    recorded execution (``<codd-dir>/runtime_ledger.json``) whose configuration
+    digest still matches, is inside the project's freshness window, and — for an
+    explicitly named ``runtime:<case>`` — actually exercised that case.
+
+    Returns the findings and the criteria whose runtime obligation IS
+    discharged, which are the only ones that count as bound downstream.
     """
 
-    if runtime_smoke_enabled(config):
-        return []
-    violations: list[dict[str, Any]] = []
-    for criterion, targets in runtime_obligations(criteria, declared_ids):
-        violations.append(
+    obligations = runtime_obligations(criteria, declared_ids)
+    if not obligations:
+        return [], frozenset()
+
+    if not runtime_smoke_enabled(config):
+        return [
             {
                 "type": "runtime_evidence_not_executable",
-                "severity": severity,
+                "severity": settings.runtime_severity,
                 "req_id": criterion.req_id,
                 "source": criterion.source,
                 "targets": list(targets),
@@ -227,8 +248,48 @@ def _runtime_violations(
                     "or downgrade with `acceptance_evidence.runtime_severity: amber`."
                 ),
             }
+            for criterion, targets in obligations
+        ], frozenset()
+
+    record, reason, detail = runtime_execution_evidence(
+        project_root,
+        config,
+        max_age_hours=settings.runtime_max_age_hours,
+    )
+
+    violations: list[dict[str, Any]] = []
+    bound: set[str] = set()
+    for criterion, targets in obligations:
+        missing = unexecuted_runtime_targets(criterion, targets, record) if not reason else ()
+        if not reason and not missing:
+            bound.add(criterion.req_id)
+            continue
+        why = detail if reason else (
+            "the recorded run exercised no check answering to "
+            + ", ".join(f"`{target}`" for target in missing)
         )
-    return violations
+        violations.append(
+            {
+                "type": "runtime_evidence_not_executed",
+                "severity": settings.runtime_execution_severity,
+                "req_id": criterion.req_id,
+                "source": criterion.source,
+                "targets": list(targets),
+                "reason": reason or "target_not_executed",
+                "message": (
+                    f"[acceptance_evidence] Acceptance criterion `{criterion.req_id}` "
+                    f"({criterion.source}) declares runtime evidence "
+                    f"({', '.join(targets)}) and `runtime_smoke` is enabled, but "
+                    f"{why}. `enabled: true` declares the stage; it does not execute "
+                    "it, so the criterion still rests on nothing. Run "
+                    "`codd verify --runtime` and commit the execution record it "
+                    "writes, declare different evidence in the criterion's "
+                    "`verified_by` column, or downgrade with "
+                    "`acceptance_evidence.runtime_execution_severity: amber`."
+                ),
+            }
+        )
+    return violations, frozenset(bound)
 
 
 # ---------------------------------------------------------------------------
