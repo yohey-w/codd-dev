@@ -269,3 +269,27 @@ def test_double_minus_between_operands_is_subtraction_not_a_comment() -> None:
         "create table t (a int,\n--コメント\n foreign key (p) references parent (id));"
     )
     assert len(_extract_sql_schema(comment, "schema.sql").foreign_keys) == 1
+
+
+@pytest.mark.parametrize(
+    "label, statement",
+    [
+        ("生成列の減算 a--b", "create table t (a int, b int, c int as (a--b), "
+         "foreign key (p) references parent (id));"),
+        ("ブロックコメントを挟んだ減算 a-/*gap*/-b",
+         "create table t (a int, b int, c int as (a-/*gap*/-b), "
+         "foreign key (p) references parent (id));"),
+    ],
+)
+def test_comment_lexing_never_costs_a_table_level_foreign_key(
+    label: str, statement: str
+) -> None:
+    """表制約はコメント除去を通さない経路で拾う。
+
+    コメント除去は列制約のためだけに要る仕組み。方言の字句を読み違えても、
+    本PR以前から拾えていた表制約まで道連れにしてはいけない。
+    """
+    from codd.parsing.schemas import _extract_sql_schema
+
+    assert len(_regex_foreign_keys(statement, "t")) == 1, label
+    assert len(_extract_sql_schema(statement, "schema.sql").foreign_keys) == 1, label

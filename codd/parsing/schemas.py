@@ -321,9 +321,23 @@ _HAS_FOREIGN_KEY = re.compile(r"\bFOREIGN\s+KEY\b", re.IGNORECASE)
 # まだ拾えない（列定義リストの括弧が無いため）。本PR以前も 0 本で、回帰ではない。
 
 
-def _regex_foreign_keys(statement_text: str, table_name: str) -> list[dict[str, Any]]:
+def _regex_foreign_keys(
+    statement_text: str,
+    table_name: str,
+    comment_free_text: str | None = None,
+) -> list[dict[str, Any]]:
+    """外部キーを2通りの書き方から拾う。
+
+    表制約はコメントを除去しない元の文から探す。コメント除去は列制約の
+    ためだけに要る仕組みで、そこで方言の字句（"--" が減算か・引用の閉じ方）を
+    読み違えると、本PR以前から拾えていた表制約まで消えてしまう。
+    経路を分けておけば、字句判定を誤っても失うのは新しく増えた分だけで、
+    従来の検出結果は減らない。
+
+    comment_free_text は、呼び出し側が改行を空白に潰す前にコメントを
+    除去した版（行コメントの終端は改行なので、潰した後では取れない）。
+    """
     matches: list[dict[str, Any]] = []
-    statement_text = _strip_sql_comments(statement_text)
 
     # 表制約は文字列の中身を空白で潰した版に対して探す。
     # `default 'FOREIGN KEY (fake) REFERENCES fake (id)'` のような値を
@@ -339,7 +353,9 @@ def _regex_foreign_keys(statement_text: str, table_name: str) -> list[dict[str, 
             }
         )
 
-    for definition in _sql_table_definitions(statement_text):
+    if comment_free_text is None:
+        comment_free_text = _strip_sql_comments(statement_text)
+    for definition in _sql_table_definitions(comment_free_text):
         if _HAS_FOREIGN_KEY.search(definition):
             continue  # 表制約。上のループで拾い済み
         reference = _REFERENCES_CLAUSE.search(_blank_string_literals(definition))
@@ -435,12 +451,12 @@ def _extract_sql_schema_from_tree(root: Any, content: str, file_path: str) -> Sq
                         if constraint_text:
                             constraints.append(constraint_text)
             schema.tables.append({"name": table_name, "columns": columns, "constraints": constraints})
-            for foreign_key in _regex_foreign_keys(fk_source, table_name):
+            for foreign_key in _regex_foreign_keys(statement_text, table_name, fk_source):
                 _append_foreign_key(schema, foreign_key, seen_foreign_keys)
         elif node.type == "alter_table":
             table_name = _sql_first_object_name(content_bytes, node)
             if table_name:
-                for foreign_key in _regex_foreign_keys(fk_source, table_name):
+                for foreign_key in _regex_foreign_keys(statement_text, table_name, fk_source):
                     _append_foreign_key(schema, foreign_key, seen_foreign_keys)
         elif node.type == "create_index":
             index = _regex_create_index(statement_text)
@@ -490,12 +506,12 @@ def _extract_sql_schema(content: str, file_path: str) -> SqlSchemaInfo:
                 }
             )
         schema.tables.append({"name": table_name, "columns": columns, "constraints": constraints})
-        schema.foreign_keys.extend(_regex_foreign_keys(_normalize_ws(_strip_sql_comments(table_match.group(0))), table_name))
+        schema.foreign_keys.extend(_regex_foreign_keys(_normalize_ws(table_match.group(0)), table_name, _normalize_ws(_strip_sql_comments(table_match.group(0)))))
 
     for statement in re.findall(r"ALTER\s+TABLE\s+.*?;", content, re.IGNORECASE | re.DOTALL):
         match = re.search(r"ALTER\s+TABLE\s+([^\s;]+)", statement, re.IGNORECASE)
         if match:
-            schema.foreign_keys.extend(_regex_foreign_keys(_normalize_ws(_strip_sql_comments(statement)), match.group(1)))
+            schema.foreign_keys.extend(_regex_foreign_keys(_normalize_ws(statement), match.group(1), _normalize_ws(_strip_sql_comments(statement))))
 
     for index_match in re.finditer(r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+.*?;", content, re.IGNORECASE | re.DOTALL):
         index = _regex_create_index(_normalize_ws(index_match.group(0)))
