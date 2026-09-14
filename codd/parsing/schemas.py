@@ -245,6 +245,24 @@ def _sql_table_definitions(statement_text: str) -> list[str]:
         definitions.append("".join(current))
     return [d.strip() for d in definitions if d.strip()]
 
+def _blank_string_literals(definition: str) -> str:
+    """文字列リテラルの中身を空白で埋める（長さは変えない）。
+
+    `default \'references parent(id)\'` のような値を外部キーと読み違えないため。
+    引用符つき識別子（" と `）は列名・テーブル名なので残す。
+    """
+    out: list[str] = []
+    cursor = 0
+    while cursor < len(definition):
+        if definition[cursor] == "\'":
+            end = _skip_sql_quoted(definition, cursor)
+            out.append(" " * (end - cursor))
+            cursor = end
+            continue
+        out.append(definition[cursor])
+        cursor += 1
+    return "".join(out)
+
 _HAS_FOREIGN_KEY = re.compile(r"\bFOREIGN\s+KEY\b", re.IGNORECASE)
 
 # TODO: `ALTER TABLE t ADD COLUMN p uuid REFERENCES parent (id)` の列制約は
@@ -269,7 +287,7 @@ def _regex_foreign_keys(statement_text: str, table_name: str) -> list[dict[str, 
     for definition in _sql_table_definitions(statement_text):
         if _HAS_FOREIGN_KEY.search(definition):
             continue  # 表制約。上のループで拾い済み
-        reference = _REFERENCES_CLAUSE.search(definition)
+        reference = _REFERENCES_CLAUSE.search(_blank_string_literals(definition))
         if reference is None:
             continue
         head = _COLUMN_LEVEL_FK.match(definition)
@@ -334,6 +352,9 @@ def _extract_sql_schema_from_tree(root: Any, content: str, file_path: str) -> Sq
 
     for node in _iter_named_nodes(root):
         statement_text = _normalize_ws(_node_text(content_bytes, node))
+        # 外部キーだけは改行を潰す前にコメントを落とす。潰したあとでは
+        # 行コメント "--" の終端（改行）が消え、文以降の既存FKまで削れる。
+        fk_source = _normalize_ws(_strip_sql_comments(_node_text(content_bytes, node)))
         if node.type == "create_table":
             table_name = _sql_first_object_name(content_bytes, node)
             if not table_name:
@@ -359,12 +380,12 @@ def _extract_sql_schema_from_tree(root: Any, content: str, file_path: str) -> Sq
                         if constraint_text:
                             constraints.append(constraint_text)
             schema.tables.append({"name": table_name, "columns": columns, "constraints": constraints})
-            for foreign_key in _regex_foreign_keys(statement_text, table_name):
+            for foreign_key in _regex_foreign_keys(fk_source, table_name):
                 _append_foreign_key(schema, foreign_key, seen_foreign_keys)
         elif node.type == "alter_table":
             table_name = _sql_first_object_name(content_bytes, node)
             if table_name:
-                for foreign_key in _regex_foreign_keys(statement_text, table_name):
+                for foreign_key in _regex_foreign_keys(fk_source, table_name):
                     _append_foreign_key(schema, foreign_key, seen_foreign_keys)
         elif node.type == "create_index":
             index = _regex_create_index(statement_text)
@@ -414,12 +435,12 @@ def _extract_sql_schema(content: str, file_path: str) -> SqlSchemaInfo:
                 }
             )
         schema.tables.append({"name": table_name, "columns": columns, "constraints": constraints})
-        schema.foreign_keys.extend(_regex_foreign_keys(_normalize_ws(table_match.group(0)), table_name))
+        schema.foreign_keys.extend(_regex_foreign_keys(_normalize_ws(_strip_sql_comments(table_match.group(0))), table_name))
 
     for statement in re.findall(r"ALTER\s+TABLE\s+.*?;", content, re.IGNORECASE | re.DOTALL):
         match = re.search(r"ALTER\s+TABLE\s+([^\s;]+)", statement, re.IGNORECASE)
         if match:
-            schema.foreign_keys.extend(_regex_foreign_keys(_normalize_ws(statement), match.group(1)))
+            schema.foreign_keys.extend(_regex_foreign_keys(_normalize_ws(_strip_sql_comments(statement)), match.group(1)))
 
     for index_match in re.finditer(r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+.*?;", content, re.IGNORECASE | re.DOTALL):
         index = _regex_create_index(_normalize_ws(index_match.group(0)))

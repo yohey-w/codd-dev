@@ -170,3 +170,31 @@ def test_column_name_is_not_taken_from_inside_a_string_default() -> None:
         "create table t (tag text default 'a,b' references taglist (code));", "t"
     )
     assert [fk["columns"][0] for fk in result] == ["tag"]
+
+
+def test_public_path_keeps_foreign_keys_after_a_real_comment_line() -> None:
+    """公開の抽出経路は改行を空白に潰す。潰したあとにコメントを除去すると、
+    行コメント "--" の終端が失われ、文の残り全部（既存の表制約FKを含む）が消える。
+    """
+    from codd.parsing.schemas import _extract_sql_schema
+
+    content = """create table facility (
+        id uuid primary key,
+        -- ER図の "||" 側をNOT NULL FKとして表現する
+        tenant_id uuid not null references tenant (id),
+        item_set_id uuid not null references item_set (id),
+        foreign key (report_definition_id) references report_definition (id)
+    );"""
+    schema = _extract_sql_schema(content, "schema.sql")
+    columns = sorted(fk["columns"][0] for fk in schema.foreign_keys)
+    assert columns == ["item_set_id", "report_definition_id", "tenant_id"]
+
+
+def test_references_inside_a_string_default_is_not_a_foreign_key() -> None:
+    statement = (
+        "create table t (note text default 'references parent (id)', "
+        "parent_id uuid references parent (id));"
+    )
+    assert [fk["columns"][0] for fk in _regex_foreign_keys(statement, "t")] == [
+        "parent_id"
+    ]
