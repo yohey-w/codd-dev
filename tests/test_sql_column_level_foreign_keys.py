@@ -249,3 +249,23 @@ def test_trailing_backslash_in_a_standard_string_still_closes_it() -> None:
     mysql = "create table t (s text default 'it\\'s -- fine', foreign key (p) references parent (id));"
     assert len(_regex_foreign_keys(postgres, "t")) == 1
     assert len(_regex_foreign_keys(mysql, "t")) == 1
+
+
+def test_double_minus_between_operands_is_subtraction_not_a_comment() -> None:
+    """`default 1--2` は「1 から -2 を引く」。コメントと誤ると後続FKが消える。
+
+    直後が文字なら（`--コメント`）コメントのまま。空白の有無では切らない——
+    PostgreSQL / SQLite は空白なしの `--コメント` もコメントだから。
+    """
+    from codd.parsing.schemas import _extract_sql_schema
+
+    subtraction = (
+        "create table t (n int default 1--2, foreign key (p) references parent (id));"
+    )
+    assert len(_regex_foreign_keys(subtraction, "t")) == 1
+    assert len(_extract_sql_schema(subtraction, "schema.sql").foreign_keys) == 1
+
+    comment = (
+        "create table t (a int,\n--コメント\n foreign key (p) references parent (id));"
+    )
+    assert len(_extract_sql_schema(comment, "schema.sql").foreign_keys) == 1

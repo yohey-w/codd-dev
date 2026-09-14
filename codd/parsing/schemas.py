@@ -205,6 +205,20 @@ def _scan_quoted(text: str, index: int, quote: str, closer: str, *, backslash_es
         cursor += 1
     return len(text)  # 閉じていない引用符。末尾まで文字列として扱う
 
+def _is_double_minus_operator(text: str, index: int) -> bool:
+    """`1--2`（1 から -2 を引く）の "--" か。
+
+    MySQL は "--" の直後に空白を要求するのでこれは演算子。PostgreSQL / SQLite は
+    空白なしの `--コメント` もコメントなので、空白の有無だけでは切れない。
+    そこで「両側が式に見えるとき」だけ演算子と読む——直前が値の終わりで、
+    直後が数値か開き括弧のときに限る。`--コメント`（直後が文字）はコメントのまま。
+    """
+    if index == 0:
+        return False
+    before = text[index - 1]
+    after = text[index + 2] if index + 2 < len(text) else ""
+    return (before.isalnum() or before in "_)") and (after.isdigit() or after == "(")
+
 def _strip_sql_comments(statement_text: str) -> str:
     """コメントを取り除く。文字列リテラルと引用符つき識別子の中は触らない。
 
@@ -225,11 +239,9 @@ def _strip_sql_comments(statement_text: str) -> str:
             out.append(statement_text[cursor:end])
             cursor = end
             continue
-        # 注: MySQL は "--" の直後に空白が要るので `default 1--2` は減算だが、
-        # PostgreSQL / SQLite は空白なしの `--コメント` もコメント。
-        # 空白を必須にすると後者（実務で最も多い書き方）を取りこぼすので、
-        # ここでは空白を要求しない。`1--2` は取りこぼす（既知・方言の分かれ道）。
-        if statement_text.startswith("--", cursor):
+        if statement_text.startswith("--", cursor) and not _is_double_minus_operator(
+            statement_text, cursor
+        ):
             newline = statement_text.find("\n", cursor)
             cursor = length if newline == -1 else newline  # 改行は残す
             continue
