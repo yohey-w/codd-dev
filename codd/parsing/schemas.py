@@ -124,18 +124,21 @@ _TABLE_LEVEL_FK = re.compile(
     re.IGNORECASE,
 )
 
-# 列制約。定義の区切り（行頭・"(" ・ ","）直後の列名を捕らえ、同じ定義内の REFERENCES と対にする。
-# 区切りは "(" と "," の直後（幅ゼロの後読み）。行頭を含めると "create table x (" の
-# "create" を列名として拾い、区切りを消費すると "default gen_random_uuid()," のような
-# 直前の閉じ括弧に飲まれて次の列を取りこぼす。
+# 列制約。ひとつの列定義の中から「列名」と「参照先」を取り出す。
+# 定義の切り出しは正規表現ではなく _sql_table_definitions が行う——
+# numeric(10,2) の "," や default 'a,b' の "," は区切りではないので、
+# 正規表現でカンマを区切りとみなすと列名として "2" や "b" を拾ってしまう。
 # 参照列の指定は省略できる（親の主キーに解決される）ので任意扱いにする。
 _COLUMN_LEVEL_FK = re.compile(
-    r"(?<=[(,])\s*(?:CONSTRAINT\s+(?P<name>\w+)\s+)?"
-    r'(?P<column>"[^"]+"|`[^`]+`|\[[^\]]+\]|\w+)'
-    r"(?![\w\s]*\bFOREIGN\s+KEY\b)"
-    r"[^,;\n]*?\bREFERENCES\s+(?P<ref_table>\"[^\"]+\"|`[^`]+`|\[[^\]]+\]|[\w.]+)"
+    r"^\s*(?:CONSTRAINT\s+(?P<name>\w+)\s+)?"
+    r'(?P<column>"[^"]+"|`[^`]+`|\[[^\]]+\]|\w+)(?!\w)',
+    re.IGNORECASE,
+)
+
+_REFERENCES_CLAUSE = re.compile(
+    r"\bREFERENCES\s+(?P<ref_table>\"[^\"]+\"|`[^`]+`|\[[^\]]+\]|[\w.]+)"
     r"\s*(?:\(\s*(?P<ref_columns>[^)]+)\))?",
-    re.IGNORECASE | re.MULTILINE,
+    re.IGNORECASE,
 )
 
 _FK_COLUMN_RESERVED = {
@@ -146,19 +149,107 @@ _FK_COLUMN_RESERVED = {
     "unique",
     "check",
     "references",
+    "exclude",
+    "like",
 }
 
-_SQL_LINE_COMMENT = re.compile(r"--[^\n]*")
-_SQL_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+# 引用符の開き文字 -> 閉じ文字。SQL のエスケープは引用符の二重化（'' や ""）。
+_SQL_QUOTES = {"\'": "\'", '"': '"', "`": "`"}
+
+def _skip_sql_quoted(text: str, index: int) -> int:
+    """text[index] の引用符から、その閉じ引用符の次の位置までを返す。"""
+    closer = _SQL_QUOTES[text[index]]
+    cursor = index + 1
+    while cursor < len(text):
+        if text[cursor] == closer:
+            if cursor + 1 < len(text) and text[cursor + 1] == closer:
+                cursor += 2  # 二重化されたエスケープ。まだ閉じていない
+                continue
+            return cursor + 1
+        cursor += 1
+    return len(text)  # 閉じていない引用符。末尾まで文字列として扱う
 
 def _strip_sql_comments(statement_text: str) -> str:
-    """コメントを取り除く。
+    """コメントを取り除く。文字列リテラルと引用符つき識別子の中は触らない。
 
     列定義の直前にコメント行が挟まると、区切り（"," や "("）と列名の間に
-    別の行が入り、列制約の外部キーを取りこぼす。行数は変えず中身だけ空にする。
+    別の行が入り、列制約の外部キーを取りこぼす。
+
+    ただし "--" や "/*" は文字列の中にも現れる（例: default \'--\'）。
+    そこをコメントの開始と誤ると、そこから行末までが消え、
+    本来拾えていた表制約の外部キーまで検出できなくなる。
     """
-    without_block = _SQL_BLOCK_COMMENT.sub("", statement_text)
-    return _SQL_LINE_COMMENT.sub("", without_block)
+    out: list[str] = []
+    cursor = 0
+    length = len(statement_text)
+    while cursor < length:
+        char = statement_text[cursor]
+        if char in _SQL_QUOTES:
+            end = _skip_sql_quoted(statement_text, cursor)
+            out.append(statement_text[cursor:end])
+            cursor = end
+            continue
+        if statement_text.startswith("--", cursor):
+            newline = statement_text.find("\n", cursor)
+            cursor = length if newline == -1 else newline  # 改行は残す
+            continue
+        if statement_text.startswith("/*", cursor):
+            end = statement_text.find("*/", cursor + 2)
+            cursor = length if end == -1 else end + 2
+            continue
+        out.append(char)
+        cursor += 1
+    return "".join(out)
+
+def _sql_table_definitions(statement_text: str) -> list[str]:
+    """CREATE TABLE の括弧内を、深さ0のカンマで定義単位に割る。
+
+    numeric(10,2) の "," は型パラメータの区切り、default \'a,b\' の "," は
+    ただの文字。どちらも列定義の区切りではない。ここを取り違えると
+    カンマの右隣（"2" や "b"）を列名として拾う。
+    """
+    start = -1
+    depth = 0
+    cursor = 0
+    length = len(statement_text)
+    definitions: list[str] = []
+    current: list[str] = []
+    while cursor < length:
+        char = statement_text[cursor]
+        if char in _SQL_QUOTES:
+            end = _skip_sql_quoted(statement_text, cursor)
+            if start != -1:
+                current.append(statement_text[cursor:end])
+            cursor = end
+            continue
+        if char == "(":
+            depth += 1
+            if depth == 1 and start == -1:
+                start = cursor  # 列定義リストの開き括弧。中身はまだ取らない
+                cursor += 1
+                continue
+        elif char == ")":
+            depth -= 1
+            if depth == 0 and start != -1:
+                definitions.append("".join(current))
+                return [d.strip() for d in definitions if d.strip()]
+        elif char == "," and depth == 1:
+            definitions.append("".join(current))
+            current = []
+            cursor += 1
+            continue
+        if start != -1:
+            current.append(char)
+        cursor += 1
+    if start != -1 and current:
+        definitions.append("".join(current))
+    return [d.strip() for d in definitions if d.strip()]
+
+_HAS_FOREIGN_KEY = re.compile(r"\bFOREIGN\s+KEY\b", re.IGNORECASE)
+
+# TODO: `ALTER TABLE t ADD COLUMN p uuid REFERENCES parent (id)` の列制約は
+# まだ拾えない（列定義リストの括弧が無いため）。本PR以前も 0 本で、回帰ではない。
+
 
 def _regex_foreign_keys(statement_text: str, table_name: str) -> list[dict[str, Any]]:
     matches: list[dict[str, Any]] = []
@@ -175,17 +266,25 @@ def _regex_foreign_keys(statement_text: str, table_name: str) -> list[dict[str, 
             }
         )
 
-    for match in _COLUMN_LEVEL_FK.finditer(statement_text):
-        column = _strip_identifier_quotes(match.group("column"))
+    for definition in _sql_table_definitions(statement_text):
+        if _HAS_FOREIGN_KEY.search(definition):
+            continue  # 表制約。上のループで拾い済み
+        reference = _REFERENCES_CLAUSE.search(definition)
+        if reference is None:
+            continue
+        head = _COLUMN_LEVEL_FK.match(definition)
+        if head is None:
+            continue
+        column = _strip_identifier_quotes(head.group("column"))
         if not column or column.lower() in _FK_COLUMN_RESERVED:
             continue
-        ref_columns_raw = match.group("ref_columns")
+        ref_columns_raw = reference.group("ref_columns")
         matches.append(
             {
-                "name": match.group("name") or "",
+                "name": head.group("name") or "",
                 "table": table_name,
                 "columns": [column],
-                "references_table": _strip_identifier_quotes(match.group("ref_table")),
+                "references_table": _strip_identifier_quotes(reference.group("ref_table")),
                 "references_columns": _split_csv(ref_columns_raw) if ref_columns_raw else [],
             }
         )

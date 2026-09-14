@@ -105,3 +105,68 @@ def test_comment_before_a_column_does_not_hide_its_foreign_key() -> None:
 def test_references_inside_a_comment_is_not_counted() -> None:
     statement = "create table t (id uuid primary key); -- references nothing"
     assert _regex_foreign_keys(statement, "t") == []
+
+
+def test_double_dash_inside_a_string_literal_is_not_a_comment() -> None:
+    """文字列リテラルの中の "--" を行コメントと誤認すると、後続が丸ごと消える。
+
+    コメント除去を文字列リテラルを跨いで行うと、本PR以前は拾えていた
+    表制約の外部キーまで検出できなくなる（回帰）。
+    """
+    statement = (
+        "create table t (sep text default '--', "
+        "foreign key (parent_id) references parent (id));"
+    )
+    assert len(_regex_foreign_keys(statement, "t")) == 1
+
+    column_level = (
+        "create table t (sep text default '--', parent_id uuid references parent (id));"
+    )
+    assert [fk["columns"][0] for fk in _regex_foreign_keys(column_level, "t")] == [
+        "parent_id"
+    ]
+
+
+def test_block_comment_opener_inside_a_string_literal_is_not_a_comment() -> None:
+    statement = (
+        "create table t (glob text default '/*', "
+        "foreign key (parent_id) references parent (id));"
+    )
+    assert len(_regex_foreign_keys(statement, "t")) == 1
+
+
+def test_doubled_quote_inside_a_string_literal_does_not_end_it() -> None:
+    """SQL のエスケープは引用符の二重化。'' を終端と誤ると以降の解釈がずれる。"""
+    statement = (
+        "create table t (note text default 'it''s -- fine', "
+        "parent_id uuid references parent (id));"
+    )
+    assert [fk["columns"][0] for fk in _regex_foreign_keys(statement, "t")] == [
+        "parent_id"
+    ]
+
+
+def test_double_dash_inside_a_quoted_identifier_is_not_a_comment() -> None:
+    statement = (
+        'create table t ("odd--name" text, '
+        "foreign key (parent_id) references parent (id));"
+    )
+    assert len(_regex_foreign_keys(statement, "t")) == 1
+
+
+def test_column_name_is_not_taken_from_inside_a_type_parameter_list() -> None:
+    """`numeric(10,2)` のカンマを列区切りと誤ると、列名が "2" になる。
+
+    外部キーの本数は合っていても、どの列が親を参照しているかが誤る。
+    """
+    result = _regex_foreign_keys(
+        "create table t (amount numeric(10,2) references currency (code));", "t"
+    )
+    assert [fk["columns"][0] for fk in result] == ["amount"]
+
+
+def test_column_name_is_not_taken_from_inside_a_string_default() -> None:
+    result = _regex_foreign_keys(
+        "create table t (tag text default 'a,b' references taglist (code));", "t"
+    )
+    assert [fk["columns"][0] for fk in result] == ["tag"]
