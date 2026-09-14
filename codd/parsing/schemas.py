@@ -154,13 +154,38 @@ _FK_COLUMN_RESERVED = {
 }
 
 # 引用符の開き文字 -> 閉じ文字。SQL のエスケープは引用符の二重化（'' や ""）。
-_SQL_QUOTES = {"\'": "\'", '"': '"', "`": "`"}
+# 角括弧は T-SQL の識別子（閉じは "]"、エスケープは "]]"）。
+_SQL_QUOTES = {"\'": "\'", '"': '"', "`": "`", "[": "]"}
+
+# PostgreSQL のドル引用（$$ ... $$ / $tag$ ... $tag$）。
+_DOLLAR_QUOTE = re.compile(r"\$(\w*)\$")
+
+def _dollar_quote_tag(text: str, index: int) -> str | None:
+    match = _DOLLAR_QUOTE.match(text, index)
+    return match.group(0) if match else None
 
 def _skip_sql_quoted(text: str, index: int) -> int:
-    """text[index] の引用符から、その閉じ引用符の次の位置までを返す。"""
-    closer = _SQL_QUOTES[text[index]]
+    """text[index] の引用符から、その閉じ引用符の次の位置までを返す。
+
+    引用の中身は「コメントでも区切りでもない」ただの文字として飛ばす。
+    ここを甘くすると、値の中の "--" を行コメントの開始と誤り、
+    そこから行末までを捨てて既存の外部キーまで消してしまう。
+    """
+    tag = _dollar_quote_tag(text, index)
+    if tag is not None:  # $$ ... $$ / $tag$ ... $tag$
+        end = text.find(tag, index + len(tag))
+        return len(text) if end == -1 else end + len(tag)
+
+    quote = text[index]
+    closer = _SQL_QUOTES[quote]
     cursor = index + 1
     while cursor < len(text):
+        # MySQL はバックスラッシュでエスケープする（'it\\'s'）。
+        # PostgreSQL の標準文字列ではバックスラッシュはただの文字だが、
+        # 誤って飛ばしても失うのは1文字で、引用の終端は取り違えない。
+        if quote == "\'" and text[cursor] == "\\" and cursor + 1 < len(text):
+            cursor += 2
+            continue
         if text[cursor] == closer:
             if cursor + 1 < len(text) and text[cursor + 1] == closer:
                 cursor += 2  # 二重化されたエスケープ。まだ閉じていない
@@ -184,7 +209,7 @@ def _strip_sql_comments(statement_text: str) -> str:
     length = len(statement_text)
     while cursor < length:
         char = statement_text[cursor]
-        if char in _SQL_QUOTES:
+        if char in _SQL_QUOTES or _dollar_quote_tag(statement_text, cursor):
             end = _skip_sql_quoted(statement_text, cursor)
             out.append(statement_text[cursor:end])
             cursor = end
@@ -216,7 +241,7 @@ def _sql_table_definitions(statement_text: str) -> list[str]:
     current: list[str] = []
     while cursor < length:
         char = statement_text[cursor]
-        if char in _SQL_QUOTES:
+        if char in _SQL_QUOTES or _dollar_quote_tag(statement_text, cursor):
             end = _skip_sql_quoted(statement_text, cursor)
             if start != -1:
                 current.append(statement_text[cursor:end])
@@ -273,7 +298,10 @@ def _regex_foreign_keys(statement_text: str, table_name: str) -> list[dict[str, 
     matches: list[dict[str, Any]] = []
     statement_text = _strip_sql_comments(statement_text)
 
-    for match in _TABLE_LEVEL_FK.finditer(statement_text):
+    # 表制約は文字列の中身を空白で潰した版に対して探す。
+    # `default 'FOREIGN KEY (fake) REFERENCES fake (id)'` のような値を
+    # 外部キーとして数えないため。長さは変わらないので位置はずれない。
+    for match in _TABLE_LEVEL_FK.finditer(_blank_string_literals(statement_text)):
         matches.append(
             {
                 "name": match.group("name") or "",

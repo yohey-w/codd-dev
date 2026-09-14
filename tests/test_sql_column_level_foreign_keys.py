@@ -198,3 +198,41 @@ def test_references_inside_a_string_default_is_not_a_foreign_key() -> None:
     assert [fk["columns"][0] for fk in _regex_foreign_keys(statement, "t")] == [
         "parent_id"
     ]
+
+
+def test_table_level_foreign_key_written_inside_a_string_is_not_counted() -> None:
+    statement = (
+        "create table t (note text default 'FOREIGN KEY (fake) REFERENCES fake (id)', "
+        "p uuid references parent (id));"
+    )
+    assert [fk["columns"][0] for fk in _regex_foreign_keys(statement, "t")] == ["p"]
+
+
+@pytest.mark.parametrize(
+    "label, statement",
+    [
+        (
+            "PostgreSQL のドル引用",
+            "create table t (s text default $$--$$, "
+            "foreign key (p) references parent (id));",
+        ),
+        (
+            "MySQL のバックスラッシュエスケープ",
+            "create table t (s text default 'it\\'s -- fine', "
+            "foreign key (p) references parent (id));",
+        ),
+        (
+            "T-SQL の角括弧識別子",
+            "create table t ([odd--name] text, "
+            "foreign key (p) references parent (id));",
+        ),
+    ],
+)
+def test_dialect_quoting_does_not_swallow_a_following_foreign_key(
+    label: str, statement: str
+) -> None:
+    """方言ごとの引用の中の "--" を行コメントと誤ると、後続の表制約FKが消える。
+
+    いずれも本PR以前は拾えていたケースなので、取りこぼしは回帰になる。
+    """
+    assert len(_regex_foreign_keys(statement, "t")) == 1, label
