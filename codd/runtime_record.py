@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -41,7 +42,14 @@ LEDGER_VERSION = 1
 # change to either means an earlier run no longer covers what is declared today.
 DIGESTED_SECTIONS = ("runtime_smoke", "runtime")
 
-_NORMALISE_RE = re.compile(r"[\s_\-./]+")
+# ...minus the sub-key that decides only where OUTPUT is written. Moving a report
+# file does not change what was exercised, and expiring a run over it would train
+# owners to ignore the finding.
+UNDIGESTED_SUBKEYS = {"runtime_smoke": ("report",)}
+
+# Fold only the separators one NAME is spelled with. `.` and `/` are left alone:
+# collapsing them would make `a.b`, `a/b` and `ab` one name.
+_NORMALISE_RE = re.compile(r"[\s_\-]+")
 
 
 def _normalise(value: str) -> str:
@@ -68,6 +76,12 @@ class RuntimeCheckRecord:
     def executed(self) -> bool:
         return not self.skipped
 
+    @property
+    def discharged(self) -> bool:
+        """Ran AND passed — the only state that proves anything about a target."""
+
+        return self.executed and self.passed
+
     def answers_to(self, target: str) -> bool:
         wanted = _normalise(target)
         if not wanted:
@@ -83,40 +97,84 @@ class RuntimeExecutionRecord:
     passed: bool
     config_digest: str
     checks: tuple[RuntimeCheckRecord, ...] = ()
+    # The effective target the run went against (``--runtime-base-url`` may have
+    # pointed it somewhere other than the configured dev server). Empty when the
+    # run recorded none.
+    target_url: str = ""
 
     @property
     def executed_checks(self) -> tuple[RuntimeCheckRecord, ...]:
         return tuple(check for check in self.checks if check.executed)
 
     def covers(self, target: str) -> bool:
-        """Whether a NON-SKIPPED check of this run answers to *target*.
+        """Whether a check of this run answering to *target* actually PASSED.
 
-        A failed check still counts as executed: Step 8 already reported that
-        failure in red, and reporting it again here would count one defect twice.
+        A failed check is executed but proves nothing, and the ledger is read by
+        every LATER verification — where "it ran, and it was broken" would
+        otherwise pass for proof. A failure elsewhere in the same run does not
+        sink this target: what is asked is whether the named check passed.
         """
 
-        return any(check.answers_to(target) for check in self.executed_checks)
+        return any(check.discharged and check.answers_to(target) for check in self.checks)
 
     def age_hours(self, now: datetime | None = None) -> float:
+        """Hours since the run. NEGATIVE for a record dated in the future.
+
+        Not clamped: a future timestamp (a skewed clock, a hand-edited file) that
+        read as "zero hours old" would be permanently fresh.
+        """
+
         moment = now or datetime.now(timezone.utc)
         if moment.tzinfo is None:
             moment = moment.replace(tzinfo=timezone.utc)
-        return max(0.0, (moment - self.recorded_at).total_seconds() / 3600.0)
+        return (moment - self.recorded_at).total_seconds() / 3600.0
 
 
-def runtime_config_digest(config: Mapping[str, Any] | None) -> str:
-    """Hash of the configuration that decides what the runtime stage exercises.
+def _raw_project_config(project_root: Path | str) -> Mapping[str, Any]:
+    """The project's OWN codd.yaml, unmerged.
 
-    Canonical JSON (sorted keys) of the project's ``runtime_smoke`` and
-    ``runtime`` sections, so the same configuration hashes the same on the
-    producing and the consuming side, and any change to the targets expires the
-    earlier run.
+    Deliberately not the defaults-merged view: merging makes the hash depend on
+    the CoDD version, so upgrading the tool would expire every recorded run
+    across every project at once.
     """
 
-    payload = {
-        section: (config.get(section) if isinstance(config, Mapping) else None)
-        for section in DIGESTED_SECTIONS
-    }
+    import yaml
+
+    from codd.config import find_codd_dir
+
+    root = Path(project_root).resolve()
+    try:
+        codd_dir = find_codd_dir(root)
+    except Exception:  # pragma: no cover - config-less project
+        codd_dir = None
+    path = (Path(codd_dir) if codd_dir else root / "codd") / "codd.yaml"
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return {}
+    return loaded if isinstance(loaded, Mapping) else {}
+
+
+def runtime_config_digest(project_root: Path | str) -> str:
+    """Hash of the configuration that decides what the runtime stage exercises.
+
+    Canonical JSON (sorted keys) of the project's own ``runtime_smoke`` (minus
+    ``report``) and ``runtime`` sections, so the same configuration hashes the
+    same on the producing and the consuming side, and any change to what the
+    stage targets expires the earlier run.
+    """
+
+    config = _raw_project_config(project_root)
+    payload: dict[str, Any] = {}
+    for section in DIGESTED_SECTIONS:
+        value = config.get(section)
+        if isinstance(value, Mapping):
+            value = {
+                key: item
+                for key, item in value.items()
+                if key not in UNDIGESTED_SUBKEYS.get(section, ())
+            }
+        payload[section] = value
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -153,7 +211,15 @@ def load_runtime_ledger(
     project_root: Path | str,
     codd_dir: Path | None = None,
 ) -> RuntimeExecutionRecord | None:
-    """Read the ledger. Missing, malformed or undated reads as NO EVIDENCE."""
+    """Read the ledger. Anything that is not a well-formed record of an actual
+    run reads as NO EVIDENCE: missing, malformed, undated, written by a version
+    of the format this CoDD does not know, or listing no executed check at all.
+
+    That last one matters because the file is hand-editable: ``{"checks": []}``
+    with today's date would otherwise certify every inferred obligation in the
+    project. This is not tamper-proofing — a JSON file never is — it is refusing
+    to read "nothing ran" as "something ran".
+    """
 
     path = ledger_path(project_root, codd_dir)
     try:
@@ -161,6 +227,8 @@ def load_runtime_ledger(
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     if not isinstance(payload, Mapping):
+        return None
+    if payload.get("version") != LEDGER_VERSION:
         return None
     recorded_at = _parse_recorded_at(payload.get("recorded_at"))
     if recorded_at is None:
@@ -179,11 +247,14 @@ def load_runtime_ledger(
                 skipped=bool(raw.get("skipped", False)),
             )
         )
+    if not any(check.executed for check in checks):
+        return None
     return RuntimeExecutionRecord(
         recorded_at=recorded_at,
         passed=bool(payload.get("passed", False)),
         config_digest=str(payload.get("config_digest", "")),
         checks=tuple(checks),
+        target_url=str(payload.get("target_url", "")),
     )
 
 
@@ -200,6 +271,7 @@ def write_runtime_ledger(
         "recorded_at": record.recorded_at.astimezone(timezone.utc).isoformat(),
         "passed": record.passed,
         "config_digest": record.config_digest,
+        "target_url": record.target_url,
         "checks": [
             {
                 "name": check.name,
@@ -210,27 +282,45 @@ def write_runtime_ledger(
             for check in record.checks
         ],
     }
+    body = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    # Written through a sibling temp file and renamed: two runs racing produce
+    # one whole record or the other, never a half-read file that would then be
+    # discarded as malformed.
+    temp = path.with_name(path.name + f".{os.getpid()}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        temp.write_text(body, encoding="utf-8")
+        os.replace(temp, path)
     except OSError:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
         return None
     return path
 
 
+NOTHING_EXECUTED = "nothing_executed"
+WRITE_FAILED = "write_failed"
+
+
 def record_runtime_execution(
     project_root: Path | str,
-    config: Mapping[str, Any] | None,
     checks: Iterable[Any],
+    target_url: str = "",
     codd_dir: Path | None = None,
     now: datetime | None = None,
-) -> Path | None:
+) -> tuple[Path | None, str]:
     """Write the ledger for a run that EXECUTED something; otherwise write nothing.
 
     *checks* are the runner's own result objects (anything carrying ``name`` /
     ``category`` / ``passed`` / ``skipped``). A run in which every check was
     skipped records nothing: a record of nothing is not a record, and writing one
     would re-create the hole this ledger closes.
+
+    Returns ``(path, status)`` — ``status`` is empty on success, and otherwise
+    says which of the two silences happened, so the caller can stay quiet about
+    a run that had nothing to record and say so loudly about evidence it lost.
     """
 
     collected = tuple(
@@ -243,11 +333,13 @@ def record_runtime_execution(
         for check in checks
     )
     if not any(check.executed for check in collected):
-        return None
+        return None, NOTHING_EXECUTED
     record = RuntimeExecutionRecord(
         recorded_at=(now or datetime.now(timezone.utc)).astimezone(timezone.utc),
         passed=all(check.passed or check.skipped for check in collected),
-        config_digest=runtime_config_digest(config),
+        config_digest=runtime_config_digest(project_root),
         checks=collected,
+        target_url=target_url or "",
     )
-    return write_runtime_ledger(project_root, record, codd_dir)
+    written = write_runtime_ledger(project_root, record, codd_dir)
+    return (written, "") if written is not None else (None, WRITE_FAILED)

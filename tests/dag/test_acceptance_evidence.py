@@ -392,7 +392,7 @@ def _explicit_runtime_project(tmp_path: Path) -> Path:
 
 def test_an_explicitly_named_runtime_case_needs_a_check_that_actually_ran(tmp_path):
     root = _explicit_runtime_project(tmp_path)
-    _record_runtime_run(root, checks=[("something else", "connectivity", True)])
+    _record_runtime_run(root, checks=[("something else", "connectivity", True, True)])
     found = _violations(_run_check(root), "runtime_evidence_not_executed")
     assert [item["req_id"] for item in found] == ["R-1"]
     assert found[0]["reason"] == "target_not_executed"
@@ -400,7 +400,7 @@ def test_an_explicitly_named_runtime_case_needs_a_check_that_actually_ran(tmp_pa
 
 def test_a_skipped_check_does_not_discharge_the_case_it_is_named_after(tmp_path):
     root = _explicit_runtime_project(tmp_path)
-    _record_runtime_run(root, checks=[("print_sheet", "e2e", False), ("other", "db", True)])
+    _record_runtime_run(root, checks=[("print_sheet", "e2e", False, False), ("other", "db", True, True)])
     found = _violations(_run_check(root), "runtime_evidence_not_executed")
     assert found and found[0]["reason"] == "target_not_executed"
 
@@ -409,7 +409,7 @@ def test_the_named_case_matches_its_check_across_spellings(tmp_path):
     """`print_sheet` / `Print Sheet` / `print-sheet` are one name, not three."""
 
     root = _explicit_runtime_project(tmp_path)
-    _record_runtime_run(root, checks=[("Print Sheet", "e2e", True)])
+    _record_runtime_run(root, checks=[("Print Sheet", "e2e", True, True)])
     assert _violations(_run_check(root), "runtime_evidence_not_executed") == []
 
 
@@ -418,7 +418,7 @@ def test_an_inferred_obligation_needs_a_run_but_not_a_named_check(tmp_path):
     not invent the correspondence — any recorded run discharges it."""
 
     root = _runtime_project(tmp_path)
-    _record_runtime_run(root, checks=[("whatever the project named it", "db", True)])
+    _record_runtime_run(root, checks=[("whatever the project named it", "db", True, True)])
     assert _violations(_run_check(root), "runtime_evidence_not_executed") == []
 
 
@@ -452,6 +452,133 @@ def test_a_disabled_stage_reports_the_switch_not_the_missing_record(tmp_path):
     result = _run_check(root)
     assert _violations(result, "runtime_evidence_not_executable")
     assert _violations(result, "runtime_evidence_not_executed") == []
+
+
+def test_a_strict_project_waiting_on_a_run_is_amber_not_red(tmp_path):
+    """The migration path has to be walkable.
+
+    A criterion waiting on a run it declared is unbound BECAUSE the run has not
+    happened. Pricing that at `unbound_severity` would leave a strict project red
+    before it can run the stage — and `codd verify --runtime` runs the stage only
+    after the verification it just failed. One defect, one remedy, one severity.
+    """
+
+    root = _runtime_project(tmp_path, strict=True)
+    result = _run_check(root)
+    assert result.passed is True
+    assert result.status == "warn"
+    unbound = _violations(result, "unbound_acceptance")
+    assert [item["req_id"] for item in unbound] == ["R-1"]
+    assert unbound[0]["severity"] == "amber"
+
+
+def test_a_strict_project_with_the_stage_off_keeps_the_ordinary_unbound_severity(tmp_path):
+    """No runtime path at all is a different defect: there is nothing to run."""
+
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(RUNTIME_ROW),
+        operations=RUNTIME_OPERATION,
+        runtime_smoke={"enabled": False},
+        strict=True,
+    )
+    result = _run_check(root)
+    assert result.passed is False
+    unbound = _violations(result, "unbound_acceptance")
+    assert unbound and unbound[0]["severity"] == "red"
+
+
+def test_a_failed_run_does_not_prove_an_inferred_obligation(tmp_path):
+    """It executed — so this is not `no_record` — but a failing run is not proof.
+
+    Within the run Step 8 reports the failure in red. The ledger is read by every
+    LATER verification, and that is where "it ran, and it was broken" would
+    otherwise pass for evidence.
+    """
+
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root, checks=[("Dev server up", "dev-server", True, False)])
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert [item["req_id"] for item in found] == ["R-1"]
+    assert found[0]["reason"] == "run_failed"
+
+
+def test_a_named_case_that_passed_survives_a_failure_beside_it(tmp_path):
+    """A database check failing does not un-prove the case that passed."""
+
+    root = _explicit_runtime_project(tmp_path)
+    _record_runtime_run(
+        root,
+        checks=[("print_sheet", "e2e", True, True), ("DB up", "db", True, False)],
+    )
+    assert _violations(_run_check(root), "runtime_evidence_not_executed") == []
+
+
+def test_a_run_against_a_different_target_is_not_evidence_about_this_one(tmp_path):
+    """`--runtime-base-url` can point a run at another deployment."""
+
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root, target_url="http://staging.internal:3000")
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert [item["req_id"] for item in found] == ["R-1"]
+    assert found[0]["reason"] == "target_changed"
+
+
+def test_moving_the_report_file_does_not_expire_a_run(tmp_path):
+    """`report:` decides where OUTPUT goes, not what is exercised."""
+
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root)
+    config_path = root / "codd" / "codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["runtime_smoke"]["report"] = {"file_path": "somewhere/else.md"}
+    config_path.write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
+    assert _violations(_run_check(root), "runtime_evidence_not_executed") == []
+
+
+def test_a_record_dated_in_the_future_is_not_fresh(tmp_path):
+    """A clock skew or a hand-edited date must not buy permanent freshness."""
+
+    root = _runtime_project(
+        tmp_path,
+        extra_config={"acceptance_evidence": {"runtime_max_age_hours": 6}},
+    )
+    _record_runtime_run(root, hours_ago=-240)
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["reason"] == "stale"
+
+
+def test_a_record_of_no_executed_check_is_not_a_record(tmp_path):
+    """The file is hand-editable; an empty check list must not certify anything."""
+
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root)
+    ledger = root / "codd" / "runtime_ledger.json"
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    payload["checks"] = []
+    ledger.write_text(json.dumps(payload), encoding="utf-8")
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["reason"] == "no_record"
+
+
+def test_a_record_written_by_an_unknown_format_version_is_not_read(tmp_path):
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root)
+    ledger = root / "codd" / "runtime_ledger.json"
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    payload["version"] = 99
+    ledger.write_text(json.dumps(payload), encoding="utf-8")
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["reason"] == "no_record"
+
+
+def test_name_folding_does_not_merge_names_that_differ_by_a_separator(tmp_path):
+    """`print.sheet` and `printsheet` are two names; only spacing folds."""
+
+    root = _explicit_runtime_project(tmp_path)
+    _record_runtime_run(root, checks=[("print.sheet", "e2e", True, True)])
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["reason"] == "target_not_executed"
 
 
 def test_a_malformed_execution_record_reads_as_no_evidence(tmp_path):
@@ -534,18 +661,18 @@ RUNTIME_ON = {"enabled": True, "dev_server": {"url": "http://localhost:3000"}}
 def _record_runtime_run(
     root: Path,
     *,
-    checks: list[tuple[str, str, bool]] | None = None,
+    checks: list[tuple[str, str, bool, bool]] | None = None,
     hours_ago: float = 0.0,
     config_digest: str | None = None,
+    target_url: str = "",
 ) -> Path:
     """Seed the execution record a real runtime run would have left behind.
 
-    ``checks`` are ``(name, category, executed)`` triples — the miniature of what
-    the runner writes. Nothing here names a framework, a URL or a project: the
-    record is a list of check names the project itself chose.
+    ``checks`` are ``(name, category, executed, passed)`` quadruples — the
+    miniature of what the runner writes. Nothing here names a framework, a URL or
+    a project: the record is a list of check names the project itself chose.
     """
 
-    from codd.config import load_project_config
     from codd.runtime_record import (
         RuntimeCheckRecord,
         RuntimeExecutionRecord,
@@ -553,19 +680,16 @@ def _record_runtime_run(
         write_runtime_ledger,
     )
 
-    rows = checks if checks is not None else [("Smoke connectivity", "connectivity", True)]
+    rows = checks if checks is not None else [("Smoke connectivity", "connectivity", True, True)]
     record = RuntimeExecutionRecord(
         recorded_at=datetime.now(timezone.utc) - timedelta(hours=hours_ago),
-        passed=True,
-        config_digest=(
-            config_digest
-            if config_digest is not None
-            else runtime_config_digest(load_project_config(root))
-        ),
+        passed=all(passed or not executed for _name, _category, executed, passed in rows),
+        config_digest=(config_digest if config_digest is not None else runtime_config_digest(root)),
         checks=tuple(
-            RuntimeCheckRecord(name=name, category=category, passed=executed, skipped=not executed)
-            for name, category, executed in rows
+            RuntimeCheckRecord(name=name, category=category, passed=passed, skipped=not executed)
+            for name, category, executed, passed in rows
         ),
+        target_url=target_url,
     )
     written = write_runtime_ledger(root, record)
     assert written is not None

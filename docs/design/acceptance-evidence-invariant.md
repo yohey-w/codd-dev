@@ -76,7 +76,7 @@ markers), and adopting a column makes its declaration authoritative for that row
 | Stage | Invariant | Finding | Severity |
 |---|---|---|---|
 | 1a | (a) demotion | `runtime_evidence_not_executable` — the criterion declares a runtime obligation and `runtime_smoke` is not enabled, so the stage is skipped silently | red |
-| 1b | (a) execution | `runtime_evidence_not_executed` — the stage is enabled but nothing recorded a run of it: no ledger, a ledger written against a different runtime configuration, a ledger older than the configured window, or (for an explicitly declared `runtime:<case>`) a ledger in which no check of that name ran | amber |
+| 1b | (a) execution | `runtime_evidence_not_executed` — the stage is enabled but no run discharged the obligation: no ledger (`no_record`), a ledger written against a different runtime configuration (`config_changed`) or against a different target (`target_changed`), a ledger older than the configured window (`stale`), a run that failed (`run_failed`), or — for an explicitly declared `runtime:<case>` — a ledger in which no check of that name passed (`target_not_executed`) | amber |
 | 2 | (a) wiring, (d) freshness | `vb_registry_missing`, `unbound_acceptance`, `unresolved_evidence`, `manual_evidence_missing`, `stale_manual_evidence` | red |
 | 3 | (c) parameters | `param_not_referenced` (red), `undeclared_numeric` (amber) | red / amber |
 | 4 | (b) shipped path | `off_shipped_path`, `multiple_implementers`, `reachability_unknown` | amber |
@@ -119,18 +119,35 @@ a record a machine can read:
   `name` / `category` / `passed` / `skipped`, and `config_digest`, a hash of the
   project's own `runtime_smoke` + `runtime` configuration as it stood at run
   time. Change what the stage targets and the old run stops certifying it;
-- a missing or malformed ledger reads as **no evidence**, never as evidence —
-  the same rule the manual ledger already follows;
-- a run that FAILED still counts as executed. Step 8 already reported that
-  failure in red; re-reporting it here would be one defect counted twice.
+- a missing, malformed or unversioned ledger reads as **no evidence**, never as
+  evidence — the same rule the manual ledger already follows, and so does a
+  ledger recording no executed check at all, which a hand-written file could
+  otherwise use to certify everything;
+- the ledger also records the **target** the run went against (the effective
+  dev-server URL, which `--runtime-base-url` may have overridden). A run aimed
+  at a different deployment is not evidence about this one;
+- a run that FAILED does not discharge anything. It is still *executed* — the
+  finding says `run_failed`, not "never ran" — but a failing run recorded on
+  Monday must not read as green evidence on Tuesday. Within the run itself Step
+  8 reports the failure in red; the ledger is read by every LATER verification,
+  and that is where "it ran, and it was broken" would otherwise pass for proof.
+  A failure in one check does not sink another: an explicitly named
+  `runtime:<case>` is discharged when the check answering to that name PASSED,
+  whatever else in the same run did not.
 
 Target matching follows the asymmetry the obligation itself is built on: an
 **explicit** `verified_by: runtime:<case>` names a case, so a ledger with no
-non-skipped check of that `name` or `category` has not discharged it; an
+passing check of that `name` or `category` has not discharged it; an
 **inferred** obligation (an `operation_flow.<id>` reference in a project that
-never adopted the `verified_by` column) declares no such mapping, so any valid
-record satisfies it. CoDD does not invent a correspondence the project never
-wrote down.
+never adopted the `verified_by` column) declares no such mapping, so a passing
+run of the project's own stage satisfies it. CoDD does not invent a
+correspondence the project never wrote down.
+
+The digest is taken over the project's **own** `runtime_smoke` (minus its
+`report:` block, which decides where output is written and not what is
+exercised) and `runtime` sections, read from `codd.yaml` itself rather than from
+the defaults-merged view — so upgrading CoDD, or moving a report file, does not
+expire a run that still covers what the project targets.
 
 Like the manual ledger, this file is a project artifact meant to be committed
 and read in diffs: it is the standing answer to "when did the declared runtime
@@ -159,4 +176,14 @@ ran can honestly write.
 - `runtime_evidence_not_executed` is amber even under `mode: strict`
   (`runtime_execution_severity`). A project that never persisted the ledger is
   not thereby proven wrong — it is unproven — and upgrading CoDD must not turn
-  an existing green build red on its own.
+  an existing green build red on its own. The `unbound_acceptance` that
+  accompanies it takes the SAME severity, for one criterion whose only declared
+  binding is that unexecuted runtime obligation: the unbound-ness is *caused by*
+  the not-executed-ness, one defect with one remedy ("run it"), and pricing it
+  at `unbound_severity` would strand a strict project — red before Step 8 runs,
+  and Step 8 is what writes the record that would clear it. When the stage is
+  OFF the ordinary `unbound_severity` applies, because such a project has no
+  runtime path to run at all.
+- A ledger the runner could not write (a read-only checkout, a full disk) is a
+  lost artifact, not a false green: the next verification honestly reports
+  `no_record`. Step 8 says so loudly on stderr rather than failing the run.

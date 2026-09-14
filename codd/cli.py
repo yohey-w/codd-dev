@@ -6185,6 +6185,21 @@ def _run_runtime_smoke_gate(path: str, runtime_base_url: str | None, runtime_ski
     click.echo(smoke_result.markdown_section.rstrip())
     if smoke_result.report_path is not None:
         click.echo(f"[codd verify] Runtime smoke report: {_display_path(smoke_result.report_path, Path(path).resolve())}")
+    if smoke_result.ledger_path is not None:
+        click.echo(
+            "[codd verify] Runtime execution record: "
+            f"{_display_path(smoke_result.ledger_path, Path(path).resolve())} (commit it)"
+        )
+    elif smoke_result.ledger_status:
+        # Not a false green — the next verification will honestly report that no
+        # run is on record — but the evidence this run produced is gone, and a
+        # silent loss is how the acceptance gate goes quiet again.
+        click.echo(
+            "[WARN] Runtime execution record could NOT be written. This run's evidence "
+            "is lost: the next `codd verify` will report `runtime_evidence_not_executed` "
+            "for every criterion that declares runtime evidence.",
+            err=True,
+        )
     if not smoke_result.overall_passed:
         click.echo("[FAIL] Step 8 runtime smoke failed", err=True)
         raise SystemExit(1)

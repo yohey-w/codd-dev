@@ -39,6 +39,8 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from codd.acceptance_evidence import (
+    EXECUTION_REASON_TEXT,
+    EXECUTION_TARGET_NOT_EXECUTED,
     SETTINGS_KEY,
     AcceptanceCriterion,
     acceptance_settings,
@@ -51,6 +53,7 @@ from codd.acceptance_evidence import (
     read_test_text,
     requirement_anchor_pattern,
     resolve_test_targets,
+    inferred_obligation_unproven,
     runtime_execution_evidence,
     runtime_obligations,
     runtime_smoke_enabled,
@@ -149,7 +152,7 @@ class AcceptanceEvidenceCheck(DagCheck):
         # proved by nothing, and the findings ask for different remedies (turn
         # the stage on / run it / write a test) — that is two defects, not one
         # reported twice.
-        runtime_findings, runtime_bound_ids = _runtime_violations(
+        runtime_findings, runtime_bound_ids, runtime_pending_ids = _runtime_violations(
             criteria,
             declared_ids,
             config,
@@ -168,6 +171,7 @@ class AcceptanceEvidenceCheck(DagCheck):
             anchors=anchors,
             anchor_offsets=anchor_hits,
             runtime_bound_ids=runtime_bound_ids,
+            runtime_pending_ids=runtime_pending_ids,
         )
         violations.extend(binding_violations)
         violations.extend(_parameter_violations(root, criteria, bound_by_req, resolved))
@@ -201,7 +205,7 @@ def _runtime_violations(
     settings: Any,
     *,
     project_root: Path,
-) -> tuple[list[dict[str, Any]], frozenset[str]]:
+) -> tuple[list[dict[str, Any]], frozenset[str], frozenset[str]]:
     """Runtime-evidence obligations that no run has actually discharged.
 
     Two holes of the same shape, one behind the other:
@@ -221,13 +225,15 @@ def _runtime_violations(
     digest still matches, is inside the project's freshness window, and — for an
     explicitly named ``runtime:<case>`` — actually exercised that case.
 
-    Returns the findings and the criteria whose runtime obligation IS
-    discharged, which are the only ones that count as bound downstream.
+    Returns the findings, the criteria whose runtime obligation IS discharged
+    (the only ones that count as bound downstream), and the criteria still
+    WAITING on a run — whose `unbound_acceptance` is priced at the execution
+    severity, because "run the stage" is the one remedy for both.
     """
 
     obligations = runtime_obligations(criteria, declared_ids)
     if not obligations:
-        return [], frozenset()
+        return [], frozenset(), frozenset()
 
     if not runtime_smoke_enabled(config):
         return [
@@ -249,7 +255,7 @@ def _runtime_violations(
                 ),
             }
             for criterion, targets in obligations
-        ], frozenset()
+        ], frozenset(), frozenset()
 
     record, reason, detail = runtime_execution_evidence(
         project_root,
@@ -259,15 +265,24 @@ def _runtime_violations(
 
     violations: list[dict[str, Any]] = []
     bound: set[str] = set()
+    pending: set[str] = set()
     for criterion, targets in obligations:
-        missing = unexecuted_runtime_targets(criterion, targets, record) if not reason else ()
-        if not reason and not missing:
+        criterion_reason, why = reason, detail
+        if not criterion_reason:
+            # Two questions the record cannot answer for every criterion at once.
+            missing = unexecuted_runtime_targets(criterion, targets, record)
+            if missing:
+                criterion_reason = EXECUTION_TARGET_NOT_EXECUTED
+                why = "no check of the recorded run answering to " + ", ".join(
+                    f"`{target}`" for target in missing
+                ) + " passed"
+            else:
+                criterion_reason = inferred_obligation_unproven(criterion, record)
+                why = EXECUTION_REASON_TEXT.get(criterion_reason, "")
+        if not criterion_reason:
             bound.add(criterion.req_id)
             continue
-        why = detail if reason else (
-            "the recorded run exercised no check answering to "
-            + ", ".join(f"`{target}`" for target in missing)
-        )
+        pending.add(criterion.req_id)
         violations.append(
             {
                 "type": "runtime_evidence_not_executed",
@@ -275,7 +290,7 @@ def _runtime_violations(
                 "req_id": criterion.req_id,
                 "source": criterion.source,
                 "targets": list(targets),
-                "reason": reason or "target_not_executed",
+                "reason": criterion_reason,
                 "message": (
                     f"[acceptance_evidence] Acceptance criterion `{criterion.req_id}` "
                     f"({criterion.source}) declares runtime evidence "
@@ -289,7 +304,7 @@ def _runtime_violations(
                 ),
             }
         )
-    return violations, frozenset(bound)
+    return violations, frozenset(bound), frozenset(pending)
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +324,7 @@ def _binding_violations(
     anchors: Mapping[str, set[str]],
     anchor_offsets: Mapping[str, Mapping[str, tuple[int, ...]]],
     runtime_bound_ids: frozenset[str],
+    runtime_pending_ids: frozenset[str] = frozenset(),
 ) -> tuple[list[dict[str, Any]], dict[str, list[str]]]:
     """Every acceptance criterion must reach evidence a machine can re-run.
 
@@ -468,7 +484,16 @@ def _binding_violations(
         violations.append(
             {
                 "type": "unbound_acceptance",
-                "severity": settings.unbound_severity,
+                # A criterion waiting on a run it declared is unbound BECAUSE the
+                # run has not happened: one defect, one remedy, one severity. At
+                # `unbound_severity` a strict project would be red before it can
+                # run the stage that clears it — and the stage is gated on the
+                # verification it just failed.
+                "severity": (
+                    settings.runtime_execution_severity
+                    if criterion.req_id in runtime_pending_ids
+                    else settings.unbound_severity
+                ),
                 "req_id": criterion.req_id,
                 "source": criterion.source,
                 "message": (

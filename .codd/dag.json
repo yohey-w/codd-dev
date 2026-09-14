@@ -1,6 +1,6 @@
 {
   "version": "1",
-  "built_at": "2026-09-14T12:58:54.823948+00:00",
+  "built_at": "2026-09-14T13:21:51.898973+00:00",
   "project_root": ".",
   "nodes": [
     {
@@ -5323,11 +5323,13 @@
           "__future__",
           "hashlib",
           "json",
+          "os",
           "re",
           "dataclasses",
           "datetime",
           "pathlib",
           "typing",
+          "yaml",
           "codd.config"
         ],
         "runtime_evidence": []
@@ -5413,7 +5415,6 @@
           "codd.runtime_smoke.checks",
           "codd.runtime_smoke.config",
           "codd.runtime_smoke.report",
-          "codd.config",
           "codd.runtime_record"
         ],
         "runtime_evidence": []
@@ -16239,8 +16240,7 @@
           "codd.runtime_smoke.config",
           "codd.runtime_smoke.report",
           "codd.runtime_smoke.runner",
-          "codd.runtime_record",
-          "codd.config"
+          "codd.runtime_record"
         ]
       }
     },
@@ -19187,11 +19187,6 @@
     {
       "from_id": "codd/config.py",
       "to_id": "tests/test_require.py",
-      "kind": "tested_by"
-    },
-    {
-      "from_id": "codd/config.py",
-      "to_id": "tests/test_runtime_smoke.py",
       "kind": "tested_by"
     },
     {
@@ -28423,11 +28418,6 @@
       "from_id": "codd/runtime_smoke/report.py",
       "to_id": "tests/test_runtime_smoke.py",
       "kind": "tested_by"
-    },
-    {
-      "from_id": "codd/runtime_smoke/runner.py",
-      "to_id": "codd/config.py",
-      "kind": "imports"
     },
     {
       "from_id": "codd/runtime_smoke/runner.py",

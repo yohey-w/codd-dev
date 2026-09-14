@@ -458,10 +458,13 @@ acceptance_evidence:
   # `runtime_execution_severity` is the one class that stays amber even under
   # `mode: strict` unless set explicitly. `enabled: true` is a DECLARATION; the
   # evidence is the execution record the runtime smoke runner writes to
-  # <codd-dir>/runtime_ledger.json (existence + matching `config_digest` +
-  # freshness +, for an explicit `verified_by: runtime:<case>`, a non-skipped
-  # check of that name). Without a record the criterion is unproven, not proven
-  # wrong — and upgrading CoDD must not turn an existing build red on its own.
+  # <codd-dir>/runtime_ledger.json (a PASSING run, against a matching
+  # `config_digest` and target, inside the freshness window +, for an explicit
+  # `verified_by: runtime:<case>`, a passing check of that name). Without a
+  # record the criterion is unproven, not proven wrong — and upgrading CoDD must
+  # not turn an existing build red on its own. The `unbound_acceptance` raised
+  # alongside it takes this same severity while the stage is enabled, so a strict
+  # project is not red before it can run the stage that clears it.
   # Commit the ledger like any other evidence artifact; `codd verify --runtime`
   # refreshes it.
   #

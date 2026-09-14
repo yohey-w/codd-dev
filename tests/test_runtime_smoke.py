@@ -1502,10 +1502,11 @@ runtime_smoke:
     assert record.executed_checks  # at least one check actually ran
 
     # The digest is the one the acceptance gate recomputes from the same config.
-    from codd.config import load_project_config
     from codd.runtime_record import runtime_config_digest
 
-    assert record.config_digest == runtime_config_digest(load_project_config(project))
+    assert record.config_digest == runtime_config_digest(project)
+    # ...and the record names the target the run actually went against.
+    assert record.target_url == "http://127.0.0.1:3000"
 
 
 def test_t44_a_disabled_stage_records_nothing(tmp_path):
@@ -1543,3 +1544,66 @@ runtime_smoke:
     assert all(check.skipped for check in result.checks)
     assert result.ledger_path is None
     assert _ledger(project) is None
+
+
+def test_t46_a_lost_execution_record_is_reported_not_swallowed(tmp_path, monkeypatch):
+    """Losing the evidence is not a false green, but it must not be silent."""
+
+    project = _project(
+        tmp_path,
+        """
+runtime_smoke:
+  enabled: true
+  db_check:
+    command: "check-db"
+  dev_server:
+    url: "http://127.0.0.1:3000"
+  report:
+    log_to_file: false
+""",
+    )
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+    )
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.httpx.get",
+        lambda *args, **kwargs: SimpleNamespace(status_code=200),
+    )
+    monkeypatch.setattr("codd.runtime_record.write_runtime_ledger", lambda *a, **k: None)
+
+    result = run_runtime_smoke(project)
+
+    assert result.ledger_path is None
+    assert result.ledger_status == "write_failed"
+    assert _ledger(project) is None
+
+
+def test_t47_a_run_pointed_elsewhere_records_where_it_actually_went(tmp_path, monkeypatch):
+    project = _project(
+        tmp_path,
+        """
+runtime_smoke:
+  enabled: true
+  db_check:
+    command: "check-db"
+  dev_server:
+    url: "http://127.0.0.1:3000"
+  report:
+    log_to_file: false
+""",
+    )
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+    )
+    monkeypatch.setattr(
+        "codd.runtime_smoke.checks.httpx.get",
+        lambda *args, **kwargs: SimpleNamespace(status_code=200),
+    )
+
+    run_runtime_smoke(project, base_url_override="http://staging.internal:8080")
+
+    record = _ledger(project)
+    assert record is not None
+    assert record.target_url == "http://staging.internal:8080"
