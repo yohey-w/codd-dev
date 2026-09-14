@@ -6198,7 +6198,7 @@ def _run_runtime_smoke_gate(path: str, runtime_base_url: str | None, runtime_ski
             "[FAIL] Step 8 could not write the runtime execution record, and the "
             "EARLIER record could not be removed either. The next `codd verify` would "
             "read that stale record as current evidence. Remove "
-            f"`{_display_path(Path(path).resolve() / 'codd' / 'runtime_ledger.json', Path(path).resolve())}` "
+            f"`{_display_path(_runtime_ledger_path(Path(path).resolve()), Path(path).resolve())}` "
             "(or fix the permissions) before relying on this run.",
             err=True,
         )
@@ -6216,6 +6216,12 @@ def _run_runtime_smoke_gate(path: str, runtime_base_url: str | None, runtime_ski
     if not smoke_result.overall_passed:
         click.echo("[FAIL] Step 8 runtime smoke failed", err=True)
         raise SystemExit(1)
+
+
+def _runtime_ledger_path(project_root: Path) -> Path:
+    from codd.runtime_record import ledger_path
+
+    return ledger_path(project_root)
 
 
 def _runtime_smoke_skip(runtime_skip: tuple[str, ...]) -> tuple[str, ...]:

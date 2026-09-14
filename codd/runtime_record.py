@@ -361,7 +361,9 @@ def record_runtime_execution(
         passed=all(check.passed or check.skipped for check in collected),
         config_digest=runtime_config_digest(project_root),
         checks=collected,
-        target_url=target_url or "",
+        # Stripped on both sides: the gate compares against the configured URL,
+        # and YAML keeps whatever whitespace the author typed.
+        target_url=(target_url or "").strip(),
     )
     written = write_runtime_ledger(project_root, record, codd_dir)
     if written is not None:
