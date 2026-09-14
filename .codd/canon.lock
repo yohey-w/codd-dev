@@ -38,4 +38,4 @@ docs/requirements/extractor-requirements.md	sha256:fa02e6eddbb42e96e693aae72ee82
 
 docs/requirements/require-command-requirements.md	sha256:5ef134be5650dd10e77de818a019f02beabec763a1794358639c706baa635b37	v3.39.0-canon-tripwire
 
-docs/requirements/system-requirements.md	sha256:9c34a9e4e20ec5d2abc99d582aeeaab2b93347c101e3edd5ab9636b4ed228aae	v3.39.0-canon-tripwire
+docs/requirements/system-requirements.md	sha256:9f7f5168b587ff0467c936cca54427ec2605faf2d898e1479a165c82253e6aa1	issue-43

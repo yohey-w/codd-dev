@@ -1,6 +1,6 @@
 {
   "version": "1",
-  "built_at": "2026-09-11T11:20:56.349213+00:00",
+  "built_at": "2026-09-14T13:21:51.898973+00:00",
   "project_root": ".",
   "nodes": [
     {
@@ -49,9 +49,11 @@
           "__future__",
           "re",
           "dataclasses",
+          "datetime",
           "pathlib",
           "typing",
           "codd.requirement_reconciliation",
+          "codd.runtime_record",
           "codd.dag.builder",
           "codd.parsing.filesystem_routes"
         ],
@@ -152,6 +154,19 @@
           "typing",
           "codd.claude_cli",
           "codd.generator"
+        ],
+        "runtime_evidence": []
+      }
+    },
+    {
+      "id": "codd/ansi.py",
+      "kind": "impl_file",
+      "path": "codd/ansi.py",
+      "attributes": {
+        "language": "python",
+        "imports": [
+          "__future__",
+          "re"
         ],
         "runtime_evidence": []
       }
@@ -1961,6 +1976,7 @@
           "pathlib",
           "typing",
           "yaml",
+          "codd.ansi",
           "codd.deployment.providers"
         ],
         "runtime_evidence": []
@@ -2941,6 +2957,7 @@
           "shlex",
           "typing",
           "yaml",
+          "codd.path_safety",
           "codd.stack.lock",
           "codd.stack.project",
           "codd.stack.command_authenticity",
@@ -3761,6 +3778,7 @@
           "subprocess",
           "dataclasses",
           "pathlib",
+          "codd.ansi",
           ".builtin_adapters",
           ".registry",
           ".verify_plan",
@@ -4521,6 +4539,7 @@
           "typing",
           "yaml",
           "codd.generator",
+          "codd.path_safety",
           "codd.project_types",
           "codd.validator",
           "codd.config",
@@ -5010,10 +5029,11 @@
         "language": "python",
         "imports": [
           "__future__",
+          "re",
           "dataclasses",
           "pathlib",
-          "re",
-          "typing"
+          "typing",
+          "codd.ansi"
         ],
         "runtime_evidence": []
       }
@@ -5043,6 +5063,7 @@
           "codd.languages.verify_executor",
           "codd.languages.verify_plan",
           "yaml",
+          "codd.ansi",
           "codd.config",
           "codd.dag",
           "codd.dag.builder",
@@ -5293,6 +5314,28 @@
       }
     },
     {
+      "id": "codd/runtime_record.py",
+      "kind": "impl_file",
+      "path": "codd/runtime_record.py",
+      "attributes": {
+        "language": "python",
+        "imports": [
+          "__future__",
+          "hashlib",
+          "json",
+          "os",
+          "re",
+          "dataclasses",
+          "datetime",
+          "pathlib",
+          "typing",
+          "yaml",
+          "codd.config"
+        ],
+        "runtime_evidence": []
+      }
+    },
+    {
       "id": "codd/runtime_smoke/__init__.py",
       "kind": "impl_file",
       "path": "codd/runtime_smoke/__init__.py",
@@ -5371,7 +5414,8 @@
           "pathlib",
           "codd.runtime_smoke.checks",
           "codd.runtime_smoke.config",
-          "codd.runtime_smoke.report"
+          "codd.runtime_smoke.report",
+          "codd.runtime_record"
         ],
         "runtime_evidence": []
       }
@@ -8481,6 +8525,7 @@
           "__future__",
           "json",
           "textwrap",
+          "datetime",
           "pathlib",
           "yaml",
           "codd.acceptance_evidence",
@@ -8489,6 +8534,7 @@
           "codd.dag.checks.acceptance_evidence",
           "codd.dag.runner",
           "codd.config",
+          "codd.runtime_record",
           "codd.acceptance_record",
           "codd.acceptance_sync",
           "codd.verifiable_behavior_audit",
@@ -9961,6 +10007,7 @@
           "dataclasses",
           "pathlib",
           "pytest",
+          "tests.greenfield.conftest",
           "codd.cli",
           "codd.greenfield.pipeline",
           "codd.greenfield.test_rederivation",
@@ -9980,6 +10027,7 @@
           "dataclasses",
           "pathlib",
           "pytest",
+          "tests.greenfield.conftest",
           "codd.greenfield.test_rederivation"
         ]
       }
@@ -12284,6 +12332,21 @@
           "pytest",
           "codd.ai_invoke",
           "pathlib"
+        ]
+      }
+    },
+    {
+      "id": "tests/test_ansi_sanitized_runner_output.py",
+      "kind": "test_file",
+      "path": "tests/test_ansi_sanitized_runner_output.py",
+      "attributes": {
+        "language": "python",
+        "imports": [
+          "__future__",
+          "pathlib",
+          "codd.ansi",
+          "codd.deployment.providers.verification.pytest_http",
+          "codd.repair.test_failure_attribution"
         ]
       }
     },
@@ -16176,7 +16239,8 @@
           "codd.runtime_smoke.checks",
           "codd.runtime_smoke.config",
           "codd.runtime_smoke.report",
-          "codd.runtime_smoke.runner"
+          "codd.runtime_smoke.runner",
+          "codd.runtime_record"
         ]
       }
     },
@@ -17462,6 +17526,11 @@
     },
     {
       "from_id": "codd/acceptance_evidence.py",
+      "to_id": "codd/runtime_record.py",
+      "kind": "imports"
+    },
+    {
+      "from_id": "codd/acceptance_evidence.py",
       "to_id": "tests/dag/test_acceptance_evidence.py",
       "kind": "tested_by"
     },
@@ -17558,6 +17627,11 @@
     {
       "from_id": "codd/ai_patch.py",
       "to_id": "tests/test_implement_syntax_gate.py",
+      "kind": "tested_by"
+    },
+    {
+      "from_id": "codd/ansi.py",
+      "to_id": "tests/test_ansi_sanitized_runner_output.py",
       "kind": "tested_by"
     },
     {
@@ -21722,8 +21796,18 @@
     },
     {
       "from_id": "codd/deployment/providers/verification/pytest_http.py",
+      "to_id": "codd/ansi.py",
+      "kind": "imports"
+    },
+    {
+      "from_id": "codd/deployment/providers/verification/pytest_http.py",
       "to_id": "codd/deployment/providers/__init__.py",
       "kind": "imports"
+    },
+    {
+      "from_id": "codd/deployment/providers/verification/pytest_http.py",
+      "to_id": "tests/test_ansi_sanitized_runner_output.py",
+      "kind": "tested_by"
     },
     {
       "from_id": "codd/deployment/providers/verification/pytest_http.py",
@@ -23642,6 +23726,11 @@
     },
     {
       "from_id": "codd/greenfield/pipeline.py",
+      "to_id": "codd/path_safety.py",
+      "kind": "imports"
+    },
+    {
+      "from_id": "codd/greenfield/pipeline.py",
       "to_id": "codd/planner.py",
       "kind": "imports"
     },
@@ -25447,6 +25536,11 @@
     },
     {
       "from_id": "codd/languages/verify_executor.py",
+      "to_id": "codd/ansi.py",
+      "kind": "imports"
+    },
+    {
+      "from_id": "codd/languages/verify_executor.py",
       "to_id": "codd/languages/adapters/runner_report.py",
       "kind": "imports"
     },
@@ -26538,6 +26632,11 @@
     {
       "from_id": "codd/planner.py",
       "to_id": "codd/lexicon.py",
+      "kind": "imports"
+    },
+    {
+      "from_id": "codd/planner.py",
+      "to_id": "codd/path_safety.py",
       "kind": "imports"
     },
     {
@@ -27682,6 +27781,11 @@
     },
     {
       "from_id": "codd/repair/test_failure_attribution.py",
+      "to_id": "codd/ansi.py",
+      "kind": "imports"
+    },
+    {
+      "from_id": "codd/repair/test_failure_attribution.py",
       "to_id": "tests/repair/test_env_failure_defense.py",
       "kind": "tested_by"
     },
@@ -27689,6 +27793,16 @@
       "from_id": "codd/repair/test_failure_attribution.py",
       "to_id": "tests/repair/test_test_failure_attribution.py",
       "kind": "tested_by"
+    },
+    {
+      "from_id": "codd/repair/test_failure_attribution.py",
+      "to_id": "tests/test_ansi_sanitized_runner_output.py",
+      "kind": "tested_by"
+    },
+    {
+      "from_id": "codd/repair/verify_runner.py",
+      "to_id": "codd/ansi.py",
+      "kind": "imports"
     },
     {
       "from_id": "codd/repair/verify_runner.py",
@@ -28241,6 +28355,21 @@
       "kind": "tested_by"
     },
     {
+      "from_id": "codd/runtime_record.py",
+      "to_id": "codd/config.py",
+      "kind": "imports"
+    },
+    {
+      "from_id": "codd/runtime_record.py",
+      "to_id": "tests/dag/test_acceptance_evidence.py",
+      "kind": "tested_by"
+    },
+    {
+      "from_id": "codd/runtime_record.py",
+      "to_id": "tests/test_runtime_smoke.py",
+      "kind": "tested_by"
+    },
+    {
       "from_id": "codd/runtime_smoke/__init__.py",
       "to_id": "codd/runtime_smoke/config.py",
       "kind": "imports"
@@ -28289,6 +28418,11 @@
       "from_id": "codd/runtime_smoke/report.py",
       "to_id": "tests/test_runtime_smoke.py",
       "kind": "tested_by"
+    },
+    {
+      "from_id": "codd/runtime_smoke/runner.py",
+      "to_id": "codd/runtime_record.py",
+      "kind": "imports"
     },
     {
       "from_id": "codd/runtime_smoke/runner.py",

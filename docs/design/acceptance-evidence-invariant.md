@@ -40,6 +40,8 @@ declares no verifiable behaviors" as a pass.
 |---|---|
 | Parser + resolver (acceptance criteria, evidence refs, params) | `codd/acceptance_evidence.py` |
 | Gate | `codd/dag/checks/acceptance_evidence.py` (registered check, runs in `codd verify`) |
+| Manual-verdict ledger (invariant (d)) | `<codd-dir>/acceptance_ledger.json`, written by `codd acceptance record` |
+| Runtime **execution** ledger (invariant (a)) | `<codd-dir>/runtime_ledger.json`, written by the runtime smoke runner |
 | Configuration | `acceptance_evidence:` in `codd/defaults.yaml` |
 
 ## How a criterion is found (and why no project has to restructure)
@@ -73,7 +75,8 @@ markers), and adopting a column makes its declaration authoritative for that row
 
 | Stage | Invariant | Finding | Severity |
 |---|---|---|---|
-| 1 | (a) demotion | `runtime_evidence_not_executable` — the criterion declares a runtime obligation and `runtime_smoke` is not enabled, so the stage is skipped silently | red |
+| 1a | (a) demotion | `runtime_evidence_not_executable` — the criterion declares a runtime obligation and `runtime_smoke` is not enabled, so the stage is skipped silently | red |
+| 1b | (a) execution | `runtime_evidence_not_executed` — the stage is enabled but no run discharged the obligation: no ledger (`no_record`), a ledger written against a different runtime configuration (`config_changed`) or against a different target (`target_changed`), a ledger older than the configured window (`stale`), a run that failed (`run_failed`), or — for an explicitly declared `runtime:<case>` — a ledger in which no check of that name passed (`target_not_executed`) | amber |
 | 2 | (a) wiring, (d) freshness | `vb_registry_missing`, `unbound_acceptance`, `unresolved_evidence`, `manual_evidence_missing`, `stale_manual_evidence` | red |
 | 3 | (c) parameters | `param_not_referenced` (red), `undeclared_numeric` (amber) | red / amber |
 | 4 | (b) shipped path | `off_shipped_path`, `multiple_implementers`, `reachability_unknown` | amber |
@@ -96,6 +99,66 @@ the operation's `route:` resolved through the project's declared
 `filesystem_routes`, or an explicit `entry_file:` on the operation, which always
 wins over inference.
 
+## A switch is a declaration, not evidence
+
+Stage 1a asked whether the runtime stage *could* run. That left the mirror-image
+hole: a project turns `runtime_smoke.enabled: true` on, never runs it, and the
+criterion reads as bound to evidence that has never executed once. Measured on a
+real project: flipping that one boolean, with no dev server and no
+`codd verify --runtime`, moved `runtime_evidence_not_executable` 56 → 0 and
+`unbound_acceptance` 57 → 19. The cheapest way to clear the gate was to declare,
+not to verify — which is the incentive exactly backwards.
+
+So **only an EXECUTED runtime obligation binds**, and the execution has to leave
+a record a machine can read:
+
+- the runtime smoke runner writes `<codd-dir>/runtime_ledger.json` when the
+  stage is enabled **and at least one check actually ran** (an all-skipped run,
+  or a disabled stage, writes nothing — a record of nothing is not a record);
+- the ledger holds `recorded_at` (UTC), `passed`, the per-check
+  `name` / `category` / `passed` / `skipped`, and `config_digest`, a hash of the
+  project's own `runtime_smoke` + `runtime` configuration as it stood at run
+  time. Change what the stage targets and the old run stops certifying it;
+- a missing, malformed or unversioned ledger reads as **no evidence**, never as
+  evidence — the same rule the manual ledger already follows, and so does a
+  ledger recording no executed check at all, which a hand-written file could
+  otherwise use to certify everything;
+- the ledger also records the **target** the run went against (the effective
+  dev-server URL, which `--runtime-base-url` may have overridden). A run aimed
+  at a different deployment is not evidence about this one;
+- a run that FAILED does not discharge anything. It is still *executed* — the
+  finding says `run_failed`, not "never ran" — but a failing run recorded on
+  Monday must not read as green evidence on Tuesday. Within the run itself Step
+  8 reports the failure in red; the ledger is read by every LATER verification,
+  and that is where "it ran, and it was broken" would otherwise pass for proof.
+  A failure in one check does not sink another: an explicitly named
+  `runtime:<case>` is discharged when the check answering to that name PASSED,
+  whatever else in the same run did not.
+
+Target matching follows the asymmetry the obligation itself is built on: an
+**explicit** `verified_by: runtime:<case>` names a case, so a ledger with no
+passing check of that `name` or `category` has not discharged it; an
+**inferred** obligation (an `operation_flow.<id>` reference in a project that
+never adopted the `verified_by` column) declares no such mapping, so a passing
+run of the project's own stage satisfies it. CoDD does not invent a
+correspondence the project never wrote down.
+
+The digest is taken over the project's **own** `runtime_smoke` and `runtime`
+sections, read from `codd.yaml` itself rather than from the defaults-merged view
+— so upgrading CoDD does not expire every recorded run in every project at once.
+Only `report.log_to_file` and `report.file_path` are left out of it: they decide
+where output is written, not what is exercised. `report.fail_fast` stays IN,
+because it decides whether the checks after the first failure run at all, and
+that is the plan rather than the paperwork.
+
+Like the manual ledger, this file is a project artifact meant to be committed
+and read in diffs: it is the standing answer to "when did the declared runtime
+evidence last actually run, and against what configuration?". Unlike the manual
+ledger it is written automatically — and that is consistent, not a contradiction:
+a manual ledger records a *human verdict*, which nothing but a human may refresh,
+while this one records *the fact that a machine ran*, which only the machine that
+ran can honestly write.
+
 ## What stays outside
 
 - `manual` evidence still needs a person. What is general is the machinery
@@ -104,3 +167,44 @@ wins over inference.
   criterion ride on a manual record alone.
 - (c) only bites on criteria that declare parameters. An undeclared literal is
   amber (`undeclared_numeric`) — a nudge to declare, not an accusation.
+- Runtime execution evidence is **not yet bound to implementation content**, the
+  way a manual record is. A recorded run expires when the runtime configuration
+  changes (`config_digest`) or when `runtime_max_age_hours` says so, but a
+  rewritten implementation under an unchanged configuration does not invalidate
+  it. Closing that would need a content digest both the runner and the gate can
+  compute, and the runner has no dependency graph; until then the honest
+  statement is the narrow one: the ledger proves the stage RAN, not that it ran
+  against today's code.
+- `runtime_evidence_not_executed` is amber even under `mode: strict`
+  (`runtime_execution_severity`). A project that never persisted the ledger is
+  not thereby proven wrong — it is unproven — and upgrading CoDD must not turn
+  an existing green build red on its own. The `unbound_acceptance` that
+  accompanies it takes the SAME severity, for one criterion whose only declared
+  binding is that unexecuted runtime obligation: the unbound-ness is *caused by*
+  the not-executed-ness, one defect with one remedy ("run it"), and pricing it
+  at `unbound_severity` would strand a strict project — red before Step 8 runs,
+  and Step 8 is what writes the record that would clear it. When the stage is
+  OFF the ordinary `unbound_severity` applies, because such a project has no
+  runtime path to run at all.
+- A ledger the runner could not write (a read-only checkout, a full disk) is a
+  lost artifact, not a false green: the run's own record simply does not exist,
+  and the next verification honestly reports `no_record`. Step 8 says so loudly
+  on stderr rather than failing the run. The one branch that IS a false green —
+  an EARLIER, passing record surviving a run that could not overwrite it, so
+  yesterday's verdict reads as today's — is not left standing: the stale record
+  is removed, and if even that is refused, Step 8 FAILS and names the file.
+- A `--runtime-skip` narrows what a run proves, and the ledger records exactly
+  which checks were skipped, but the check does not yet reason about the gap: a
+  run in which one category passed and the rest were skipped by the operator
+  still reads as a passing run for an inferred obligation. What is auditable is
+  in the file; what is judged is only pass/fail.
+- The ledger is a JSON file in the repository, so it is **hand-editable**, and
+  nothing here pretends otherwise. What the loader refuses is the accident and
+  the shortcut, not the forgery: an unknown format version, a record listing no
+  executed check, a `"passed": "false"` that Python's `bool()` would read as
+  true. Proof against a deliberate edit would need signing and provenance, which
+  is a different mechanism from this one.
+- Runtime evidence is **not bound to implementation content** (see above). This
+  is the largest remaining gap and it is deliberate for now: closing it needs a
+  digest both the runner and the gate can compute over the same file set, and
+  the runner has no dependency graph.

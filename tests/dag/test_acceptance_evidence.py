@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import textwrap
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -295,6 +296,334 @@ def test_runtime_severity_is_configurable_to_amber(tmp_path):
     assert found and found[0]["severity"] == "amber"
 
 
+# ---------------------------------------------------------------------------
+# stage 1b — (a) the stage is ON, but was it ever RUN?
+# ---------------------------------------------------------------------------
+
+RUNTIME_ROW = "| R-1 | 印刷用の一覧を出す | 15人が並ぶ <sub>`operation_flow.sheet_print`</sub> |\n"
+RUNTIME_OPERATION = [{"id": "sheet_print", "actor": "operator", "verb": "print", "target": "sheet"}]
+
+
+def _runtime_project(tmp_path: Path, **kwargs) -> Path:
+    return _write_project(
+        tmp_path,
+        requirements=_requirements_doc(RUNTIME_ROW),
+        operations=RUNTIME_OPERATION,
+        runtime_smoke={"enabled": True, "dev_server": {"url": "http://localhost:3000"}},
+        **kwargs,
+    )
+
+
+def test_enabled_runtime_stage_with_no_recorded_run_is_not_evidence(tmp_path):
+    """`enabled: true` is a DECLARATION. Declaring a stage does not execute it."""
+
+    root = _runtime_project(tmp_path)
+    result = _run_check(root)
+    found = _violations(result, "runtime_evidence_not_executed")
+    assert [item["req_id"] for item in found] == ["R-1"]
+    assert found[0]["reason"] == "no_record"
+    # ...and the criterion is bound to nothing, which is a SECOND defect with a
+    # different remedy — exactly as when the stage is switched off.
+    assert [item["req_id"] for item in _violations(result, "unbound_acceptance")] == ["R-1"]
+    # The switched-OFF finding is not raised: the stage is on, it just never ran.
+    assert _violations(result, "runtime_evidence_not_executable") == []
+
+
+def test_a_recorded_run_discharges_the_runtime_obligation(tmp_path):
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root)
+    result = _run_check(root)
+    assert _violations(result, "runtime_evidence_not_executed") == []
+    assert _violations(result, "runtime_evidence_not_executable") == []
+    assert _violations(result, "unbound_acceptance") == []
+
+
+def test_a_run_recorded_against_a_different_configuration_is_not_evidence(tmp_path):
+    """Change what the stage targets and the earlier run stops certifying it."""
+
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root, config_digest="0" * 64)
+    result = _run_check(root)
+    found = _violations(result, "runtime_evidence_not_executed")
+    assert [item["req_id"] for item in found] == ["R-1"]
+    assert found[0]["reason"] == "config_changed"
+    assert [item["req_id"] for item in _violations(result, "unbound_acceptance")] == ["R-1"]
+
+
+def test_a_run_older_than_the_projects_freshness_window_is_not_evidence(tmp_path):
+    root = _runtime_project(
+        tmp_path,
+        extra_config={"acceptance_evidence": {"runtime_max_age_hours": 6}},
+    )
+    _record_runtime_run(root, hours_ago=48)
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert [item["req_id"] for item in found] == ["R-1"]
+    assert found[0]["reason"] == "stale"
+
+
+def test_a_recent_run_inside_the_freshness_window_still_counts(tmp_path):
+    root = _runtime_project(
+        tmp_path,
+        extra_config={"acceptance_evidence": {"runtime_max_age_hours": 6}},
+    )
+    _record_runtime_run(root, hours_ago=1)
+    assert _violations(_run_check(root), "runtime_evidence_not_executed") == []
+
+
+def test_no_freshness_window_means_an_old_run_still_counts(tmp_path):
+    """Opt-in: a project that never declared a window is not expired by the clock."""
+
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root, hours_ago=24 * 90)
+    assert _violations(_run_check(root), "runtime_evidence_not_executed") == []
+
+
+def _explicit_runtime_project(tmp_path: Path) -> Path:
+    return _write_project(
+        tmp_path,
+        requirements=_requirements_doc(
+            "| R-1 | 出す | 15人が並ぶ `operation_flow.sheet_print` | runtime:print_sheet |\n",
+            header="| ID | 要件 | 検収条件 | verified_by |\n| --- | --- | --- | --- |\n",
+        ),
+        operations=RUNTIME_OPERATION,
+        runtime_smoke={"enabled": True, "dev_server": {"url": "http://localhost:3000"}},
+    )
+
+
+def test_an_explicitly_named_runtime_case_needs_a_check_that_actually_ran(tmp_path):
+    root = _explicit_runtime_project(tmp_path)
+    _record_runtime_run(root, checks=[("something else", "connectivity", True, True)])
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert [item["req_id"] for item in found] == ["R-1"]
+    assert found[0]["reason"] == "target_not_executed"
+
+
+def test_a_skipped_check_does_not_discharge_the_case_it_is_named_after(tmp_path):
+    root = _explicit_runtime_project(tmp_path)
+    _record_runtime_run(root, checks=[("print_sheet", "e2e", False, False), ("other", "db", True, True)])
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["reason"] == "target_not_executed"
+
+
+def test_the_named_case_matches_its_check_across_spellings(tmp_path):
+    """`print_sheet` / `Print Sheet` / `print-sheet` are one name, not three."""
+
+    root = _explicit_runtime_project(tmp_path)
+    _record_runtime_run(root, checks=[("Print Sheet", "e2e", True, True)])
+    assert _violations(_run_check(root), "runtime_evidence_not_executed") == []
+
+
+def test_an_inferred_obligation_needs_a_run_but_not_a_named_check(tmp_path):
+    """The project never declared which check covers the operation, so CoDD does
+    not invent the correspondence — any recorded run discharges it."""
+
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root, checks=[("whatever the project named it", "db", True, True)])
+    assert _violations(_run_check(root), "runtime_evidence_not_executed") == []
+
+
+def test_not_executed_stays_amber_even_under_strict(tmp_path):
+    """Upgrading CoDD must not turn an existing build red on its own: an absent
+    record leaves the criterion UNPROVEN, which is not the same as proven wrong."""
+
+    root = _runtime_project(tmp_path, strict=True)
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["severity"] == "amber"
+
+
+def test_not_executed_severity_is_configurable_to_red(tmp_path):
+    root = _runtime_project(
+        tmp_path,
+        extra_config={"acceptance_evidence": {"runtime_execution_severity": "red"}},
+    )
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["severity"] == "red"
+
+
+def test_a_disabled_stage_reports_the_switch_not_the_missing_record(tmp_path):
+    """Two holes, two remedies: turn the stage on vs. run the stage."""
+
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(RUNTIME_ROW),
+        operations=RUNTIME_OPERATION,
+        runtime_smoke={"enabled": False},
+    )
+    result = _run_check(root)
+    assert _violations(result, "runtime_evidence_not_executable")
+    assert _violations(result, "runtime_evidence_not_executed") == []
+
+
+def test_a_strict_project_waiting_on_a_run_is_amber_not_red(tmp_path):
+    """The migration path has to be walkable.
+
+    A criterion waiting on a run it declared is unbound BECAUSE the run has not
+    happened. Pricing that at `unbound_severity` would leave a strict project red
+    before it can run the stage — and `codd verify --runtime` runs the stage only
+    after the verification it just failed. One defect, one remedy, one severity.
+    """
+
+    root = _runtime_project(tmp_path, strict=True)
+    result = _run_check(root)
+    assert result.passed is True
+    assert result.status == "warn"
+    unbound = _violations(result, "unbound_acceptance")
+    assert [item["req_id"] for item in unbound] == ["R-1"]
+    assert unbound[0]["severity"] == "amber"
+
+
+def test_a_strict_project_with_the_stage_off_keeps_the_ordinary_unbound_severity(tmp_path):
+    """No runtime path at all is a different defect: there is nothing to run."""
+
+    root = _write_project(
+        tmp_path,
+        requirements=_requirements_doc(RUNTIME_ROW),
+        operations=RUNTIME_OPERATION,
+        runtime_smoke={"enabled": False},
+        strict=True,
+    )
+    result = _run_check(root)
+    assert result.passed is False
+    unbound = _violations(result, "unbound_acceptance")
+    assert unbound and unbound[0]["severity"] == "red"
+
+
+def test_a_failed_run_does_not_prove_an_inferred_obligation(tmp_path):
+    """It executed — so this is not `no_record` — but a failing run is not proof.
+
+    Within the run Step 8 reports the failure in red. The ledger is read by every
+    LATER verification, and that is where "it ran, and it was broken" would
+    otherwise pass for evidence.
+    """
+
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root, checks=[("Dev server up", "dev-server", True, False)])
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert [item["req_id"] for item in found] == ["R-1"]
+    assert found[0]["reason"] == "run_failed"
+
+
+def test_a_named_case_that_passed_survives_a_failure_beside_it(tmp_path):
+    """A database check failing does not un-prove the case that passed."""
+
+    root = _explicit_runtime_project(tmp_path)
+    _record_runtime_run(
+        root,
+        checks=[("print_sheet", "e2e", True, True), ("DB up", "db", True, False)],
+    )
+    assert _violations(_run_check(root), "runtime_evidence_not_executed") == []
+
+
+def test_a_run_against_a_different_target_is_not_evidence_about_this_one(tmp_path):
+    """`--runtime-base-url` can point a run at another deployment."""
+
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root, target_url="http://staging.internal:3000")
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert [item["req_id"] for item in found] == ["R-1"]
+    assert found[0]["reason"] == "target_changed"
+
+
+def test_moving_the_report_file_does_not_expire_a_run(tmp_path):
+    """`report:` decides where OUTPUT goes, not what is exercised."""
+
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root)
+    config_path = root / "codd" / "codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["runtime_smoke"]["report"] = {"file_path": "somewhere/else.md"}
+    config_path.write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
+    assert _violations(_run_check(root), "runtime_evidence_not_executed") == []
+
+
+def test_a_record_dated_in_the_future_is_not_fresh(tmp_path):
+    """A clock skew or a hand-edited date must not buy permanent freshness."""
+
+    root = _runtime_project(
+        tmp_path,
+        extra_config={"acceptance_evidence": {"runtime_max_age_hours": 6}},
+    )
+    _record_runtime_run(root, hours_ago=-240)
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["reason"] == "stale"
+
+
+def test_a_record_of_no_executed_check_is_not_a_record(tmp_path):
+    """The file is hand-editable; an empty check list must not certify anything."""
+
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root)
+    ledger = root / "codd" / "runtime_ledger.json"
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    payload["checks"] = []
+    ledger.write_text(json.dumps(payload), encoding="utf-8")
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["reason"] == "no_record"
+
+
+def test_a_record_written_by_an_unknown_format_version_is_not_read(tmp_path):
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root)
+    ledger = root / "codd" / "runtime_ledger.json"
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    payload["version"] = 99
+    ledger.write_text(json.dumps(payload), encoding="utf-8")
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["reason"] == "no_record"
+
+
+def test_name_folding_does_not_merge_names_that_differ_by_a_separator(tmp_path):
+    """`print.sheet` and `printsheet` are two names; only spacing folds."""
+
+    root = _explicit_runtime_project(tmp_path)
+    _record_runtime_run(root, checks=[("print.sheet", "e2e", True, True)])
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["reason"] == "target_not_executed"
+
+
+def test_changing_fail_fast_does_expire_a_run(tmp_path):
+    """`fail_fast` decides whether the checks after the first failure run at all,
+    which is the execution PLAN, not the output location."""
+
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root)
+    config_path = root / "codd" / "codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["runtime_smoke"]["report"] = {"fail_fast": True}
+    config_path.write_text(yaml.safe_dump(config, allow_unicode=True), encoding="utf-8")
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["reason"] == "config_changed"
+
+
+def test_a_record_that_names_no_target_does_not_certify_a_configured_one(tmp_path):
+    """Every record CoDD writes carries the target; a blank one came from elsewhere."""
+
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root, target_url="")
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["reason"] == "target_changed"
+
+
+def test_the_word_false_is_not_a_pass(tmp_path):
+    """The ledger is hand-editable and `bool("false")` is True."""
+
+    root = _runtime_project(tmp_path)
+    _record_runtime_run(root)
+    ledger = root / "codd" / "runtime_ledger.json"
+    payload = json.loads(ledger.read_text(encoding="utf-8"))
+    payload["passed"] = "false"
+    ledger.write_text(json.dumps(payload), encoding="utf-8")
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["reason"] == "run_failed"
+
+
+def test_a_malformed_execution_record_reads_as_no_evidence(tmp_path):
+    root = _runtime_project(tmp_path)
+    (root / "codd" / "runtime_ledger.json").write_text("{not json", encoding="utf-8")
+    found = _violations(_run_check(root), "runtime_evidence_not_executed")
+    assert found and found[0]["reason"] == "no_record"
+
+
 def test_project_without_acceptance_criteria_is_dormant_not_green(tmp_path):
     """No criteria == nothing to certify: skip (checked_count 0), never a
     'verified' pass that the materiality overlay would read as a clean run."""
@@ -365,6 +694,49 @@ SHEET_OPERATION = [{"id": "sheet_print", "actor": "operator", "verb": "print", "
 RUNTIME_ON = {"enabled": True, "dev_server": {"url": "http://localhost:3000"}}
 
 
+def _record_runtime_run(
+    root: Path,
+    *,
+    checks: list[tuple[str, str, bool, bool]] | None = None,
+    hours_ago: float = 0.0,
+    config_digest: str | None = None,
+    target_url: str | None = None,
+) -> Path:
+    """Seed the execution record a real runtime run would have left behind.
+
+    ``checks`` are ``(name, category, executed, passed)`` quadruples — the
+    miniature of what the runner writes. Nothing here names a framework, a URL or
+    a project: the record is a list of check names the project itself chose.
+    """
+
+    from codd.runtime_record import (
+        RuntimeCheckRecord,
+        RuntimeExecutionRecord,
+        runtime_config_digest,
+        write_runtime_ledger,
+    )
+
+    rows = checks if checks is not None else [("Smoke connectivity", "connectivity", True, True)]
+    if target_url is None:
+        # By default the run went where the project points: a real run records
+        # the effective dev-server URL, and a blank one means "somewhere else".
+        config = yaml.safe_load((root / "codd" / "codd.yaml").read_text(encoding="utf-8")) or {}
+        target_url = str(((config.get("runtime_smoke") or {}).get("dev_server") or {}).get("url") or "")
+    record = RuntimeExecutionRecord(
+        recorded_at=datetime.now(timezone.utc) - timedelta(hours=hours_ago),
+        passed=all(passed or not executed for _name, _category, executed, passed in rows),
+        config_digest=(config_digest if config_digest is not None else runtime_config_digest(root)),
+        checks=tuple(
+            RuntimeCheckRecord(name=name, category=category, passed=passed, skipped=not executed)
+            for name, category, executed, passed in rows
+        ),
+        target_url=target_url,
+    )
+    written = write_runtime_ledger(root, record)
+    assert written is not None
+    return written
+
+
 def test_no_vb_registry_is_red_when_the_project_has_criteria_to_certify(tmp_path):
     """The "empty registry passes with a notice" rule made empty the safest state."""
 
@@ -400,7 +772,9 @@ def test_criterion_bound_to_nothing_is_red(tmp_path):
         runtime_smoke=RUNTIME_ON,
         files={"tests/unit/other.test.ts": "test('other', () => {});\n"},
     )
-    # runtime_smoke is ON, so the operation anchor is executable evidence.
+    # runtime_smoke is ON *and a run is on record*, so the operation anchor is
+    # executed evidence. (Enabled alone is not — see the stage-1b tests.)
+    _record_runtime_run(root)
     assert _violations(_run_check(root), "unbound_acceptance") == []
 
     root2 = _write_project(
@@ -410,6 +784,7 @@ def test_criterion_bound_to_nothing_is_red(tmp_path):
         operations=SHEET_OPERATION,
         runtime_smoke=RUNTIME_ON,
     )
+    _record_runtime_run(root2)
     found = _violations(_run_check(root2), "unbound_acceptance")
     assert [item["req_id"] for item in found] == ["R-1"]
 

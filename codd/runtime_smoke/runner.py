@@ -26,6 +26,10 @@ class SmokeResult:
     overall_passed: bool
     markdown_section: str
     report_path: Path | None = None
+    ledger_path: Path | None = None
+    # "" when the record was written or there was nothing to record;
+    # "write_failed" when the run executed and the evidence could not be stored.
+    ledger_status: str = ""
 
     @property
     def passed(self) -> bool:
@@ -147,7 +151,40 @@ def _finish(runtime_config: RuntimeSmokeConfig, checks: list[CheckResult], *, wr
     result = SmokeResult(checks=checks, overall_passed=overall_passed, markdown_section=markdown)
     if write_report and runtime_config.report.log_to_file:
         result.report_path = write_markdown_report(result, _report_path(runtime_config))
+    if runtime_config.enabled:
+        result.ledger_path, result.ledger_status = _record_execution(runtime_config, checks)
     return result
+
+
+def _record_execution(
+    runtime_config: RuntimeSmokeConfig, checks: list[CheckResult]
+) -> tuple[Path | None, str]:
+    """Leave a machine-readable record that this stage RAN.
+
+    ``runtime_smoke.enabled: true`` only declares the stage; the acceptance
+    gate needs proof it executed, and a Markdown report under a timestamped
+    (and switch-offable) path is not something a check can read. So each run
+    that executed at least one check writes ``<codd-dir>/runtime_ledger.json``
+    — what ran, whether it passed, the target it went against, and the digest
+    of the configuration it ran against. A run that executed nothing writes
+    nothing.
+
+    Never fails the run: a filesystem that refuses the write loses the
+    evidence, not the verdict. It is not a false green either — the next
+    verification honestly reports that no run is on record — but it IS a loss,
+    so the status comes back for the caller to say so out loud.
+    """
+
+    from codd.runtime_record import WRITE_FAILED, record_runtime_execution
+
+    try:
+        return record_runtime_execution(
+            runtime_config.project_root,
+            checks,
+            target_url=runtime_config.dev_server.url or "",
+        )
+    except OSError:  # pragma: no cover - defensive: evidence is never worth the run
+        return None, WRITE_FAILED
 
 
 def _should_stop(runtime_config: RuntimeSmokeConfig, checks: list[CheckResult]) -> bool:

@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -189,6 +190,8 @@ class AcceptanceSettings:
     sections: tuple[str, ...] = ()
     acceptance_columns: tuple[str, ...] = ()
     runtime_severity: str = "amber"
+    runtime_execution_severity: str = "amber"
+    runtime_max_age_hours: float | None = None
     unbound_severity: str = "amber"
     param_severity: str = "amber"
     undeclared_numeric_severity: str = "amber"
@@ -239,6 +242,14 @@ def acceptance_settings(config: Mapping[str, Any] | None) -> AcceptanceSettings:
     except (TypeError, ValueError):
         max_findings = 30
 
+    raw_max_age = section.get("runtime_max_age_hours")
+    try:
+        max_age_hours = float(raw_max_age) if raw_max_age is not None else None
+    except (TypeError, ValueError):
+        max_age_hours = None
+    if max_age_hours is not None and max_age_hours <= 0:
+        max_age_hours = None
+
     return AcceptanceSettings(
         enabled=bool(section.get("enabled", True)),
         mode=mode,
@@ -246,6 +257,11 @@ def acceptance_settings(config: Mapping[str, Any] | None) -> AcceptanceSettings:
         sections=sections,
         acceptance_columns=_string_tuple(section.get("acceptance_columns")),
         runtime_severity=severity("runtime_severity", "red"),
+        # Amber even under `mode: strict` unless set explicitly: a project that
+        # never persisted an execution record is UNPROVEN, not proven wrong, and
+        # upgrading CoDD must not turn an existing build red on its own.
+        runtime_execution_severity=severity("runtime_execution_severity", "amber"),
+        runtime_max_age_hours=max_age_hours,
         unbound_severity=severity("unbound_severity", "red"),
         param_severity=severity("param_severity", "red"),
         undeclared_numeric_severity=severity("undeclared_numeric_severity", "amber"),
@@ -400,6 +416,146 @@ def runtime_smoke_enabled(config: Mapping[str, Any] | None) -> bool:
     if not isinstance(section, Mapping):
         return False
     return bool(section.get("enabled", False))
+
+
+# Why an enabled runtime stage is not yet evidence, in one word each.
+EXECUTION_NO_RECORD = "no_record"
+EXECUTION_CONFIG_CHANGED = "config_changed"
+EXECUTION_TARGET_CHANGED = "target_changed"
+EXECUTION_STALE = "stale"
+EXECUTION_RUN_FAILED = "run_failed"
+EXECUTION_TARGET_NOT_EXECUTED = "target_not_executed"
+
+EXECUTION_REASON_TEXT = {
+    EXECUTION_NO_RECORD: (
+        "no runtime execution has been recorded (`{ledger}` is absent, unreadable, "
+        "or records no executed check)"
+    ),
+    EXECUTION_CONFIG_CHANGED: (
+        "the recorded run targeted a DIFFERENT runtime configuration — "
+        "`runtime_smoke`/`runtime` changed in codd.yaml since `{ledger}` was written"
+    ),
+    EXECUTION_TARGET_CHANGED: (
+        "the recorded run went against `{recorded}`, not the configured `{configured}` "
+        "— evidence about one deployment is not evidence about another"
+    ),
+    EXECUTION_STALE: "the recorded run is {age:.0f}h old, past `runtime_max_age_hours: {limit:.0f}`",
+    "future": (
+        "the recorded run is dated in the FUTURE, so its age cannot be trusted "
+        "against `runtime_max_age_hours`"
+    ),
+    EXECUTION_RUN_FAILED: (
+        "the recorded run FAILED. It executed, so this is not a missing run — but a "
+        "failing run is not evidence that the behaviour works"
+    ),
+}
+
+
+def _configured_target(config: Mapping[str, Any] | None) -> str:
+    section = config.get("runtime_smoke") if isinstance(config, Mapping) else None
+    dev_server = section.get("dev_server") if isinstance(section, Mapping) else None
+    url = dev_server.get("url") if isinstance(dev_server, Mapping) else None
+    return str(url or "").strip()
+
+
+def runtime_execution_evidence(
+    project_root: Path | str,
+    config: Mapping[str, Any] | None,
+    max_age_hours: float | None = None,
+    now: datetime | None = None,
+) -> tuple[Any | None, str, str]:
+    """The recorded runtime execution, or WHY there is none to lean on.
+
+    ``runtime_smoke.enabled: true`` declares the stage; this asks whether it ran.
+    The ways a declaration fails to become evidence, each with its own remedy:
+    nothing was ever recorded, the recorded run targeted a configuration the
+    project has since changed, it went against a different deployment than the
+    one configured, the record is older than the project's freshness window (or
+    dated in the future, which no window can judge), or the run failed.
+
+    Returns ``(record, reason, detail)`` — ``reason`` is empty exactly when the
+    record itself may be leaned on. Two per-criterion questions remain after
+    that, because the answer differs by criterion rather than by record: whether
+    an explicitly named case passed (:func:`unexecuted_runtime_targets`), and
+    whether a run that failed SOMEWHERE still proves an inferred obligation
+    (:func:`inferred_obligation_unproven`) — it does not, while a named case that
+    passed is unaffected by a different check failing beside it.
+    """
+
+    from codd.runtime_record import (
+        ledger_path,
+        load_runtime_ledger,
+        runtime_config_digest,
+    )
+
+    root = Path(project_root)
+    display = ledger_path(root).name
+    record = load_runtime_ledger(root)
+    if record is None:
+        return None, EXECUTION_NO_RECORD, EXECUTION_REASON_TEXT[EXECUTION_NO_RECORD].format(ledger=display)
+    if record.config_digest != runtime_config_digest(root):
+        return (
+            record,
+            EXECUTION_CONFIG_CHANGED,
+            EXECUTION_REASON_TEXT[EXECUTION_CONFIG_CHANGED].format(ledger=display),
+        )
+    configured = _configured_target(config)
+    # A record that names no target while the project configures one is not a
+    # match either: every record this CoDD writes carries the target it went
+    # against, so a blank one is a record from somewhere else.
+    if configured and record.target_url != configured:
+        return (
+            record,
+            EXECUTION_TARGET_CHANGED,
+            EXECUTION_REASON_TEXT[EXECUTION_TARGET_CHANGED].format(
+                recorded=record.target_url or "(unrecorded)", configured=configured
+            ),
+        )
+    if max_age_hours is not None:
+        age = record.age_hours(now)
+        if age < 0:
+            return record, EXECUTION_STALE, EXECUTION_REASON_TEXT["future"]
+        if age > max_age_hours:
+            return (
+                record,
+                EXECUTION_STALE,
+                EXECUTION_REASON_TEXT[EXECUTION_STALE].format(age=age, limit=max_age_hours),
+            )
+    return record, "", ""
+
+
+def inferred_obligation_unproven(criterion: AcceptanceCriterion, record: Any) -> str:
+    """Why a usable record still does not prove an INFERRED runtime obligation.
+
+    An inferred obligation names no case, so the whole run is its evidence — and
+    a run that failed is not evidence that the behaviour works. (An EXPLICIT case
+    is judged on its own check instead: a database check failing beside it does
+    not un-prove the case that passed.)
+    """
+
+    if record is None or criterion.evidence_of("runtime"):
+        return ""
+    return "" if record.passed else EXECUTION_RUN_FAILED
+
+
+def unexecuted_runtime_targets(
+    criterion: AcceptanceCriterion,
+    targets: Iterable[str],
+    record: Any,
+) -> tuple[str, ...]:
+    """Declared runtime targets that no passing check of the recorded run covers.
+
+    The same explicit/inferred asymmetry :func:`runtime_obligations` is built on.
+    An EXPLICIT ``verified_by: runtime:<case>`` names a case, so a run in which no
+    check answering to that name passed has not discharged it. An INFERRED
+    obligation (an ``operation_flow.<id>`` reference in a project that never
+    adopted the column) declares no such correspondence, and CoDD does not invent
+    one — a passing run of the project's own stage satisfies it.
+    """
+
+    if record is None or not criterion.evidence_of("runtime"):
+        return ()
+    return tuple(target for target in targets if not record.covers(target))
 
 
 def runtime_obligations(
