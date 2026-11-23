@@ -9,23 +9,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-import yaml
-
 from codd.fix.phenomenon_parser import PhenomenonAnalysis
 from codd.fix.templates_loader import load_template, render_template
 from codd.frontmatter import parse_frontmatter
 
 AiInvoke = Callable[[str], str]
 
-_FRONTMATTER_RE = re.compile(
-    r"\A\ufeff?[ \t]*---[ \t]*(?P<newline>\r\n|\r|\n)(?P<header>.*?)"
-    r"(?<![^\r\n])[ \t]*---[ \t]*(?:\r\n|\r|\n|\Z)",
-    re.DOTALL,
-)
 _FRONTMATTER_CODD_BLOCK_RE = re.compile(
     r"^codd:\s*$.*?(?=^\S|\Z)", re.MULTILINE | re.DOTALL
 )
-_CODD_METADATA_ERROR = "design_updater: frontmatter 'codd:' block was modified (tooling-owned)"
+
+_FRONTMATTER_DELIMITER_RE = re.compile(r"^\ufeff?---[ \t]*\r?$", re.MULTILINE)
+_MARKDOWN_PREFACE_RE = re.compile(
+    r"^(?:[#>+*~_<|\[`-]|\d+[.)](?:[ \t]|$))|```|~~~"
+)
+#: One line of prose ahead of the frontmatter is never document content (the
+#: document starts at its frontmatter), so the cap only bounds what is dropped.
+#: Observed prefaces from real runs were 13, 67 and 191 characters long.
+_MAX_PREFACE_CHARS = 400
 
 
 class DesignUpdateError(Exception):
@@ -65,10 +66,7 @@ def update_design_doc(
       allow_delete is True.
     """
     target_path = Path(target_path)
-    with target_path.open(encoding="utf-8", newline="") as source:
-        original = source.read()
-        newline = source.newlines
-    normalized_original = _normalize_newlines(original)
+    original = target_path.read_text(encoding="utf-8")
 
     template = load_template("design_update.txt", override=template_path)
     prompt = render_template(
@@ -77,8 +75,9 @@ def update_design_doc(
         analysis_json=json.dumps(analysis.to_dict(), ensure_ascii=False),
         allow_delete="true" if allow_delete else "false",
         target_path=str(target_path),
-        current_content=normalized_original,
+        current_content=original,
     )
+
     if retry_feedback is not None:
         prompt += "\n" + retry_feedback + "\n"
 
@@ -87,12 +86,18 @@ def update_design_doc(
     if not proposed.strip():
         raise DesignUpdateError("LLM returned empty document body")
 
-    if not allow_delete:
-        _assert_no_required_section_removed(normalized_original, proposed)
+    # Only recover a form that the legacy metadata check would reject.
+    original_block = _extract_codd_block(original)
+    reason = ""
+    if original_block and _extract_codd_block(proposed) != original_block:
+        document = _strip_short_preface(raw)
+        if document is not None:
+            proposed = document
+            reason = "Discarded a short preface before the frontmatter."
 
-    if newline in ("\r", "\r\n"):
-        proposed = _normalize_newlines(proposed).replace("\n", newline)
-    proposed = _preserve_codd_metadata(original, proposed)
+    _assert_codd_metadata_preserved(original_block, proposed)
+    if not allow_delete:
+        _assert_no_required_section_removed(original, proposed)
 
     diff = _make_diff(target_path, original, proposed)
     changed = original != proposed
@@ -103,6 +108,7 @@ def update_design_doc(
         proposed_content=proposed,
         diff=diff,
         changed=changed,
+        reason=reason,
     )
 
 
@@ -110,7 +116,7 @@ def apply_update(update: DesignUpdate) -> None:
     """Write the proposed content to disk (no-op when unchanged)."""
     if update.is_no_op():
         return
-    update.target_path.write_text(update.proposed_content, encoding="utf-8", newline="")
+    update.target_path.write_text(update.proposed_content, encoding="utf-8")
 
 
 def _strip_code_fence(raw: str) -> str:
@@ -119,6 +125,42 @@ def _strip_code_fence(raw: str) -> str:
     if fenced:
         return fenced.group(1).strip() + "\n"
     return text + ("\n" if not text.endswith("\n") else "")
+
+
+def _strip_short_preface(raw: str) -> str | None:
+    """Recognize one line of plain prose before a complete YAML frontmatter."""
+    opening = _FRONTMATTER_DELIMITER_RE.search(raw)
+    if opening is None or opening.start() == 0:
+        return None
+
+    line, _, blank_lines = raw[:opening.start()].partition("\n")
+    if "\n" not in blank_lines or blank_lines.strip():
+        return None
+
+    line = line.removesuffix("\r").lstrip("\ufeff")
+    prose = line.lstrip()
+    if (
+        not prose
+        or len(line) > _MAX_PREFACE_CHARS
+        or line.splitlines() != [line]
+        or line.startswith("    ")
+        or "\t" in line
+        or _MARKDOWN_PREFACE_RE.search(prose)
+    ):
+        return None
+
+    document = _strip_code_fence(raw[opening.start():])
+    try:
+        frontmatter = parse_frontmatter(document)
+        if frontmatter.error is not None or "codd" not in frontmatter.mapping:
+            return None
+        following = parse_frontmatter(frontmatter.body.lstrip())
+    except (RecursionError, ValueError):
+        # Keep malformed model output on the normal validation/retry path.
+        return None
+    if following.has_block and following.error is None:
+        return None
+    return document
 
 
 REQUIRED_SECTION_KEYS = (
@@ -166,106 +208,37 @@ def _count_section_entries(text: str, key: str) -> int:
     return count
 
 
-def _preserve_codd_metadata(original: str, proposed: str) -> str:
-    original_fm = _FRONTMATTER_RE.match(original)
-    proposed_fm = _FRONTMATTER_RE.match(proposed)
-    original_span = _codd_block_span(original_fm)
-    proposed_span = _codd_block_span(proposed_fm)
-    missing = object()
-    original_value = parse_frontmatter(original).mapping.get("codd", missing)
-    parsed = parse_frontmatter(proposed)
-    proposed_value = parsed.mapping.get("codd", missing)
+def _assert_codd_metadata_preserved(original_block: str, proposed: str) -> None:
+    proposed_block = _extract_codd_block(proposed)
+    if original_block == proposed_block:
+        return
 
-    if original_span is None:
-        if proposed_span is not None or proposed_value != original_value:
-            raise DesignUpdateError(_CODD_METADATA_ERROR)
-        return proposed
-
-    original_start, original_end = original_span
-    saved_block = original[original_start:original_end]
-    if proposed_span is not None:
-        start, end = proposed_span
-        if (
-            proposed_value != original_value
-            or _normalize_newlines(proposed[start:end]).rstrip()
-            != _normalize_newlines(saved_block).rstrip()
-        ):
-            raise DesignUpdateError(_CODD_METADATA_ERROR)
-        restored = proposed[:start] + saved_block + proposed[end:]
+    opening = _FRONTMATTER_DELIMITER_RE.search(proposed)
+    if original_block and (
+        opening is None or not _FRONTMATTER_DELIMITER_RE.search(proposed, opening.end())
+    ):
+        reason = "frontmatter is missing or incomplete"
+    elif original_block and opening is not None and opening.start():
+        reason = "the document must start with its original frontmatter"
+    elif not proposed_block:
+        reason = "frontmatter 'codd:' block is missing (tooling-owned)"
     else:
-        if proposed_value is not missing or original_value is missing:
-            raise DesignUpdateError(_CODD_METADATA_ERROR)
-        assert original_fm is not None
-        if proposed_fm is None:
-            if parsed.error:
-                raise DesignUpdateError(_CODD_METADATA_ERROR)
-            opening = original[:original_fm.start("header")]
-            closing = original[original_fm.end("header"):original_fm.end()]
-            if not closing.endswith(("\r", "\n")):
-                closing += original_fm.group("newline")
-            restored = opening + saved_block + closing + proposed
-        else:
-            insertion = proposed_fm.end("header")
-            original_prefix = original[original_fm.start("header"):original_start]
-            if proposed_fm.group("header").startswith(original_prefix):
-                insertion = proposed_fm.start("header") + len(original_prefix)
-            restored = proposed[:insertion] + saved_block + proposed[insertion:]
-            if parsed.error:
-                # A restored anchor can make previously unparseable YAML
-                # readable. Check for duplicate keys before comparing values.
-                _codd_block_span(_FRONTMATTER_RE.match(restored))
-
-    # An alias or surrounding YAML can affect the meaning of the restored text.
-    if parse_frontmatter(restored).mapping.get("codd", missing) != original_value:
-        raise DesignUpdateError(_CODD_METADATA_ERROR)
-    return restored
-
-
-def _codd_block_span(frontmatter: re.Match[str] | None) -> tuple[int, int] | None:
-    """Locate the original text of a block-mapping entry without dumping YAML."""
-    if frontmatter is None:
-        return None
-    offset = frontmatter.start("header")
-    header = frontmatter.group("header")
-    try:
-        root = yaml.compose(header, Loader=yaml.SafeLoader)
-    except yaml.YAMLError:
-        # Keep the existing text check for legacy documents with malformed YAML.
-        legacy = _FRONTMATTER_CODD_BLOCK_RE.search(header)
-        return (offset + legacy.start(), offset + legacy.end()) if legacy else None
-    if not isinstance(root, yaml.MappingNode):
-        return None
-    keys = [key for key, _value in root.value]
-    indexes = [
-        index for index, key in enumerate(keys)
-        if isinstance(key, yaml.ScalarNode) and key.value == "codd"
-    ]
-    if len(indexes) > 1:
-        raise DesignUpdateError(_CODD_METADATA_ERROR)
-    if not indexes or root.flow_style:
-        return None
-    index = indexes[0]
-    start = keys[index].start_mark
-    lines = header.splitlines(keepends=True)
-    end_line = keys[index + 1].start_mark.line if index + 1 < len(keys) else len(lines)
-    # A comment between the key and value is part of the slice. Dedented
-    # comments following the value belong to the surrounding frontmatter.
-    for line_number in range(end_line - 1, start.line, -1):
-        line = lines[line_number]
-        stripped = line.lstrip()
-        if not stripped:
-            continue
-        if not stripped.startswith("#") or len(line) - len(stripped) > start.column:
-            break
-        end_line = line_number
-    return (
-        offset + start.index - start.column,
-        offset + sum(len(line) for line in lines[:end_line]),
+        reason = "frontmatter 'codd:' block was modified (tooling-owned)"
+    raise DesignUpdateError(
+        f"design_updater: {reason}. Return only the full updated document, "
+        "preserve the original frontmatter verbatim, and omit any preface."
     )
 
 
-def _normalize_newlines(text: str) -> str:
-    return text.replace("\r\n", "\n").replace("\r", "\n")
+def _extract_codd_block(text: str) -> str:
+    fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n?", text, re.DOTALL)
+    if not fm_match:
+        return ""
+    fm = fm_match.group(1)
+    block_match = _FRONTMATTER_CODD_BLOCK_RE.search(fm)
+    if not block_match:
+        return ""
+    return block_match.group(0).rstrip()
 
 
 def _make_diff(target_path: Path, original: str, proposed: str) -> str:

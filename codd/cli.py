@@ -7585,6 +7585,8 @@ def _run_phenomenon_fix_cli(
         status = "✅" if att.applied else ("🔸" if att.aborted_reason == "dry_run: not applying" else "❌")
         target_id = att.target.node_id if att.target else "(no target)"
         click.echo(f"{status} Attempt {att.attempt} on {target_id}")
+        if att.update is not None and att.update.reason:
+            click.echo(f"  {att.update.reason}", err=True)
         if att.update is not None and att.update.diff:
             for line in att.update.diff.splitlines()[:40]:
                 click.echo(f"  {line}")
