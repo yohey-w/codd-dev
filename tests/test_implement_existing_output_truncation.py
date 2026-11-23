@@ -23,6 +23,7 @@ from codd.implementer import (
     _build_implementation_prompt,
     _existing_output_files_context,
 )
+from codd.llm.impl_step_deriver import ImplStep, SubprocessAiCommandImplStepDeriver
 
 
 LIMIT = 20000
@@ -632,3 +633,192 @@ def test_implement_writes_back_tracked_japanese_agent_edit(tmp_path, monkeypatch
     written = target.read_text(encoding="utf-8")
     assert written.startswith("# @generated-by: codd implement\n")
     assert written.rstrip().endswith(replacement.rstrip())
+
+
+def approve_output_step(monkeypatch, *paths):
+    step = ImplStep(
+        id="edit_unit",
+        kind="implementation",
+        rationale="Update the existing output.",
+        source_design_section="Preserve existing behavior.",
+        expected_outputs=list(paths),
+        approved=True,
+    )
+    monkeypatch.setattr(SubprocessAiCommandImplStepDeriver, "derive_steps", lambda *args: [step])
+
+
+def test_implement_stdout_replaces_over_limit_file_shown_in_steps(tmp_path, monkeypatch, capsys):
+    root = project(tmp_path, retries=1)
+    path = "src/unit.py"
+    target = put(root, path, "#" + "x" * LIMIT + "\npreserve = 1\n")
+    approve_output_step(monkeypatch, path)
+    prompts = []
+
+    def invoke(command, prompt, **kwargs):
+        assert f"=== EXISTING FILE: {path} ===\n" in prompt
+        prompts.append(prompt)
+        return block(path)
+
+    monkeypatch.setattr(implementation.generator_module, "_invoke_ai_command", invoke)
+    try:
+        result = Implementer(root, use_derived_steps=True).run_implement(
+            ImplementSpec("docs/design.md", ["src"], expected_outputs=[path]),
+        )
+    except CoddCLIError as exc:
+        pytest.fail(f"stdout replacement rejected after {len(prompts)} attempts: {exc}")
+    assert result.generated_files == [target]
+    assert target.read_text().rstrip().endswith("value = 2")
+    assert len(prompts) == 1
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("size", [16, LIMIT], ids=["under-limit", "over-limit"])
+def test_implement_output_shown_in_steps_appears_once_and_is_full(tmp_path, monkeypatch, size):
+    root = project(tmp_path)
+    path = "src/unit.py"
+    other = "src/other.py"
+    marker = "# UNIQUE_EXISTING_BODY "
+    body = marker + "x" * size + "\npreserve = 1\n"
+    put(root, path, body)
+    put(root, other, "#" + "y" * LIMIT + "\n")
+    approve_output_step(monkeypatch, path)
+    prompts = []
+
+    def invoke(command, prompt, **kwargs):
+        prompts.append(prompt)
+        return block("src/new.py")
+
+    monkeypatch.setattr(implementation.generator_module, "_invoke_ai_command", invoke)
+    Implementer(root, use_derived_steps=True).run_implement(
+        ImplementSpec("docs/design.md", ["src"], expected_outputs=[path, other]),
+    )
+
+    (prompt,) = prompts
+    steps, declared = prompt.split("Existing content of this task's declared output files:", 1)
+    assert f"=== EXISTING FILE: {path} ===\n{body}" in steps
+    assert prompt.count(marker) == 1
+    assert any(path in line and "Implementation steps" in line for line in declared.splitlines())
+    assert f"FULL: {path}" in declared
+    assert f"PARTIAL: {path}" not in declared
+    assert f"OMITTED: {path}" not in declared
+    assert f"{'PARTIAL' if size < LIMIT else 'OMITTED'}: {other}" in declared
+    assert "Safety rule" in declared
+
+
+@pytest.mark.parametrize("use_alias", [False, True], ids=["under-limit", "full-through-alias"])
+def test_implement_stdout_replaces_stale_steps_content_within_budget(tmp_path, monkeypatch, use_alias):
+    path = "src/unit.py"
+    original = "preserve = 1\n"
+    root = project(tmp_path, limit=len(original) if use_alias else LIMIT)
+    target = put(root, path, original)
+    outputs = [path]
+    if use_alias:
+        outputs.append("src/alias.py")
+        (root / outputs[-1]).hardlink_to(target)
+    approve_output_step(monkeypatch, path)
+    disk_edit = "changed_on_disk = 3\n"
+    replacement = "from_stdout = 2\n"
+
+    def invoke(command, prompt, **kwargs):
+        assert f"=== EXISTING FILE: {path} ===\n{original}" in prompt
+        assert "Existing content of this task's declared output files:" in prompt
+        target.write_text(disk_edit)
+        return block(outputs[-1], replacement)
+
+    monkeypatch.setattr(implementation.generator_module, "_invoke_ai_command", invoke)
+    result = Implementer(root, use_derived_steps=True).run_implement(
+        ImplementSpec("docs/design.md", ["src"], expected_outputs=outputs),
+    )
+
+    assert result.generated_files == [root / outputs[-1]]
+    written = target.read_text()
+    assert written.endswith(replacement)
+    assert disk_edit not in written
+
+
+@pytest.mark.parametrize("preceding_file", [False, True], ids=["over-limit", "budget-exhausted"])
+def test_implement_stdout_rejects_stale_steps_content_before_writing_batch(tmp_path, monkeypatch, preceding_file):
+    root = project(tmp_path)
+    path = "src/unit.py"
+    outputs = [path]
+    size = LIMIT
+    if preceding_file:
+        put(root, "src/first.py", "#" + "y" * (LIMIT - 2) + "\n")
+        outputs.insert(0, "src/first.py")
+        size = 16
+    original = "#" + "x" * size + "\npreserve = 1\n"
+    target = put(root, path, original)
+    approve_output_step(monkeypatch, path)
+
+    def invoke(command, prompt, **kwargs):
+        assert original in prompt
+        # A byte-only change must also invalidate the earlier snapshot.
+        target.write_bytes(original.replace("\n", "\r\n").encode("utf-8"))
+        return block("src/new.py") + block(path)
+
+    monkeypatch.setattr(implementation.generator_module, "_invoke_ai_command", invoke)
+    with pytest.raises(CoddCLIError, match=r"changed after .*prompt.*src/unit.py"):
+        Implementer(root, use_derived_steps=True).run_implement(
+            ImplementSpec("docs/design.md", ["src"], expected_outputs=outputs),
+        )
+
+    assert target.read_bytes() == original.replace("\n", "\r\n").encode("utf-8")
+    assert not (root / "src/new.py").exists()
+
+
+@pytest.mark.parametrize("large_changed", [False, True], ids=["large-fresh", "large-stale"])
+def test_implement_stdout_checks_only_steps_files_that_exceed_remaining_budget(tmp_path, monkeypatch, large_changed):
+    root = project(tmp_path)
+    small_path = "src/small.py"
+    large_path = "src/large.py"
+    small = put(root, small_path, "small = 1\n")
+    large = put(root, large_path, "#" + "x" * LIMIT + "\nlarge = 1\n")
+    approve_output_step(monkeypatch, small_path, large_path)
+    small_disk_edit = "small_from_disk = 3\n"
+    large_disk_edit = "large_from_disk = 3\n"
+    small_replacement = "small_from_stdout = 2\n"
+    large_replacement = "large_from_stdout = 2\n"
+
+    def invoke(command, prompt, **kwargs):
+        small.write_text(small_disk_edit)
+        if large_changed:
+            large.write_text(large_disk_edit)
+        return block(small_path, small_replacement) + block(large_path, large_replacement)
+
+    monkeypatch.setattr(implementation.generator_module, "_invoke_ai_command", invoke)
+    implementer = Implementer(root, use_derived_steps=True)
+    spec = ImplementSpec("docs/design.md", ["src"], expected_outputs=[small_path, large_path])
+    if large_changed:
+        with pytest.raises(CoddCLIError, match=r"changed after .*prompt.*src/large.py"):
+            implementer.run_implement(spec)
+        assert small.read_text() == small_disk_edit
+        assert large.read_text() == large_disk_edit
+    else:
+        assert implementer.run_implement(spec).generated_files == [small, large]
+        assert small.read_text().endswith(small_replacement)
+        assert large.read_text().endswith(large_replacement)
+
+
+def test_implement_stdout_rejects_atomically_replaced_steps_symlink_target(tmp_path, monkeypatch):
+    root = project(tmp_path)
+    path = "src/unit.py"
+    original = "#" + "x" * LIMIT + "\npreserve = 1\n"
+    target = put(root, path, original)
+    (root / "src/step.py").symlink_to(target.name)
+    declared = root / "src/declared.py"
+    declared.hardlink_to(target)
+    approve_output_step(monkeypatch, "src/step.py")
+
+    def invoke(command, prompt, **kwargs):
+        assert original in prompt
+        put(root, "src/saved.py", "preserve = 3\n").replace(target)
+        return block(path)
+
+    monkeypatch.setattr(implementation.generator_module, "_invoke_ai_command", invoke)
+    with pytest.raises(CoddCLIError, match=r"changed after .*prompt.*src/unit.py"):
+        Implementer(root, use_derived_steps=True).run_implement(
+            ImplementSpec("docs/design.md", ["src"], expected_outputs=["src/declared.py"]),
+        )
+
+    assert target.read_text() == "preserve = 3\n"
+    assert declared.read_text() == original
