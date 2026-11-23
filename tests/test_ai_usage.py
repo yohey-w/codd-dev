@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import shlex
 import subprocess
@@ -351,6 +352,72 @@ def test_usage_file_writing_disabled_keeps_historical_git_argv(tmp_path, monkeyp
     assert not (tmp_path / "new.txt").exists()
 
 
+@pytest.mark.parametrize("enabled", [False, True], ids=["usage-off", "usage-on"])
+@pytest.mark.parametrize("nested", [False, True], ids=["root", "nested"])
+def test_usage_file_writing_captures_project_relative_paths(make_git_project, monkeypatch, enabled, nested):
+    project, git = make_git_project("capture", nested=nested)
+    log = project / "usage.jsonl"
+    if enabled:
+        monkeypatch.setenv("CODD_AI_USAGE_LOG", str(log))
+    source = project / "source.txt"
+    source.write_text("user edit")
+    baseline = git("status", "--porcelain")
+    calls = []
+    real_run = subprocess.run
+
+    def run(argv, **kwargs):
+        if argv[0] == "git":
+            calls.append(argv)
+        return real_run(argv, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ai.subprocess, "run", run)
+        output = run_file_writing_agent(
+            project,
+            "Path('source.txt').write_text('agent edit')\n"
+            "Path('new.txt').write_text('agent addition')\n",
+        )
+
+    assert source.read_text() == "user edit"
+    assert not (project / "new.txt").exists()
+    if enabled:
+        assert [row["route"] for row in records(log)] == ["file_writing"]
+        log.unlink()
+    assert git("status", "--porcelain") == baseline
+    assert output == "=== FILE: new.txt ===\nagent addition\n\n=== FILE: source.txt ===\nagent edit\n"
+    assert output.captured_paths == {source.resolve(), (project / "new.txt").resolve()}
+    if not nested:
+        exclusion = [":(literal,exclude)usage.jsonl"] if enabled else []
+        repo_paths = ["--", ":/", *exclusion] if enabled else []
+        project_paths = ["--", ".", *exclusion] if enabled else []
+        assert calls == [
+            ["git", "add", "-A", *repo_paths],
+            ["git", "diff", "--name-only", *repo_paths],
+            ["git", "ls-files", "--others", "--exclude-standard", *project_paths],
+            ["git", "checkout", "--", ".", *exclusion],
+            ["git", "reset", "--quiet"],
+        ]
+
+
+@pytest.mark.parametrize("enabled", [False, True], ids=["usage-off", "usage-on"])
+def test_usage_file_writing_ignores_outside_edit_with_same_name(nested_git_project, monkeypatch, enabled):
+    project, _ = nested_git_project
+    inside = project / "outside.txt"
+    outside = project.parent / "outside.txt"
+    inside.write_text("same name inside project")
+    log = project / "usage.jsonl"
+    if enabled:
+        monkeypatch.setenv("CODD_AI_USAGE_LOG", str(log))
+
+    with pytest.raises(ValueError, match="did not produce any file changes"):
+        run_file_writing_agent(project, "Path('../outside.txt').write_text('outside edit')\n")
+
+    assert outside.read_text() == "outside edit"
+    assert inside.read_text() == "same name inside project"
+    if enabled:
+        assert [row["route"] for row in records(log)] == ["file_writing"]
+
+
 @pytest.mark.parametrize("nested,log_location", [
     pytest.param(False, "project", id="root-log-inside-project"),
     pytest.param(True, "project", id="nested-log-inside-project"),
@@ -391,13 +458,9 @@ def test_usage_file_writing_keeps_output_and_revert(make_git_project, monkeypatc
     expected_output = "=== FILE: new.txt ===\nagent addition\n"
     expected_status = []
     if nested:
-        # The historical diff reports repo-relative paths. From project_root,
-        # project/source.txt is absent and outside.txt names the project file.
-        expected_output += "outside-new.txt\noutside.txt\n\n"
-        expected_output += "=== FILE: outside.txt ===\nproject file with the same name\n"
+        expected_output += "outside-new.txt\noutside.txt\n"
         expected_status = [" M outside.txt", "?? outside-new.txt"]
-    else:
-        expected_output += "\n=== FILE: source.txt ===\nagent change\n"
+    expected_output += "\n=== FILE: source.txt ===\nagent change\n"
     assert baseline == [(expected_output, expected_status)] * 2
 
     project, repo, git = make("enabled")
@@ -445,7 +508,7 @@ def test_usage_file_writing_nested_project_keeps_log_appends(nested_git_project,
     assert rows[:-1] == ([baseline, appended] if tracked else [appended])
     assert rows[-1]["route"] == "file_writing"
     assert str(relative_log) not in output
-    assert output == "=== FILE: new.txt ===\nagent addition\n"
+    assert output == "=== FILE: new.txt ===\nagent addition\n\n=== FILE: source.txt ===\nagent change\n"
     assert (project / "source.txt").read_text() == "baseline"
     assert not (project / "new.txt").exists()
     assert (str(log.relative_to(project.parent)) in git("ls-files").splitlines()) is tracked
@@ -515,6 +578,176 @@ def test_usage_file_writing_keeps_repo_wide_baseline_staging(nested_git_project,
     assert (project.parent / "outside.txt").read_text() == "user edit"
     assert (project.parent / "outside-new.txt").read_text() == "user addition"
     assert git("diff", "--cached", "--name-only") == ""
+
+
+@pytest.mark.parametrize("enabled", [False, True], ids=["usage-off", "usage-on"])
+@pytest.mark.parametrize("nested", [False, True], ids=["root", "nested"])
+@pytest.mark.parametrize("source_path,new_path", [
+    pytest.param("test files/source file.txt", "test files/new file.txt", id="ascii"),
+    pytest.param("対象 フォルダ/source 既存.txt", "対象 フォルダ/new 追加.txt", id="japanese"),
+])
+def test_usage_file_writing_captures_paths_with_spaces(
+    make_git_project, monkeypatch, enabled, nested, source_path, new_path,
+):
+    project, git = make_git_project("paths-with-spaces", nested=nested)
+    git("config", "core.quotePath", "true")
+    source = project / source_path
+    source.parent.mkdir()
+    source.write_text("baseline", encoding="utf-8")
+    git("add", "--", str(source))
+    git("commit", "-qm", "path with spaces baseline")
+    source.write_text("user edit", encoding="utf-8")
+    baseline = git("status", "--porcelain")
+    log = project / "usage.jsonl"
+    if enabled:
+        monkeypatch.setenv("CODD_AI_USAGE_LOG", str(log))
+
+    output = run_file_writing_agent(
+        project,
+        f"Path({source_path!r}).write_text('agent edit', encoding='utf-8')\n"
+        f"Path({new_path!r}).write_text('agent addition', encoding='utf-8')\n",
+    )
+
+    assert output == f"=== FILE: {new_path} ===\nagent addition\n\n=== FILE: {source_path} ===\nagent edit\n"
+    assert output.captured_paths == {source.resolve(), (project / new_path).resolve()}
+    assert source.read_text(encoding="utf-8") == "user edit"
+    assert not (project / new_path).exists()
+    if enabled:
+        assert [row["route"] for row in records(log)] == ["file_writing"]
+        log.unlink()
+    else:
+        assert not log.exists()
+    assert git("status", "--porcelain") == baseline
+    assert git("config", "--get", "core.quotePath") == "true\n"
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["root", "nested"])
+@pytest.mark.parametrize("tracked", [False, True], ids=["untracked", "tracked"])
+@pytest.mark.parametrize("mixed", [False, True], ids=["invalid-only", "mixed"])
+def test_usage_file_writing_handles_invalid_utf8_paths(make_git_project, monkeypatch, nested, tracked, mixed):
+    project, git = make_git_project("invalid-utf8", nested=nested)
+    git("config", "core.quotePath", "true")
+    invalid_name = b"caf\xe9.txt"
+    try:
+        invalid_path = project / os.fsdecode(invalid_name)
+        invalid_path.write_text("baseline", encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        if sys.platform.startswith("linux"):
+            raise
+        pytest.skip(f"Filesystem does not accept the non-UTF-8 test filename: {exc!r}")
+    if tracked:
+        git("add", "-A")
+        git("commit", "-qm", "non-UTF-8 path baseline")
+    else:
+        invalid_path.unlink()
+
+    source = project / "source.txt"
+    source.write_text("user edit", encoding="utf-8")
+    baseline_status = git("status", "--porcelain")
+    baseline_cached = git("diff", "--cached", "--name-only")
+    repo = project.parent if nested else project
+    log = repo.parent / "usage.jsonl"
+    monkeypatch.setenv("CODD_AI_USAGE_LOG", str(log))
+
+    agent_source = (
+        "import os\n"
+        f"Path(os.fsdecode({invalid_name!r})).write_text('invalid path edit', encoding='utf-8')\n"
+    )
+    new_name = "追加 file.txt"
+    if mixed:
+        output = run_file_writing_agent(
+            project,
+            agent_source + "Path('source.txt').write_text('agent edit', encoding='utf-8')\n"
+            f"Path({new_name!r}).write_text('agent addition', encoding='utf-8')\n",
+        )
+        assert output == f"=== FILE: source.txt ===\nagent edit\n\n=== FILE: {new_name} ===\nagent addition\n"
+        assert output.captured_paths == {source.resolve(), (project / new_name).resolve()}
+        assert not (project / new_name).exists()
+    else:
+        with pytest.raises(ValueError, match="^AI command did not produce any readable file changes$"):
+            run_file_writing_agent(project, agent_source)
+
+    # Historically Git quoted this path. Checkout restored tracked edits, and
+    # cleanup left newly created files with these names on disk.
+    expected_status = baseline_status
+    if not tracked:
+        prefix = f"{project.name}/" if nested else ""
+        expected_status += f'?? "{prefix}caf\\351.txt"\n'
+    assert git("status", "--porcelain") == expected_status
+    assert git("diff", "--cached", "--name-only") == baseline_cached == ""
+    assert source.read_text(encoding="utf-8") == "user edit"
+    assert invalid_path.read_text(encoding="utf-8") == ("baseline" if tracked else "invalid path edit")
+    row, = records(log)
+    assert row["route"] == "file_writing"
+    assert row["outcome"] == ("success" if mixed else "no_readable_changes")
+
+
+@pytest.mark.parametrize("tracked", [False, True], ids=["untracked", "tracked"])
+@pytest.mark.parametrize("nested", [False, True], ids=["root", "nested"])
+def test_usage_file_writing_excludes_japanese_log_path(make_git_project, monkeypatch, tracked, nested):
+    project, git = make_git_project("japanese-log", nested=nested)
+    relative_log = "計測 ログ/使用 記録.jsonl"
+    log = project / relative_log
+    log.parent.mkdir()
+    baseline = '{"marker":"before"}\n'
+    append = '{"marker":"during"}\n'
+    log.write_text(baseline, encoding="utf-8")
+    if tracked:
+        git("add", "--", str(log))
+        git("commit", "-qm", "Japanese usage log baseline")
+    monkeypatch.setenv("CODD_AI_USAGE_LOG", relative_log)
+
+    output = run_file_writing_agent(
+        project,
+        f"with Path({relative_log!r}).open('a', encoding='utf-8') as stream:\n"
+        f"    stream.write({append!r})\n"
+        "Path('source.txt').write_text('agent edit')\n"
+        "Path('new.txt').write_text('agent addition')\n",
+    )
+
+    assert output == "=== FILE: new.txt ===\nagent addition\n\n=== FILE: source.txt ===\nagent edit\n"
+    assert output.captured_paths == {(project / "source.txt").resolve(), (project / "new.txt").resolve()}
+    assert log.read_text(encoding="utf-8").startswith(baseline + append)
+    rows = records(log)
+    assert len(rows) == 3 and rows[-1]["route"] == "file_writing"
+    assert (project / "source.txt").read_text() == "baseline"
+    assert not (project / "new.txt").exists()
+    log_status = " M" if tracked else "??"
+    repo_relative_log = f"{project.name}/{relative_log}" if nested else relative_log
+    assert git("status", "--porcelain", "-z", "--untracked-files=all") == f"{log_status} {repo_relative_log}\0"
+
+
+def test_usage_file_writing_preserves_git_config_parameters(nested_git_project, monkeypatch):
+    project, _ = nested_git_project
+    original = "'test.capture'='value with spaces' 'core.quotepath=true' 'diff.relative=false'"
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", original)
+    real_run = subprocess.run
+    capture_configs = {}
+
+    def run(argv, **kwargs):
+        if argv in (["git", "diff", "--name-only"], ["git", "ls-files", "--others", "--exclude-standard"]):
+            capture_configs[argv[1]] = tuple(
+                real_run(
+                    ["git", "config", "--get", key], cwd=kwargs["cwd"], env=kwargs.get("env"),
+                    check=True, capture_output=True, text=True,
+                ).stdout.rstrip("\n")
+                for key in ("test.capture", "core.quotepath", "diff.relative")
+            )
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(ai.subprocess, "run", run)
+    output = run_file_writing_agent(
+        project,
+        "Path('source.txt').write_text('agent edit')\n"
+        "Path('new.txt').write_text('agent addition')\n",
+    )
+
+    assert output == "=== FILE: new.txt ===\nagent addition\n\n=== FILE: source.txt ===\nagent edit\n"
+    assert capture_configs == {
+        "diff": ("value with spaces", "false", "true"),
+        "ls-files": ("value with spaces", "false", "false"),
+    }
+    assert os.environ["GIT_CONFIG_PARAMETERS"] == original
 
 
 def test_usage_real_subprocess_and_cli_summary(tmp_path, monkeypatch):

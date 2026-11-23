@@ -4,7 +4,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import pickle
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -558,3 +560,75 @@ def test_implement_real_agent_atomic_save_of_symlink_is_accepted(tmp_path, monke
     result = Implementer(root).run_implement(ImplementSpec("docs/design.md", ["src/alias.py"]))
     assert result.generated_files == [alias]
     assert replacement.rstrip() in canonical.read_text()
+
+
+@pytest.mark.parametrize("enabled", [False, True], ids=["usage-off", "usage-on"])
+def test_implement_writes_back_tracked_agent_edit_in_nested_project(tmp_path, monkeypatch, enabled):
+    repo = tmp_path / "repo"
+    root = project(repo / "project")
+    path = "src/unit.py"
+    original = "#" + "p" * LIMIT + "\npreserve = 1\n"
+    target = put(root, path, original)
+    replacement = original + "added = 2\n"
+    if enabled:
+        monkeypatch.setenv("CODD_AI_USAGE_LOG", "usage.jsonl")
+    else:
+        monkeypatch.delenv("CODD_AI_USAGE_LOG", raising=False)
+    real_run = subprocess.run
+    real_run(["git", "init", "-q", str(repo)], check=True)
+    real_run(["git", "add", "-A"], cwd=repo, check=True)
+
+    def run(argv, **kwargs):
+        if argv[0] == "git":
+            return real_run(argv, **kwargs)
+        assert argv == ["codex-local"]
+        assert Path(kwargs["cwd"]) == root
+        assert f"PARTIAL: {path}" in kwargs["input"]
+        target.write_text(replacement, encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(ai_invoke.subprocess, "run", run)
+    result = Implementer(root, ai_command="codex-local").run_implement(
+        ImplementSpec("docs/design.md", [path], expected_outputs=[path]),
+    )
+
+    assert result.generated_files == [target]
+    written = target.read_text()
+    assert written.startswith("# @generated-by: codd implement\n")
+    assert written.rstrip().endswith(replacement.rstrip())
+    assert (root / "usage.jsonl").exists() is enabled
+
+
+def test_implement_writes_back_tracked_japanese_agent_edit(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    root = project(repo / "project")
+    path = "src/集計 処理.py"
+    original = "#" + "p" * LIMIT + "\npreserve = 1\n"
+    target = put(root, path, original)
+    replacement = original + "added = 2\n"
+    monkeypatch.delenv("CODD_AI_USAGE_LOG", raising=False)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "config", "core.quotePath", "true"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "baseline"],
+        cwd=repo, check=True,
+    )
+    executable = put(
+        tmp_path, "codex-local",
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "from pathlib import Path\n"
+        f"assert {f'PARTIAL: {path}'!r} in sys.stdin.read()\n"
+        f"Path({path!r}).write_text({replacement!r}, encoding='utf-8')\n",
+    )
+    executable.chmod(0o755)
+
+    result = Implementer(root, ai_command=shlex.quote(str(executable))).run_implement(
+        ImplementSpec("docs/design.md", [path], expected_outputs=[path]),
+    )
+
+    assert result.generated_files == [target]
+    written = target.read_text(encoding="utf-8")
+    assert written.startswith("# @generated-by: codd implement\n")
+    assert written.rstrip().endswith(replacement.rstrip())
