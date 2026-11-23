@@ -736,6 +736,36 @@ def test_implement_stdout_replaces_stale_steps_content_within_budget(tmp_path, m
     assert disk_edit not in written
 
 
+@pytest.mark.parametrize("second_name", ["same-path", "hard-link"])
+def test_implement_stdout_steps_file_is_checked_once_before_the_batch(tmp_path, monkeypatch, second_name):
+    """The stale-content check runs once, before any write.
+
+    A later block for the same over-limit file (the same path again, or another
+    name for the same file) must not be compared with content this batch wrote a
+    moment ago: that would stop the run with the first block already on disk.
+    """
+    root = project(tmp_path)
+    path = "src/unit.py"
+    target = put(root, path, "#" + "x" * LIMIT + "\npreserve = 1\n")
+    second = path
+    if second_name == "hard-link":
+        second = "src/alias.py"
+        (root / second).hardlink_to(target)
+    approve_output_step(monkeypatch, path)
+    monkeypatch.setattr(
+        implementation.generator_module, "_invoke_ai_command",
+        lambda command, prompt, **kwargs: block(path, "value = 1\n") + block(second, "value = 2\n"),
+    )
+
+    Implementer(root, use_derived_steps=True).run_implement(
+        ImplementSpec("docs/design.md", ["src"], expected_outputs=[path]),
+    )
+
+    assert (root / second).read_text(encoding="utf-8").rstrip().endswith("value = 2")
+    if second_name == "hard-link":
+        assert target.read_text(encoding="utf-8") == (root / second).read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("preceding_file", [False, True], ids=["over-limit", "budget-exhausted"])
 def test_implement_stdout_rejects_stale_steps_content_before_writing_batch(tmp_path, monkeypatch, preceding_file):
     root = project(tmp_path)

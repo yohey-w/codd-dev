@@ -3656,8 +3656,10 @@ def _write_generated_files(
                 "exists on disk as a FILE — path-kind collision"
             )
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if step_snapshots is not None and step_snapshots.by_path:
-            _verify_existing_step_output(project_root, relative_path, step_snapshots, captured_paths)
+        # The stale-content check above runs once, before any write. Repeating it
+        # here would measure a later block against content this batch just wrote
+        # (the same path twice, or another name for the same file) and stop with
+        # the batch half-written.
         destination.write_text(_prepend_traceability_comment(relative_path, traceability_comment, content), encoding="utf-8")
         generated_paths.append(destination)
     return generated_paths
