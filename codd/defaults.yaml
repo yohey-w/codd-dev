@@ -77,6 +77,9 @@ requirement_completeness:
   ai_generate_options: false
   ai_timeout_seconds: 30
 implement:
+  # Maximum characters of existing declared output content in the prompt.
+  # Set a positive limit to override the default of 20,000 characters.
+  existing_output_files_prompt_limit: null
   # Write-time syntax sanity gate for `codd implement`: every AI-produced file
   # payload with a stdlib-checkable format (Python via ast, JSON, YAML, TOML)
   # must parse BEFORE anything is written to disk. A failure routes a clear

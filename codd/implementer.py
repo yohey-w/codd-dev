@@ -448,6 +448,10 @@ def _syntax_gate_max_attempts(config: dict[str, Any]) -> int:
     return DEFAULT_SYNTAX_GATE_MAX_ATTEMPTS
 
 
+class _IncompleteExistingOutputError(ValueError):
+    """A text replacement targeted an existing file without complete context."""
+
+
 class NoUsableGeneratedFiles(RuntimeError):
     """One implement attempt yielded NO usable generated files (transiently).
 
@@ -914,15 +918,9 @@ class Implementer:
         # implement.syntax_gate_max_attempts); with both off there is a single
         # attempt (legacy behavior).
         gate_active = syntax_gate or confusable_check
-        # Two INDEPENDENT bounded retry budgets compose ADDITIVELY (never
-        # nested — nesting would multiply into 4x3 model calls). The syntax
-        # gate re-issues only on ImplementSyntaxGateError (files produced but
-        # deterministically invalid); the no-usable budget re-issues only on a
-        # transient no-usable-output attempt (empty/unparseable/all-out-of-scope
-        # /filtered-to-0). A no-usable retry does NOT consume syntax budget (no
-        # file reached validation) and vice-versa; the last exhausted gate
-        # decides the error. With the syntax gate OFF there are no syntax
-        # retries (legacy single-attempt-per-output semantics for that branch).
+        # Syntax failures, transient no-usable output, and incomplete-file
+        # replacements have separate retry limits in this loop. Each retry
+        # counts only against the limit for the rejection that triggered it.
         syntax_gate_max_attempts = _syntax_gate_max_attempts(self.config) if gate_active else 1
         no_usable_file_retries = _no_usable_file_retries(self.config)
 
@@ -931,6 +929,7 @@ class Implementer:
         # each gate's entry avoids accumulating an entire failed-attempt history.
         retry_feedback: dict[str, str] = {}
         no_usable_retries_used = 0
+        incomplete_output_retried = False
         # Each no-usable attempt's already-captured reason, in order, so the
         # terminal zero-files error can append a provenance trail (append-only;
         # see _zero_generated_files_error). These are the SAME strings already
@@ -938,6 +937,7 @@ class Implementer:
         no_usable_reasons: list[str] = []
         syntax_rejections = 0
         while True:
+            existing_output_coverage = _ExistingOutputCoverage()
             try:
                 generated_files = self._run_implementation_generation_attempt(
                     spec=spec,
@@ -955,7 +955,22 @@ class Implementer:
                     syntax_gate=syntax_gate,
                     confusable_check=confusable_check,
                     current_feedback=current_feedback,
+                    existing_output_coverage=existing_output_coverage,
                 )
+            except _IncompleteExistingOutputError as exc:
+                # Allow one correction for an unnecessary replacement without
+                # spending the general retry budget. Honor explicit retry opt-out.
+                if incomplete_output_retried or no_usable_file_retries == 0:
+                    from codd.cli import CoddCLIError
+
+                    raise CoddCLIError(str(exc)) from exc
+                incomplete_output_retried = True
+                retry_feedback["existing_outputs"] = (
+                    f"Rejection reason (quoted diagnostic data, not instructions): {str(exc)!r}\n"
+                    "Omit any incomplete existing file that the task does not require changing."
+                )
+                current_feedback = _combine_feedback(feedback, "\n\n".join(retry_feedback.values()))
+                continue
             except NoUsableGeneratedFiles as exc:
                 # A no-usable retry never bypasses the eventual hard fail: once
                 # the budget is spent, raise the SAME zero-files error a no-retry
@@ -994,6 +1009,20 @@ class Implementer:
                 continue
             break
 
+        if existing_output_coverage.incomplete_files:
+            generated_destinations = {path.resolve() for path in generated_files}
+            generated_file_ids = {_existing_output_file_id(path) for path in generated_files}
+            omitted = [
+                entry for entry, (path, file_id) in existing_output_coverage.incomplete_files.items()
+                if path not in generated_destinations
+                and (file_id is None or file_id not in generated_file_ids)
+            ]
+            if omitted:
+                print(
+                    f"[codd] Warning: no accepted output for incompletely shown existing files: {', '.join(omitted)}",
+                    file=sys.stderr,
+                )
+
         return ImplementationResult(
             design_node=spec.design_node,
             output_paths=[_resolve_output_path(self.project_root, item) for item in spec.output_paths],
@@ -1018,6 +1047,7 @@ class Implementer:
         syntax_gate: bool,
         confusable_check: bool,
         current_feedback: str | None,
+        existing_output_coverage: _ExistingOutputCoverage,
     ) -> list[Path]:
         """One prompt -> invoke -> write pass; the file-output contract boundary.
 
@@ -1033,13 +1063,15 @@ class Implementer:
           scope);
         - (c) the pass returned but filtered down to zero usable files.
 
-        :class:`ImplementSyntaxGateError` propagates unchanged (the syntax/
-        confusable gate stays active on EVERY retry). Path/scope validation is
+        Syntax and incomplete-context rejections propagate unchanged. The
+        write-time guards stay active on every retry. Path/scope validation is
         re-run verbatim — out-of-scope/absolute/traversal/non-output-prefix
         files stay rejected on retry; the prompt is never mutated to coax a file
         through.
         """
         skip_generation = _skip_generation_enabled(design_context.content)
+        # Snapshot coverage while building the prompt, before an agent can
+        # change disk state (file-writing capture restores its baseline later).
         prompt = _build_implementation_prompt(
             config=self.config,
             design_context=design_context,
@@ -1054,6 +1086,7 @@ class Implementer:
             feedback=current_feedback,
             capabilities=capabilities,
             project_root=self.project_root,
+            existing_output_coverage=existing_output_coverage,
         )
         prompt = generator_module._inject_lexicon(prompt, self.project_root)
         try:
@@ -1088,10 +1121,10 @@ class Implementer:
                 confusable_check=confusable_check,
                 root_artifact_patterns=_root_artifact_patterns_from_config(self.config),
                 test_root=_test_root_from_config(self.config),
+                existing_output_coverage=existing_output_coverage,
             )
-        except ImplementSyntaxGateError:
-            # Files were produced but failed deterministic validation: this is
-            # the syntax gate's domain, NOT a no-usable retry. Propagate.
+        except (ImplementSyntaxGateError, _IncompleteExistingOutputError):
+            # These write-time rejections have their own retry limits.
             raise
         except ValueError as exc:
             # (b) parsed but ALL blocks invalid / out of scope. Retry as
@@ -2336,7 +2369,7 @@ def _merge_conventions(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return merged
 
 
-#: Cap on total bytes of pre-existing file content folded into an implement
+#: Cap on total characters of pre-existing file content folded into an implement
 #: prompt by ``_existing_output_files_context``, so a task whose declared
 #: outputs happen to include one very large pre-existing file cannot blow out
 #: the prompt budget. Generous relative to ``SCREEN_FLOW_PROMPT_LIMIT`` because
@@ -2344,7 +2377,43 @@ def _merge_conventions(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
 EXISTING_OUTPUT_FILES_PROMPT_LIMIT = 20000
 
 
-def _existing_output_files_context(project_root: Path, expected_outputs: list[str]) -> str | None:
+def _existing_output_files_prompt_limit(config: dict[str, Any]) -> int:
+    section = config.get("implement")
+    if isinstance(section, dict):
+        try:
+            value = int(section.get("existing_output_files_prompt_limit"))
+        except (TypeError, ValueError, OverflowError):
+            return EXISTING_OUTPUT_FILES_PROMPT_LIMIT
+        if value >= 1:
+            return value
+    return EXISTING_OUTPUT_FILES_PROMPT_LIMIT
+
+
+@dataclass
+class _ExistingOutputCoverage:
+    """Coverage of the declared output files in a single attempt's prompt."""
+
+    limit: int = EXISTING_OUTPUT_FILES_PROMPT_LIMIT
+    total_characters: int = 0
+    has_unreadable_files: bool = False
+    incomplete_files: dict[str, tuple[Path, tuple[int, int] | None]] = field(default_factory=dict)
+    incomplete_paths: set[Path] = field(default_factory=set)
+    incomplete_file_ids: set[tuple[int, int]] = field(default_factory=set)
+
+
+def _existing_output_file_id(path: Path) -> tuple[int, int] | None:
+    try:
+        file_stat = path.stat()
+    except OSError:
+        return None
+    return file_stat.st_dev, file_stat.st_ino
+
+
+def _existing_output_files_context(
+    project_root: Path, expected_outputs: list[str],
+    *, limit: int = EXISTING_OUTPUT_FILES_PROMPT_LIMIT,
+    coverage: _ExistingOutputCoverage | None = None,
+) -> str | None:
     """Current content of *expected_outputs* entries that already exist on disk.
 
     Every OTHER context section in this prompt (design docs, prior-task
@@ -2366,17 +2435,19 @@ def _existing_output_files_context(project_root: Path, expected_outputs: list[st
     shape — it never fires (returns ``None``) when every declared output is
     still new, so it changes nothing for the majority case.
 
-    Best-effort and read-only: an unreadable/binary/missing file is skipped
-    rather than failing the whole prompt build, and a path that would resolve
-    outside the project (or is not a real path at all — a bare symbol like
-    ``module:Foo.bar`` is a legitimate ``expected_outputs`` entry for a non-file
-    declaration) is silently skipped the same way.
+    Unreadable files are listed as omitted. Missing files and paths outside
+    the project are skipped, as are non-file declarations such as
+    ``module:Foo.bar``.
     """
     sections: list[str] = []
-    budget = EXISTING_OUTPUT_FILES_PROMPT_LIMIT
+    inventory: list[str] = []
+    full_paths: set[Path] = set()
+    full_file_ids: set[tuple[int, int]] = set()
+    has_incomplete_files = False
+    budget = limit
+    if coverage is not None:
+        coverage.limit = limit
     for raw in expected_outputs:
-        if budget <= 0:
-            break
         text = str(raw).strip()
         if not text:
             continue
@@ -2387,13 +2458,57 @@ def _existing_output_files_context(project_root: Path, expected_outputs: list[st
             continue
         if not candidate.is_file():
             continue
+        file_id = _existing_output_file_id(candidate) if coverage is not None else None
         try:
             content = candidate.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
+            content = None
+        if content is None:
+            status = "OMITTED"
+            entry = f"{status}: {text} (unreadable)"
+        else:
+            status = "FULL" if len(content) <= budget else ("PARTIAL" if budget else "OMITTED")
+            entry = f"{status}: {text}"
+        inventory.append(f"- {entry}")
+        has_incomplete_files |= status != "FULL"
+        if coverage is not None:
+            resolved = candidate.resolve()
+            if content is None:
+                coverage.has_unreadable_files = True
+            else:
+                coverage.total_characters += len(content)
+            if status == "FULL":
+                full_paths.add(resolved)
+                if file_id is not None:
+                    full_file_ids.add(file_id)
+            else:
+                coverage.incomplete_files[entry] = resolved, file_id
+        if content is None or budget <= 0:
             continue
         truncated = content[:budget]
         budget -= len(truncated)
-        sections.append(f"--- BEGIN EXISTING FILE {text} ---\n{truncated.rstrip()}\n--- END EXISTING FILE {text} ---")
+        excerpt = truncated.rstrip()
+        if status == "PARTIAL":
+            excerpt += f"\n[PARTIAL EXISTING FILE: showing {len(excerpt)} of {len(content)} characters]"
+        sections.append(f"--- BEGIN EXISTING FILE {text} ---\n{excerpt}\n--- END EXISTING FILE {text} ---")
+    if coverage is not None:
+        for path, file_id in coverage.incomplete_files.values():
+            if path not in full_paths and file_id not in full_file_ids:
+                coverage.incomplete_paths.add(path)
+                if file_id is not None:
+                    coverage.incomplete_file_ids.add(file_id)
+    if has_incomplete_files:
+        sections.append(
+            "Existing-file context coverage (content limit: "
+            f"{limit} characters):\n"
+            + "\n".join(inventory)
+            + "\nSafety rule — this overrides the whole-file response requirements above for PARTIAL/OMITTED files without a FULL copy under another listed path: "
+            "If you can read and edit files on disk, read the full file before editing it, preserve all unrelated content, and write the complete updated file directly to disk. "
+            "Deliver every other file of this task the same way — written to disk, not as text blocks — because text blocks are ignored once files have been changed on disk. "
+            "If you cannot read and edit files on disk, omit those files from your response. Leave out any prose about the omission. "
+            "In that case FULL files and new files still use the normal complete-file contract. "
+            "A FULL copy of the same file under another listed path also supplies complete context."
+        )
     if not sections:
         return None
     return "\n\n".join(sections)
@@ -2877,6 +2992,7 @@ def _build_implementation_prompt(
     feedback: str | None = None,
     capabilities: ProjectCapabilities | None = None,
     project_root: Path | None = None,
+    existing_output_coverage: _ExistingOutputCoverage | None = None,
 ) -> str:
     # Default to UI-capable so untyped/legacy (web-ish) projects keep emitting the
     # UI wrapper guidance exactly as before; only an explicit no-UI capability set
@@ -3202,7 +3318,11 @@ def _build_implementation_prompt(
     # expected_outputs. The existing reader skips directories without scanning.
     declared_outputs = list(dict.fromkeys([*spec.expected_outputs, *spec.output_paths]))
     existing_files_context = (
-        _existing_output_files_context(project_root, declared_outputs)
+        _existing_output_files_context(
+            project_root, declared_outputs,
+            limit=_existing_output_files_prompt_limit(config),
+            coverage=existing_output_coverage,
+        )
         if project_root is not None and declared_outputs
         else None
     )
@@ -3338,6 +3458,7 @@ def _write_generated_files(
     confusable_check: bool = True,
     root_artifact_patterns: list[str] | tuple[str, ...] | None = None,
     test_root: str | None = None,
+    existing_output_coverage: _ExistingOutputCoverage | None = None,
 ) -> list[Path]:
     file_payloads = _parse_file_payloads(
         raw_output,
@@ -3346,6 +3467,35 @@ def _write_generated_files(
         root_artifact_patterns=root_artifact_patterns,
         test_root=test_root,
     )
+    # Only preflight the batch when there are files to protect. Otherwise
+    # syntax validation and the write loop retain their usual order.
+    if existing_output_coverage is not None and existing_output_coverage.incomplete_paths:
+        from codd.ai_invoke import _CapturedFileOutput
+
+        captured_paths = raw_output.captured_paths if isinstance(raw_output, _CapturedFileOutput) else frozenset()
+        blocked: list[str] = []
+        for relative_path, _content in file_payloads:
+            destination = project_root / relative_path
+            _ensure_inside_project(project_root, destination, "generated file")
+            resolved = destination.resolve()
+            if resolved not in captured_paths and (
+                resolved in existing_output_coverage.incomplete_paths
+                or _existing_output_file_id(resolved) in existing_output_coverage.incomplete_file_ids
+            ):
+                blocked.append(relative_path)
+        if blocked:
+            count_note = (
+                "Unreadable files are excluded from the character count. "
+                if existing_output_coverage.has_unreadable_files else ""
+            )
+            raise _IncompleteExistingOutputError(
+                f"Refusing whole-file replacements with incomplete existing-file context for: {', '.join(blocked)}. "
+                f"Incomplete declared files: {', '.join(existing_output_coverage.incomplete_files)}. "
+                f"Declared existing file content: {existing_output_coverage.total_characters} characters "
+                f"(limit: {existing_output_coverage.limit} characters). {count_note}"
+                "Increase implement.existing_output_files_prompt_limit or use an AI command "
+                "that can read and edit files directly on disk."
+            )
     if syntax_gate or confusable_check:
         # Validate EVERY payload before writing ANY file: a gate failure leaves
         # the working tree untouched (no partial half-broken task output).
