@@ -11,11 +11,13 @@ from __future__ import annotations
 import logging
 import tempfile
 from dataclasses import dataclass, field
+from functools import cache
 from pathlib import Path
 from typing import Any, Callable
 
 from codd.config import load_project_config
 from codd.dag.builder import build_dag
+from codd.deployment.providers.ai_command import SubprocessAiCommand
 from codd.deployment.providers.ai_command_factory import get_ai_command
 from codd.fix.candidate_selector import (
     Candidate,
@@ -55,6 +57,7 @@ from codd.ai_invoke import (
     prepare_read_only_codex,
     resolve_ai_command as _resolve_ai_command,
 )
+from codd.ai_usage import usage_session
 
 logger = logging.getLogger("codd.fix.phenomenon_fixer")
 
@@ -170,8 +173,8 @@ def run_phenomenon_fix(
         project_root: project root (must contain a .codd dir)
         phenomenon_text: natural-language phenomenon (e.g. "ログインエラーを
             わかりやすくしたい")
-        ai_command: override resolution. If ai_invoke is provided, takes
-            precedence (used by tests).
+        ai_command: overrides configured stage commands. An injected
+            ai_invoke takes precedence.
         non_interactive: when True, all interactive prompts use the
             non-interactive defaults (controlled by on_ambiguity).
         on_ambiguity: 'abort' | 'default' | 'top1'.
@@ -227,7 +230,57 @@ def run_phenomenon_fix(
     )
     result.propagate_impl_enabled = propagate_impl_enabled
 
-    ai = ai_invoke or _build_default_ai_invoke(project_root, ai_command)
+    stage_names = (
+        "fix_phenomenon_parse",
+        "fix_candidate_score",
+        "fix_design_update",
+        "fix_risk_classify",
+        "fix_impl_propagate",
+    )
+    stage_commands = config.get("ai_commands")
+    configured_stages: set[str] = set()
+    if not ai_invoke and ai_command is None and isinstance(stage_commands, dict):
+        # Validate before any stage can catch a configuration error or apply a change.
+        for name in stage_names:
+            key = f"ai_commands.{name}"
+            value = stage_commands.get(name)
+            if isinstance(value, dict):
+                key += ".command"
+                value = value.get("command")
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                result.aborted = True
+                result.abort_reason = f"invalid {key} = {value!r} (expected a command string)"
+                return result
+            if value.strip():
+                configured_stages.add(name)
+
+    if ai_invoke:
+        parse_ai = score_ai = design_ai = risk_ai = impl_ai = ai_invoke
+    else:
+        shared_ai = None if configured_stages else _build_default_ai_invoke(project_root, ai_command)
+
+        @cache
+        def build_ai(command_name: str) -> AiInvoke:
+            return _build_default_ai_invoke(
+                project_root, None, command_name=command_name, config=config
+            )
+
+        def ai_for_stage(name: str) -> AiInvoke:
+            command_name = name if name in configured_stages else "fix"
+
+            def invoke(prompt: str) -> str:
+                ai = shared_ai if shared_ai is not None else build_ai(command_name)
+                # The adapter runs in a temporary workspace. Resolve usage
+                # against the project and label it independently of the command.
+                with usage_session(config, project_root, stage=name):
+                    return ai(prompt)
+
+            return invoke
+
+        parse_ai, score_ai, design_ai, risk_ai, impl_ai = map(ai_for_stage, stage_names)
+
     ui = prompt or InteractivePrompt(
         non_interactive=non_interactive,
         on_ambiguity=on_ambiguity,
@@ -242,7 +295,7 @@ def run_phenomenon_fix(
 
     analysis = parse_phenomenon(
         phenomenon_text,
-        ai_invoke=ai,
+        ai_invoke=parse_ai,
         lexicon_context=lexicon_context,
         design_summaries=design_summaries,
     )
@@ -263,7 +316,7 @@ def run_phenomenon_fix(
         analysis,
         dag=dag,
         project_root=project_root,
-        ai_invoke=ai,
+        ai_invoke=score_ai,
         include_common=include_common,
     )
     result.selection = selection
@@ -336,7 +389,8 @@ def run_phenomenon_fix(
             target_path=target_path,
             phenomenon_text=phenomenon_text,
             analysis=analysis,
-            ai=ai,
+            design_ai=design_ai,
+            risk_ai=risk_ai,
             ui=ui,
             max_attempts=max_attempts,
             dry_run=dry_run,
@@ -361,7 +415,7 @@ def run_phenomenon_fix(
             applied_updates=applied_updates,
             proposed_updates=proposed_updates,
             dag=dag,
-            ai=ai,
+            ai=impl_ai,
             config=config,
             max_attempts=max_attempts,
             dry_run=dry_run,
@@ -594,7 +648,8 @@ def _run_attempt_loop(
     target_path: Path,
     phenomenon_text: str,
     analysis: PhenomenonAnalysis,
-    ai: AiInvoke,
+    design_ai: AiInvoke,
+    risk_ai: AiInvoke,
     ui: InteractivePrompt,
     max_attempts: int,
     dry_run: bool,
@@ -608,7 +663,7 @@ def _run_attempt_loop(
                 target_path,
                 phenomenon_text=phenomenon_text,
                 analysis=analysis,
-                ai_invoke=ai,
+                ai_invoke=design_ai,
                 allow_delete=allow_delete,
             )
         except DesignUpdateError as exc:
@@ -649,7 +704,7 @@ def _run_attempt_loop(
             )
             return _AttemptLoopOutcome(attempts=attempts, applied_path=None)
 
-        risk = classify_risk(update.diff, ai_invoke=ai)
+        risk = classify_risk(update.diff, ai_invoke=risk_ai)
 
         if dry_run:
             attempts.append(
@@ -902,8 +957,11 @@ def _load_lexicon_context(project_root: Path) -> str:
 def _build_default_ai_invoke(
     project_root: Path,
     ai_command: str | None,
+    *,
+    command_name: str = "fix",
+    config: dict[str, Any] | None = None,
 ) -> AiInvoke:
-    """Build a stdout-oriented AI invoker for phenomenon parsing.
+    """Build a stdout-oriented AI invoker for a phenomenon fix stage.
 
     PHENOMENON mode needs plain text-in / text-out: structured JSON for
     the parser, an updated document body for the design updater. So we
@@ -911,8 +969,9 @@ def _build_default_ai_invoke(
     harden agentic CLIs such as `codex exec` into read-only execution
     from an empty temporary workspace.
     """
-    config = load_project_config(project_root)
-    resolved = _resolve_ai_command(config, ai_command, command_name="fix")
+    if config is None:
+        config = load_project_config(project_root)
+    resolved = _resolve_ai_command(config, ai_command, command_name=command_name)
     safe_workspace = tempfile.TemporaryDirectory(prefix="codd-fix-ai-")
     safe_root = Path(safe_workspace.name)
     resolved = _prepare_plain_text_ai_command(resolved, safe_root)
@@ -921,7 +980,11 @@ def _build_default_ai_invoke(
     # NOTE: ``get_ai_command`` / ``load_project_config`` stay module-level call
     # sites here (not folded into codd.ai_invoke) — tests monkeypatch them on
     # this module to fake transports.
-    adapter = get_ai_command(config, project_root=safe_root, command_override=resolved)
+    if command_name == "fix":
+        adapter = get_ai_command(config, project_root=safe_root, command_override=resolved)
+    else:
+        # Run the selected stage command even when the shared adapter uses App Server.
+        adapter = SubprocessAiCommand(command=resolved, project_root=safe_root, config=config)
 
     def invoke(prompt: str) -> str:
         _keepalive = safe_workspace

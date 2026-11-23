@@ -100,6 +100,9 @@ Evidence: `codd/cli.py` (705 lines, 18 public symbols), registered as entry poin
 ### FR-CLI-17: AI Command Resolution [observed]
 - All AI-dependent commands **shall** accept `--ai-cmd` to override the configured AI CLI command. (Evidence: consistent `--ai-cmd` option across `generate`, `restore`, `require`, `propagate`, `implement`, `assemble`, `plan`)
 - [inferred] Resolution priority: CLI `--ai-cmd` > per-command `ai_commands` in `codd.yaml` > global `ai_command` in `codd.yaml` > default `'claude --print'`. (Evidence: test names `test_resolve_ai_command_*` in `test_generate.py`)
+- For `codd fix PHENOMENON`, `ai_commands` can set the command for each AI step. Use `fix_phenomenon_parse` for parsing, `fix_candidate_score` for candidate scoring, `fix_design_update` for updating design docs, `fix_risk_classify` for risk classification, and `fix_impl_propagate` for implementation propagation.
+- Each step accepts a command string or a `{command: ...}` mapping. An omitted, `null`, empty, or whitespace-only command uses the shared `fix` command resolution, including when the mapping omits `command`. Invalid types stop `fix` with an error naming the key and value before the first AI call or file update. `--ai-cmd` takes precedence and bypasses step setting validation. Explicit step commands run as subprocesses, including when App Server is enabled.
+- Optional `codd fix PHENOMENON --propagate` resolves its design propagation command through `--ai-cmd`, `ai_commands.propagate`, and the global defaults.
 
 ### FR-CLI-18: Feedback Loop Integration [observed]
 - The `generate`, `restore`, `require`, and `propagate` commands **shall** accept a `--feedback` option to incorporate review feedback into AI prompts. (Evidence: `cli.py:127, 177, 223, 275`; tests in `test_feedback_loop.py`)
