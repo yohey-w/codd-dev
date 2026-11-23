@@ -13,6 +13,29 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.43.0] - 2026-11-24 — Token efficiency, measured first: a tool-less call that carried 450 tools, a "complete" file that was cut at 20,000 characters, and an opt-in record of every AI call
+
+Counting real transcripts of CoDD-launched AI calls (2,727 sessions, numbers only) showed where the tokens go and turned up two defects along the way. Every new setting is opt-in. Two things change by default: a Claude command with an explicit empty `--tools` list gets `--strict-mcp-config`, and an `implement` prompt whose existing files exceed the limit (or cannot be read) now says so.
+
+**A "tool-less" Claude call was not tool-less (fix).** With the Claude CLI, a `--tools` list that omits `ToolSearch` stops MCP tool definitions from being deferred, so every connected MCP tool definition is sent on every call. The built-in default command (`claude --print ... --tools ""`) measured **421,162 input tokens for a five-word prompt** with 450 MCP tools connected, against 18,825 with the same model once MCP is excluded — and because CoDD adds the permission-bypass flags to Claude commands, those MCP tools were callable without approval in a stage declared tool-less.
+
+- A Claude command with an explicit empty list (`--tools ""`) now gets `--strict-mcp-config` unless `--mcp-config` or `--strict-mcp-config` is already present. It is inserted before `--tools` (the list is variadic), outside the permission branch, once.
+- A non-empty list is left alone; `codd doctor` warns when it has neither `ToolSearch` nor an MCP flag (`default` includes `ToolSearch` and is not reported).
+- The built-in default strings (`defaults.yaml`, `DEFAULT_AI_COMMAND`, `codd.yaml.tmpl`, the `extract` fallbacks) state `--strict-mcp-config` explicitly. The flag exists since Claude Code 1.0.44, older than `--tools` (2.0.31), so the supported CLI range does not narrow.
+- `ai_command_has_tools` now lives in `codd/claude_cli.py` and reads `--tools` the way the CLI does (variadic).
+
+**`codd implement` no longer shows a truncated file as if it were whole (fix).** Existing declared output files were folded into the prompt up to 20,000 characters in total; the overflow was cut with no marker and later files were dropped silently, while the output contract asks for complete files. Unreadable files (non-UTF-8, no permission) were outside any guard too.
+
+- Over the limit (or with an unreadable file) the prompt now lists each file as `FULL` / `PARTIAL` / `OMITTED`, marks the cut inside the excerpt, and tells a disk-editing agent to edit on disk and a text-only model to leave those files out. A prompt under the limit, with every declared file readable, is byte-identical to before.
+- A text replacement of a file that was not shown in full is rejected before anything is written (symlink and hard-link aliases included). Files an agent edited on disk are accepted. This rejection retries at most once, then stops with one actionable error; files left out are reported once on stderr.
+- `implement.existing_output_files_prompt_limit` (NEW, opt-in, default unset = 20,000) raises the limit.
+
+**`codd usage` — an opt-in record of AI calls (NEW).** Set `CODD_AI_USAGE_LOG` or `ai.usage_log` and each attempt appends one JSONL line: stage, route, executable, model, prompt characters and SHA-256, output characters, seconds, outcome, attempt. No prompt or response text, argv, environment or exception message is stored. `codd usage summary` totals calls, characters, time and same-prompt reissues per stage. Disabled (the default), nothing is written and the AI and git argv are unchanged; enabled, the captured files and the reverted tree of a file-writing agent are the same as when disabled. Covered routes: `invoke_ai`, `SubprocessAiCommand`, the Codex App Server adapter and its fallback; direct-subprocess call sites are listed in `codd/ai_usage.py` as not covered.
+
+**Per-step AI commands for `codd fix PHENOMENON` (NEW, opt-in).** `ai_commands.fix_phenomenon_parse`, `fix_candidate_score`, `fix_design_update`, `fix_risk_classify` and `fix_impl_propagate` let the small classification steps run on a lighter model or lower effort; unset steps resolve as `fix`, and `--ai-cmd` still overrides all of them. With the usage record enabled, each step is recorded under its own name at the project root (previously a relative log path landed in the step's temporary workspace and was lost).
+
+Not changed: reasoning-effort and model defaults, the 20,000-character default, and the behaviour of tool-enabled Claude commands (they still carry the user's MCP servers). `docs/ai-cli-context-overhead.md` (NEW) shows how to measure the fixed context an AI CLI adds to every call and what was measured for two CLIs.
+
 ## [3.42.0] - 2026-09-14 — Fix: a switch is a declaration, not evidence — the runtime stage has to have RUN
 
 3.41.0 closed the *demotion* hole: an acceptance criterion whose only evidence is a runtime behaviour, in a project whose `runtime_smoke` stage is switched off, is a criterion proved by nothing. It left the mirror image open. Turning the stage **on** costs one line of YAML, and the gate read that line as evidence.
