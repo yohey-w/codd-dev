@@ -68,7 +68,7 @@ codd version                  # インストールを確認
 
 Claude の `--tools` リストに `ToolSearch` がない場合、接続済み MCP の全ツール定義が呼び出しごとに読み込まれます。CoDD は、明示的な空指定 `--tools ""` に対して、`--mcp-config` も `--strict-mcp-config` もなければ `--strict-mcp-config` を自動で追加し、この読み込みを防ぎます。
 
-空でない `--tools` リストは変更しません。`ToolSearch` と上記の MCP フラグがないリストには `codd doctor` が警告します。MCP を意図して使う場合は `--mcp-config <設定ファイル>` を明示してください。
+空でない `--tools` リストは変更しません。`ToolSearch` と上記の MCP フラグがないリストには `codd doctor` が警告します（CLI 既定のツール一式を指す `default` は `ToolSearch` を含むので、警告の対象外です）。MCP を意図して使う場合は `--mcp-config <設定ファイル>` を明示してください。
 
 ---
 

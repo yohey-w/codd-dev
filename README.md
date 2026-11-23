@@ -68,7 +68,7 @@ codd version                  # confirm the install
 
 With the Claude CLI, a `--tools` list that omits `ToolSearch` loads every connected MCP server's tool definitions on each call. For an explicit empty list (`--tools ""`), CoDD adds `--strict-mcp-config` automatically unless `--mcp-config` or `--strict-mcp-config` is already present, which prevents that load.
 
-A non-empty `--tools` list is left unchanged; `codd doctor` warns when such a list has neither `ToolSearch` nor one of the MCP flags above. To use MCP tools on purpose, pass `--mcp-config <file>` explicitly.
+A non-empty `--tools` list is left unchanged; `codd doctor` warns when such a list has neither `ToolSearch` nor one of the MCP flags above (`default`, the CLI's own default tool set, includes `ToolSearch` and is not reported). To use MCP tools on purpose, pass `--mcp-config <file>` explicitly.
 
 ---
 
