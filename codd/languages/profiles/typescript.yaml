@@ -85,15 +85,16 @@ imports:
   # must be pinned at GENERATE, exactly like the C# namespace-coherence contract.
   module_specifier_guidance: |
     MODULE-SPECIFIER COHERENCE (release-blocking — the native typecheck enforces this):
-    this project uses NodeNext/Node16 module resolution, under which EVERY
-    relative import specifier MUST carry an explicit file extension naming the
-    EMITTED file — write `import { x } from "./x.js"`, never `"./x"` (and never
-    the source `"./x.ts"` extension). This applies identically to re-exports
-    (`export { x } from "./x.js"`), to default and namespace imports, and to
-    TYPE-ONLY imports (`import type { T } from "./x.js"`) — a type-only import
-    is erased at emit but its specifier is still checked. A relative import that
-    omits the `.js` extension fails to compile (TS2835), so independently-
-    generated files that disagree on the convention cannot reference each other.
+    CoDD's create-only TypeScript greenfield scaffold uses NodeNext/Node16 module
+    resolution. Under that scaffolded configuration, EVERY relative import
+    specifier MUST carry an explicit file extension naming the EMITTED file —
+    write `import { x } from "./x.js"`, never `"./x"` (and never the source
+    `"./x.ts"` extension). This applies identically to re-exports, default and
+    namespace imports, and TYPE-ONLY imports; omitting the `.js` extension fails
+    with TS2835. In an existing project, the existing project's authored
+    module-resolution configuration and established import specifiers are
+    authoritative. Do NOT infer NodeNext/Node16 or rewrite its import-specifier
+    convention from this greenfield default.
 
   stdlib:
     classifier: adapter

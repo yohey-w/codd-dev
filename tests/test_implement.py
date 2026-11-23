@@ -538,6 +538,69 @@ def test_build_implementation_prompt_omits_existing_content_without_project_root
     assert "def build_service() -> bool:" not in prompt
 
 
+def test_brownfield_prompt_does_not_state_greenfield_module_default_as_project_fact(tmp_path):
+    """An authored toolchain config outranks the TypeScript greenfield default."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "tsconfig.json").write_text(
+        '{"compilerOptions":{"module":"esnext","moduleResolution":"bundler"}}\n',
+        encoding="utf-8",
+    )
+    prompt = _build_implementation_prompt(
+        config={
+            "project": {"name": "demo", "language": "typescript"},
+            "scan": {"source_dirs": ["src/", "infra/"], "test_dirs": ["tests/"]},
+        },
+        design_context=DesignContext(
+            node_id="design:job",
+            path=Path("docs/design/job.md"),
+            content="# Job\n",
+        ),
+        spec=ImplementSpec(
+            "design:job",
+            ["infra/context-audit.ts"],
+            expected_outputs=["infra/context-audit.ts"],
+        ),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+        project_root=project,
+    )
+
+    normalized_prompt = " ".join(prompt.split())
+    assert "this project uses NodeNext/Node16 module resolution" not in normalized_prompt
+    assert "existing project's authored module-resolution configuration" in normalized_prompt
+    # The greenfield contract remains present, but only under its explicit condition.
+    assert "explicit file extension naming the EMITTED file" in prompt
+
+
+def test_brownfield_prompt_preserves_all_configured_source_roots(tmp_path):
+    """A later configured source root must not be contradicted by a src-only rule."""
+    project = tmp_path / "project"
+    project.mkdir()
+    prompt = _build_implementation_prompt(
+        config={
+            "project": {"name": "demo", "language": "typescript"},
+            "scan": {"source_dirs": ["src/", "infra/"], "test_dirs": ["tests/"]},
+        },
+        design_context=DesignContext(
+            node_id="design:job",
+            path=Path("docs/design/job.md"),
+            content="# Job\n",
+        ),
+        spec=ImplementSpec("design:job", ["infra/context-audit.ts"]),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+        project_root=project,
+    )
+
+    assert "owns MORE than one source root" in prompt
+    assert "`src/`" in prompt
+    assert "`infra/`" in prompt
+    assert "put EVERY source module you author UNDER `src/`" not in prompt
+
+
 def test_existing_output_files_context_skips_non_files_and_traversal(tmp_path):
     from codd.implementer import _existing_output_files_context
 

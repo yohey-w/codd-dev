@@ -400,6 +400,38 @@ def test_node_install_failure_skips_tests_and_typecheck(tmp_path: Path, monkeypa
     assert "skipped" in result.tests_summary
 
 
+def test_install_preflight_rejects_out_of_root_dependency_symlink_before_install(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A materializer must not write through a project dependency symlink."""
+    project = tmp_path / "project"
+    project.mkdir()
+    _patch_dag_pipeline_green(monkeypatch)
+    (project / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    shared_dependencies = tmp_path / "shared-dependencies"
+    shared_dependencies.mkdir()
+    sentinel = shared_dependencies / "sentinel.txt"
+    sentinel.write_text("must survive\n", encoding="utf-8")
+    (project / "node_modules").symlink_to(shared_dependencies, target_is_directory=True)
+
+    def _must_not_resolve_install(_root):
+        raise AssertionError("unsafe dependency layout must stop before install resolution")
+
+    monkeypatch.setattr(verify_runner_module, "node_install_command", _must_not_resolve_install)
+
+    result = VerifyRunner(project, _node_settings()).run()
+
+    failures = [item for item in result.failures if item.check_name == "install_preflight"]
+    assert result.passed is False
+    assert len(failures) == 1
+    assert failures[0].details["failure_class"] == "environment_build_error"
+    assert failures[0].details["code_addressable"] is False
+    assert result.failure is not None
+    assert result.failure.failure_class == "environment_build_error"
+    assert result.failure.code_addressable is False
+    assert sentinel.read_text(encoding="utf-8") == "must survive\n"
+
+
 def test_node_install_success_allows_typecheck_and_tests(tmp_path: Path, monkeypatch) -> None:
     _patch_dag_pipeline_green(monkeypatch)
     (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
@@ -413,17 +445,23 @@ def test_node_install_success_allows_typecheck_and_tests(tmp_path: Path, monkeyp
 
 
 def test_install_preflight_opt_out_skips_install(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
     _patch_dag_pipeline_green(monkeypatch)
-    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    (project / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    shared_dependencies = tmp_path / "shared-dependencies"
+    shared_dependencies.mkdir()
+    (project / "node_modules").symlink_to(shared_dependencies, target_is_directory=True)
 
     def _boom(root):  # would fail if called
         raise AssertionError("install must not run when opted out")
 
     monkeypatch.setattr(verify_runner_module, "node_install_command", _boom)
     result = VerifyRunner(
-        tmp_path, _node_settings(install_preflight=False, allow_structural_only=True)
+        project, _node_settings(install_preflight=False, allow_structural_only=True)
     ).run()
     assert result.passed is True
+    assert (project / "node_modules").is_symlink()
 
 
 def test_install_preflight_noop_for_python_project(tmp_path: Path, monkeypatch) -> None:
@@ -569,11 +607,9 @@ def test_symlinked_node_modules_counts_as_installed_and_tests_run(tmp_path, monk
     assert any("symlink" in w for w in result.warnings)
 
 
-def test_empty_linked_node_modules_still_runs_the_installer(tmp_path, monkeypatch) -> None:
-    # Anti-false-green: a link to an EMPTY tree is not an installation. The
-    # installer must still run (and its failure stay honest), and the message must
-    # name the link SHAPE instead of sending operators after a network/lockfile
-    # cause.
+def test_empty_external_linked_node_modules_reports_symlink_failure(tmp_path, monkeypatch) -> None:
+    # An empty external tree cannot be used as installed dependencies, and
+    # preflight must report that the symlink prevents installation.
     _patch_dag_pipeline_green(monkeypatch)
     (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
     _link_dependencies(tmp_path, populated=False)
@@ -606,15 +642,11 @@ def test_real_directory_node_modules_is_unaffected(tmp_path, monkeypatch) -> Non
     assert not any("symlink" in w for w in result.warnings)
 
 
-def test_bookkeeping_only_linked_tree_still_runs_the_installer(tmp_path, monkeypatch) -> None:
-    """★anti-false-green: an INTERRUPTED or pruned install is not an installation.
+def test_bookkeeping_only_external_linked_tree_fails_install_preflight(tmp_path, monkeypatch) -> None:
+    """An external link to bookkeeping alone is refused by install preflight.
 
-    npm writes its bookkeeping (``.package-lock.json``, ``.bin/``) before — and
-    keeps it after — the packages themselves are gone, so "the directory has at
-    least one entry" says nothing about whether dependencies are present. Such a
-    tree used to short-circuit the installer, and the test run then failed with
-    "Cannot find module" — an ENVIRONMENT fault misattributed to the code. Only a
-    real package directory (a non-dot-prefixed DIRECTORY) counts as installed.
+    The package manager can leave ``.package-lock.json`` and ``.bin/`` after
+    packages are gone. Only a package directory counts as installed.
     """
     _patch_dag_pipeline_green(monkeypatch)
     (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
@@ -630,6 +662,110 @@ def test_bookkeeping_only_linked_tree_still_runs_the_installer(tmp_path, monkeyp
     install_failures = [f for f in result.failures if f.check_name == "install_preflight"]
     assert install_failures, "a bookkeeping-only linked tree must still reach the installer"
     assert not any("dependency install skipped" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize(
+    "entry", [None, ".package-lock.json", "stray.txt"], ids=["empty", "bookkeeping", "loose-file"]
+)
+def test_external_dependency_symlink_without_packages_refuses_install(
+    tmp_path: Path, monkeypatch, entry: str | None
+) -> None:
+    _patch_dag_pipeline_green(monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    store = tmp_path / "dependencies"
+    store.mkdir()
+    if entry is not None:
+        (store / entry).write_text("{}", encoding="utf-8")
+    (project / "node_modules").symlink_to(store, target_is_directory=True)
+    monkeypatch.setattr(
+        verify_runner_module, "node_install_command", lambda root: "echo installed > install.marker"
+    )
+
+    result = VerifyRunner(project, _node_settings(test_command="true")).run()
+
+    assert not (project / "install.marker").exists()
+    assert result.passed is False
+    assert result.tests_executed is False
+    [failure] = [f for f in result.failures if f.check_name == "install_preflight"]
+    assert "node_modules symlink resolves outside the project root" in failure.message
+    assert "node_modules symlink resolves outside the project root" in result.tests_summary
+
+
+def test_empty_internal_dependency_symlink_runs_install(tmp_path: Path, monkeypatch) -> None:
+    _patch_dag_pipeline_green(monkeypatch)
+    (tmp_path / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    store = tmp_path / "dependencies"
+    store.mkdir()
+    (tmp_path / "node_modules").symlink_to(store.name, target_is_directory=True)
+    monkeypatch.setattr(
+        verify_runner_module, "node_install_command", lambda root: "echo installed > install.marker"
+    )
+
+    result = VerifyRunner(tmp_path, _node_settings(test_command="true")).run()
+
+    assert (tmp_path / "install.marker").is_file()
+    assert result.passed is True
+    assert result.tests_executed is True
+
+
+@pytest.mark.parametrize(
+    ("links", "refusal"),
+    [
+        pytest.param(
+            [("node_modules", "node_modules")],
+            "target could not be resolved",
+            id="self-loop",
+        ),
+        pytest.param(
+            [("node_modules", "dependencies"), ("dependencies", "node_modules")],
+            "target could not be resolved",
+            id="two-hop-loop",
+        ),
+        pytest.param([("node_modules", "missing-dependencies")], None, id="dangling-internal"),
+        pytest.param(
+            [("node_modules", "../missing-dependencies")],
+            "resolves outside the project root",
+            id="dangling-external",
+        ),
+    ],
+)
+def test_install_preflight_dependency_symlink_target(
+    tmp_path: Path, monkeypatch, links: list[tuple[str, str]], refusal: str | None
+) -> None:
+    _patch_dag_pipeline_green(monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    for link, target in links:
+        (project / link).symlink_to(target, target_is_directory=True)
+
+    install_resolutions: list[Path] = []
+
+    def resolve_install(root: Path) -> str:
+        install_resolutions.append(root)
+        return "echo installed > install.marker"
+
+    monkeypatch.setattr(verify_runner_module, "node_install_command", resolve_install)
+
+    result = VerifyRunner(project, _node_settings(test_command="true")).run()
+
+    marker = project / "install.marker"
+    if refusal is None:
+        assert marker.read_text(encoding="utf-8") == "installed\n"
+        assert install_resolutions == [project]
+        assert result.passed is True
+        assert result.tests_executed is True
+    else:
+        assert not marker.exists()
+        assert install_resolutions == []
+        assert result.passed is False
+        assert result.tests_executed is False
+        [failure] = [f for f in result.failures if f.check_name == "install_preflight"]
+        reason = f"node_modules symlink {refusal}"
+        assert reason in failure.message
+        assert reason in result.tests_summary
 
 
 def test_linked_tree_with_one_package_directory_counts_as_installed(tmp_path, monkeypatch) -> None:
@@ -673,10 +809,7 @@ def test_install_timeout_keeps_its_marker_in_the_stage_summary(tmp_path, monkeyp
 
 
 def test_circular_symlinked_node_modules_is_not_installed(tmp_path) -> None:
-    """A symlink LOOP resolves to no tree at all, so it is not an installation:
-    ``_linked_installed_dependencies`` returns ``None`` (the installer runs and the
-    red stays honest) instead of walking the loop. Both shapes: a self-referential
-    link and a two-hop cycle."""
+    """Self-referential, two-hop circular, and dangling links find no installed tree."""
     self_loop = tmp_path / "self"
     self_loop.mkdir()
     (self_loop / "node_modules").symlink_to(self_loop / "node_modules")

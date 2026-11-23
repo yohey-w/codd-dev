@@ -32,6 +32,7 @@ from codd.path_safety import iter_project_glob, resolve_project_path
 from codd.dag import DAG, Edge, Node
 from codd.dag.coverage_axes import CoverageAxis, extract_coverage_axes_from_design_doc, extract_coverage_axes_from_lexicon
 from codd.dag.extractor import extract_design_doc_metadata, extract_imports, scan_capability_evidence
+from codd.dag.metadata_access import collect_structured_entries
 from codd.llm.design_doc_extractor import (
     ExpectedExtraction,
     extract_expected_artifacts_for_file,
@@ -96,7 +97,7 @@ def build_dag(project_root: Path, settings: dict[str, Any] | None = None) -> DAG
 
     _add_design_edges(dag, root, design_docs, impl_nodes)
     _add_design_doc_expected_extractions(dag, root, dag_settings, design_docs)
-    _add_import_edges(dag, root, impl_nodes, dag_settings)
+    _add_import_edges(dag, root, impl_nodes, test_nodes, dag_settings)
     _add_tested_by_edges(dag, root, impl_nodes, test_nodes, dag_settings)
     _add_expected_nodes(dag, root, dag_settings, impl_nodes)
     _add_design_doc_expected_outcome_edges(dag, design_docs)
@@ -409,14 +410,16 @@ def _add_import_edges(
     dag: DAG,
     project_root: Path,
     impl_nodes: dict[str, Path],
+    test_nodes: dict[str, Path],
     settings: dict[str, Any],
 ) -> None:
     aliases = _load_import_aliases(project_root, settings)
-    path_to_node = {path: node_id for node_id, path in impl_nodes.items()}
+    source_nodes = {**impl_nodes, **test_nodes}
+    path_to_node = {path: node_id for node_id, path in source_nodes.items()}
 
     residue: list[str] = []
     internal_import_count = 0
-    for node_id, file_path in impl_nodes.items():
+    for node_id, file_path in source_nodes.items():
         imports = dag.nodes[node_id].attributes.get("imports", [])
         seen_targets: set[str] = set()
         for import_ref in imports:
@@ -430,6 +433,13 @@ def _add_import_edges(
                 if target_id in seen_targets:
                     continue
                 seen_targets.add(target_id)
+                # ``tested_by`` is the canonical relationship between an
+                # implementation artifact and a test.  A test importing its
+                # implementation is therefore resolved (and is not residue),
+                # but adding the inverse ``test -> impl imports`` edge would
+                # create a two-node cycle with ``impl -> test tested_by``.
+                if node_id in test_nodes and target_id in impl_nodes:
+                    continue
                 dag.add_edge(Edge(from_id=node_id, to_id=target_id, kind="imports"))
             # GENERIC FIX 1: an INTERNAL-looking specifier (a relative import, or a
             # first-party alias-prefixed one) that resolved to NOTHING is explicit
@@ -743,8 +753,8 @@ def _add_design_doc_expected_outcome_edges(dag: DAG, design_docs: dict[str, dict
         for edge in dag.edges
     }
 
-    for node_id, metadata in design_docs.items():
-        attributes = metadata.get("attributes", {})
+    for node_id in design_docs:
+        attributes = dag.nodes[node_id].attributes
         journey_names = _design_doc_journey_names(attributes)
         for journey in _design_doc_journey_entries(attributes):
             journey_name = journey.get("name") if isinstance(journey.get("name"), str) else None
@@ -1104,8 +1114,7 @@ def _validate_design_doc_journey_attributes(node_id: str, attributes: dict[str, 
 
 
 def _design_doc_journey_entries(attributes: dict[str, Any]) -> list[dict[str, Any]]:
-    journeys = attributes.get("user_journeys", [])
-    return [journey for journey in journeys if isinstance(journey, dict)] if isinstance(journeys, list) else []
+    return collect_structured_entries(attributes, "user_journeys")
 
 
 def _design_doc_journey_names(attributes: dict[str, Any]) -> set[str]:
