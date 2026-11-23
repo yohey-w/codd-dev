@@ -1444,12 +1444,27 @@ _DOC_SUFFIXES = {".md", ".yaml", ".yml"}
 
 def _doctor_warnings(project_root: Path) -> list[str]:
     from codd.config_schema import project_config_key_warnings
+    from codd.claude_cli import claude_command_loads_all_mcp_definitions
 
     config = load_project_config(project_root)
     warnings: list[str] = []
     # Config-key typo guard (advisory): unknown codd.yaml keys are silently
     # ignored by the loader, so surface them here with did-you-mean hints.
     warnings.extend(project_config_key_warnings(project_root))
+    ai_settings = {"ai_command": config.get("ai_command")}
+    if isinstance(config.get("ai_commands"), dict):
+        for key, value in config["ai_commands"].items():
+            ai_settings[f"ai_commands.{key}"] = value.get("command") if isinstance(value, dict) else value
+    mcp_settings = [
+        key for key, value in ai_settings.items()
+        if isinstance(value, str) and claude_command_loads_all_mcp_definitions(value)
+    ]
+    if mcp_settings:
+        warnings.append(
+            f"{', '.join(mcp_settings)}: Claude commands with a nonempty --tools list "
+            "without ToolSearch load all MCP tool definitions. Add --strict-mcp-config "
+            "or an explicit --mcp-config to limit MCP loading."
+        )
     has_crud_flow_targets = _has_crud_flow_targets(config)
     has_action_outcome_targets = _has_action_outcome_targets(config)
     if (
@@ -6671,12 +6686,12 @@ def extract(
                 cfg = load_project_config(project_root)
                 ai_cmd = cfg.get(
                     "ai_command",
-                    'claude --print --permission-mode bypassPermissions --dangerously-skip-permissions --model claude-opus-4-8 --effort xhigh --tools ""',
+                    'claude --print --permission-mode bypassPermissions --dangerously-skip-permissions --model claude-opus-4-8 --effort xhigh --tools "" --strict-mcp-config',
                 )
             except FileNotFoundError:
                 ai_cmd = (
                     'claude --print --permission-mode bypassPermissions '
-                    '--dangerously-skip-permissions --model claude-opus-4-8 --effort xhigh --tools ""'
+                    '--dangerously-skip-permissions --model claude-opus-4-8 --effort xhigh --tools "" --strict-mcp-config'
                 )
 
         preset_name = "custom" if prompt_file else "baseline"
