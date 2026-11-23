@@ -13,6 +13,32 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.44.0] - 2026-11-24 — One line of history again: six core fixes that never reached `main`, and a guard that contradicted itself
+
+**Six commits from a branch that was never merged are now on `main` (feature + fixes, #56).** Since September the maintainer's shared `codd` command ran from `fix/canonical-user-journey-edges-20260909`. `main` went from 3.41.0 to 3.43.1 without that branch, and the shared command ran without 3.41.0–3.43.1: neither line had the other's fixes. Moving the shared command to `main` as it was would not have turned anything red. On a copy of a real project two checks got quietly weaker instead — `stale_evidence` went from PASS with 3 records compared to SKIP with 0, and `unresolved_import_residue` from 258 items checked to 166. After the merge the output of those checks is identical to the branch's. The branch is merged with a merge commit, so its six commits are ancestors of `main`.
+
+What can change without touching configuration:
+
+- `codd dag build --refresh-evidence` (new) writes `.codd/evidence_fingerprints.yaml`; an ordinary build or verify only reads it. `stale_evidence` compares against it when it exists, and a malformed snapshot is a warning, not a skip or a pass. `--refresh-evidence` cannot be combined with `--cache`.
+- Imports in test files become edges to other test helpers, and an import of a helper that does not exist shows up in `unresolved_import_residue`. Test-to-implementation imports stay `tested_by` only.
+- `deployment_completeness` skips when no design document requires a deployment step (it could pass on the mere presence of a deployment document), and fails when a step is required but the steps are empty.
+- `ui_coherence` credits a parent–child relation only when both are mentioned, separately, inside the same paragraph, table row, list item, or line of a code block; frontmatter is not evidence.
+- `user_journeys` written under `codd:` in frontmatter now produce expected-outcome edges, as the top-level form does.
+- A TypeScript project with several `source_dirs` gets all of them in the layout contract of the prompt (only the first one before), and the module-specifier guidance no longer states a greenfield default as a fact about an existing project.
+- The dependency-install preflight of `codd verify` refuses a `node_modules` symlink that leaves the project — see the next item.
+
+**One rule where the two lines disagreed: `node_modules` as a symlink (behaviour change from 3.43.1).** #39 (3.41.0) treats a linked tree that holds at least one package as installed and skips the installer. The branch refused to run an installer through a link that resolves outside the project, because the installer may empty the directory it points to. Both are kept, in this order: a link to a tree with at least one package counts as installed, inside or outside the project; otherwise a link that resolves outside the project, or cannot be resolved at all (a loop), is refused before the install command is resolved, with a failure that names the link; otherwise the installer runs as before.
+
+- What changes from 3.43.1 is one band: a link that leaves the project and points at an empty directory, at bookkeeping only, or at loose files. 3.43.1 ran the installer there; 3.44.0 refuses. Pointing `node_modules` at an empty cache directory outside the project and letting `codd verify` install into it no longer works.
+- Loops are refused on every supported Python. 3.13 no longer raises for them in non-strict resolution, which let the installer run.
+- Two tests that pinned "an empty linked tree still reaches the installer" were renamed to say what they now assert. Their assertions are unchanged, because they replace the installer with a command that fails; new tests use an installer that succeeds and check whether it ran.
+
+**`codd implement` no longer contradicts itself about a file the implementation steps already show in full (fix; the contradiction arrived with 3.43.0, #57).** Existing file content reaches the prompt in two places. The implementation steps section shows every existing `expected_outputs` file in full, with no limit. The existing-output section shows declared outputs up to `implement.existing_output_files_prompt_limit` (20,000 characters by default); since 3.43.0 a file over the limit is marked partial there and a whole-file replacement of it from stdout is refused. That guard only looked at the second section. For a file in both, the prompt said "shown in full, replace it completely" and also "shown in part, do not replace it", and the edit did not happen: on a real run with a tool-less CLI and a 26,000-character file the model obeyed the second instruction and returned only the new file, with no error. A model that returns the whole file is refused, retried once, and fails. Before 3.43.0 there was no such guard, so the replacement was written.
+
+- A file shown in full by the steps section is no longer repeated in the existing-output section. It gets one line there (`- FULL: <path> (see <path> in Implementation steps above)`) and is not subject to the whole-file restriction. On that run the prompt went from 56,591 to 35,671 characters.
+- Where being shown in the steps section is what permits the replacement (the file would not have fit in the existing-output section), the content on disk is compared with what was shown, once, before anything is written. If it changed, nothing is written.
+- A file that would have fit anyway is written as before, without that comparison. Prompts with no file in both sections are unchanged from 3.43.1, and so is the allowance left for other files (compared on 300 generated cases).
+
 ## [3.43.1] - 2026-11-24 — Fix: an agent's edit that silently vanished, and a retry that asked the same question three times
 
 Both were found by using what 3.43.0 added: the first while reviewing the usage record and then its own fix, the second in the record itself on one of its first real runs.
