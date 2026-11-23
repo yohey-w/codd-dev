@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+import hashlib
 import json
 import logging
+import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
@@ -1040,7 +1042,7 @@ class Implementer:
         design_md_content: str | None,
         screen_flow_content: str | None,
         screen_flow_routes: list[Any],
-        impl_steps_context: Any,
+        impl_steps_context: _ImplementationStepsContext | None,
         capabilities: ProjectCapabilities,
         resolved_ai_command: str,
         language: str,
@@ -1769,13 +1771,50 @@ def _use_derived_steps_enabled(config: dict[str, Any], override: bool | None) ->
     return False
 
 
+@dataclass(frozen=True)
+class _ExistingStepFile:
+    relative_path: str
+    resolved_path: Path
+    file_id: tuple[int, int]
+    characters: int
+    digest: bytes
+
+
+@dataclass
+class _ExistingStepFiles:
+    by_path: dict[Path, _ExistingStepFile] = field(default_factory=dict)
+    by_file_id: dict[tuple[int, int], _ExistingStepFile] = field(default_factory=dict)
+
+    def add(
+        self, path: Path, resolved: Path, file_id: tuple[int, int] | None, snapshot: _ExistingStepFile,
+    ) -> None:
+        self.by_path[path.absolute()] = snapshot
+        self.by_path[resolved] = snapshot
+        if file_id is not None:
+            self.by_file_id[file_id] = snapshot
+
+    def find(
+        self, path: Path, resolved: Path, file_id: tuple[int, int] | None,
+    ) -> _ExistingStepFile | None:
+        snapshot = self.by_path.get(path.absolute()) or self.by_path.get(resolved)
+        if snapshot is None and file_id is not None:
+            snapshot = self.by_file_id.get(file_id)
+        return snapshot
+
+
+@dataclass
+class _ImplementationStepsContext:
+    text: str
+    existing_files: _ExistingStepFiles
+
+
 def _implementation_steps_context(
     *,
     config: dict[str, Any],
     spec: ImplementSpec,
     dependency_documents: list[DependencyDocument],
     project_root: Path,
-) -> str | None:
+) -> _ImplementationStepsContext | None:
     from codd.llm.impl_step_deriver import render_impl_steps_for_prompt
 
     steps = _load_or_derive_implementation_steps(config, spec, dependency_documents, project_root)
@@ -1802,16 +1841,19 @@ def _implementation_steps_context(
             ]
         )
 
-    existing_content_lines = _render_existing_expected_output_content(explicit + implicit, project_root)
+    existing_files = _ExistingStepFiles()
+    existing_content_lines = _render_existing_expected_output_content(explicit + implicit, project_root, existing_files)
     if existing_content_lines:
         if lines:
             lines.append("")
         lines.extend(existing_content_lines)
 
-    return "\n".join(lines)
+    return _ImplementationStepsContext("\n".join(lines), existing_files)
 
 
-def _render_existing_expected_output_content(steps: list[Any], project_root: Path) -> list[str]:
+def _render_existing_expected_output_content(
+    steps: list[Any], project_root: Path, existing_files: _ExistingStepFiles,
+) -> list[str]:
     """Render current on-disk content for any step's ``expected_outputs`` path
     that already exists.
 
@@ -1836,7 +1878,8 @@ def _render_existing_expected_output_content(steps: list[Any], project_root: Pat
     resolved_root = project_root.resolve()
     blocks: list[str] = []
     for relative_path in relative_paths:
-        candidate = (project_root / relative_path).resolve()
+        path = project_root / relative_path
+        candidate = path.resolve()
         try:
             candidate.relative_to(resolved_root)
         except ValueError:
@@ -1844,10 +1887,18 @@ def _render_existing_expected_output_content(steps: list[Any], project_root: Pat
         if not candidate.is_file():
             continue
         try:
-            content = candidate.read_text(encoding="utf-8")
+            with candidate.open("rb") as source:
+                raw_content = source.read()
+                file_stat = os.fstat(source.fileno())
+            content = raw_content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
         except (OSError, UnicodeDecodeError):
             continue
         blocks.append(f"=== EXISTING FILE: {relative_path} ===\n{content.rstrip()}\n=== END EXISTING FILE ===")
+        file_id = file_stat.st_dev, file_stat.st_ino
+        snapshot = _ExistingStepFile(
+            relative_path, candidate, file_id, len(content), hashlib.sha256(raw_content).digest(),
+        )
+        existing_files.add(path, candidate, file_id, snapshot)
 
     if not blocks:
         return []
@@ -2399,6 +2450,7 @@ class _ExistingOutputCoverage:
     incomplete_files: dict[str, tuple[Path, tuple[int, int] | None]] = field(default_factory=dict)
     incomplete_paths: set[Path] = field(default_factory=set)
     incomplete_file_ids: set[tuple[int, int]] = field(default_factory=set)
+    step_replacement_snapshots: _ExistingStepFiles = field(default_factory=_ExistingStepFiles)
 
 
 def _existing_output_file_id(path: Path) -> tuple[int, int] | None:
@@ -2413,14 +2465,14 @@ def _existing_output_files_context(
     project_root: Path, expected_outputs: list[str],
     *, limit: int = EXISTING_OUTPUT_FILES_PROMPT_LIMIT,
     coverage: _ExistingOutputCoverage | None = None,
+    existing_step_files: _ExistingStepFiles | None = None,
 ) -> str | None:
     """Current content of *expected_outputs* entries that already exist on disk.
 
-    Every OTHER context section in this prompt (design docs, prior-task
-    summaries, conventions) describes what code should look like or briefly
-    names what a dependency exported — none of them carries the ACTUAL current
-    content of a file. That is a non-issue for the common task shape (every
-    declared output is a brand-new file this task alone owns). It is a real gap
+    Design docs, prior-task summaries, and conventions describe what code
+    should look like or briefly name what a dependency exported. Approved
+    implementation steps may already show a file in full. Missing content is
+    a non-issue when every declared output is a brand-new file. It is a real gap
     for the other, less common but perfectly legitimate shape: a task whose
     declared ``expected_outputs`` were already created by an EARLIER task (or a
     previous, interrupted attempt at this very task) and whose job here is to
@@ -2441,6 +2493,8 @@ def _existing_output_files_context(
     """
     sections: list[str] = []
     inventory: list[str] = []
+    step_references: list[str] = []
+    step_overflows: list[tuple[Path, Path, tuple[int, int] | None, _ExistingStepFile]] = []
     full_paths: set[Path] = set()
     full_file_ids: set[tuple[int, int]] = set()
     has_incomplete_files = False
@@ -2455,6 +2509,27 @@ def _existing_output_files_context(
         try:
             _ensure_inside_project(project_root, candidate, "expected output")
         except ValueError:
+            continue
+        if existing_step_files is not None and existing_step_files.by_path:
+            step_destination = candidate.resolve()
+            step_file_id = _existing_output_file_id(step_destination)
+            snapshot = existing_step_files.find(candidate, step_destination, step_file_id)
+        else:
+            snapshot = None
+        if snapshot is not None:
+            reference = f"- FULL: {text} (see {snapshot.relative_path} in Implementation steps above)"
+            inventory.append(reference)
+            step_references.append(reference)
+            if coverage is not None:
+                coverage.total_characters += snapshot.characters
+                if snapshot.characters <= budget:
+                    full_paths.add(step_destination)
+                    if step_file_id is not None:
+                        full_file_ids.add(step_file_id)
+                else:
+                    step_overflows.append((candidate, step_destination, step_file_id, snapshot))
+            # Keep the same allowance for files that only appear in this section.
+            budget = max(0, budget - snapshot.characters)
             continue
         if not candidate.is_file():
             continue
@@ -2497,6 +2572,15 @@ def _existing_output_files_context(
                 coverage.incomplete_paths.add(path)
                 if file_id is not None:
                     coverage.incomplete_file_ids.add(file_id)
+        # Snapshot checks apply when the steps supply the only full copy, even
+        # after accounting for declared aliases that fit in the legacy budget.
+        for candidate, resolved, file_id, snapshot in step_overflows:
+            if resolved in full_paths or file_id in full_file_ids:
+                continue
+            coverage.step_replacement_snapshots.add(
+                project_root / snapshot.relative_path, snapshot.resolved_path, snapshot.file_id, snapshot,
+            )
+            coverage.step_replacement_snapshots.add(candidate, resolved, file_id, snapshot)
     if has_incomplete_files:
         sections.append(
             "Existing-file context coverage (content limit: "
@@ -2509,6 +2593,8 @@ def _existing_output_files_context(
             "In that case FULL files and new files still use the normal complete-file contract. "
             "A FULL copy of the same file under another listed path also supplies complete context."
         )
+    else:
+        sections.extend(step_references)
     if not sections:
         return None
     return "\n\n".join(sections)
@@ -2988,7 +3074,7 @@ def _build_implementation_prompt(
     design_md_content: str | None = None,
     screen_flow_content: str | None = None,
     screen_flow_routes: list[str] | None = None,
-    impl_steps_context: str | None = None,
+    impl_steps_context: _ImplementationStepsContext | None = None,
     feedback: str | None = None,
     capabilities: ProjectCapabilities | None = None,
     project_root: Path | None = None,
@@ -3286,7 +3372,7 @@ def _build_implementation_prompt(
             [
                 "",
                 "Implementation steps to follow (LLM-derived, project-approved):",
-                impl_steps_context.rstrip(),
+                impl_steps_context.text.rstrip(),
             ]
         )
 
@@ -3322,6 +3408,7 @@ def _build_implementation_prompt(
             project_root, declared_outputs,
             limit=_existing_output_files_prompt_limit(config),
             coverage=existing_output_coverage,
+            existing_step_files=impl_steps_context.existing_files if impl_steps_context else None,
         )
         if project_root is not None and declared_outputs
         else None
@@ -3467,12 +3554,11 @@ def _write_generated_files(
         root_artifact_patterns=root_artifact_patterns,
         test_root=test_root,
     )
-    # Only preflight the batch when there are files to protect. Otherwise
-    # syntax validation and the write loop retain their usual order.
-    if existing_output_coverage is not None and existing_output_coverage.incomplete_paths:
-        from codd.ai_invoke import _CapturedFileOutput
+    from codd.ai_invoke import _CapturedFileOutput
 
-        captured_paths = raw_output.captured_paths if isinstance(raw_output, _CapturedFileOutput) else frozenset()
+    captured_paths = raw_output.captured_paths if isinstance(raw_output, _CapturedFileOutput) else frozenset()
+    # Preserve the incomplete-context preflight and its precedence over syntax.
+    if existing_output_coverage is not None and existing_output_coverage.incomplete_paths:
         blocked: list[str] = []
         for relative_path, _content in file_payloads:
             destination = project_root / relative_path
@@ -3520,6 +3606,11 @@ def _write_generated_files(
                 payloads=rejected_payloads,
                 confusable_failures=confusable_failures,
             )
+    step_snapshots = existing_output_coverage.step_replacement_snapshots if existing_output_coverage is not None else None
+    if step_snapshots is not None and step_snapshots.by_path:
+        # Reject an already stale batch before writing any of its payloads.
+        for relative_path, _ in file_payloads:
+            _verify_existing_step_output(project_root, relative_path, step_snapshots, captured_paths)
     traceability_comment = _build_traceability_comment(design_context, spec, dependency_documents)
     output_prefixes = [PurePosixPath(item) for item in spec.output_paths]
     generated_paths: list[Path] = []
@@ -3565,9 +3656,37 @@ def _write_generated_files(
                 "exists on disk as a FILE — path-kind collision"
             )
         destination.parent.mkdir(parents=True, exist_ok=True)
+        # The stale-content check above runs once, before any write. Repeating it
+        # here would measure a later block against content this batch just wrote
+        # (the same path twice, or another name for the same file) and stop with
+        # the batch half-written.
         destination.write_text(_prepend_traceability_comment(relative_path, traceability_comment, content), encoding="utf-8")
         generated_paths.append(destination)
     return generated_paths
+
+
+def _verify_existing_step_output(
+    project_root: Path, relative_path: str, step_snapshots: _ExistingStepFiles, captured_paths: frozenset[Path],
+) -> None:
+    destination = project_root / relative_path
+    resolved = destination.resolve()
+    if resolved in captured_paths:
+        return
+    snapshot = step_snapshots.find(destination, resolved, _existing_output_file_id(resolved))
+    if snapshot is None:
+        return
+    _ensure_inside_project(project_root, resolved, "generated file")
+    try:
+        if resolved.is_file() and hashlib.sha256(resolved.read_bytes()).digest() == snapshot.digest:
+            return
+    except OSError:
+        pass
+    from codd.cli import CoddCLIError
+
+    raise CoddCLIError(
+        f"Existing file content changed after the implementation prompt was prepared: {relative_path}. "
+        "Rerun codd implement to use the current file content."
+    )
 
 
 def _blocking_file_ancestor(destination: Path, project_root: Path) -> Path | None:
