@@ -329,6 +329,9 @@ def invoke_file_writing_agent(
 ) -> str:
     """Invoke an AI agent that writes files directly, capture changes as === FILE: === blocks.
 
+    Paths containing tabs or newlines are unsupported. Paths with invalid
+    UTF-8 bytes are omitted from the captured output.
+
     *env*, when given, replaces the child process environment (used by the
     output-ceiling recovery to raise ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``).
     *timeout* is the per-call wall-clock budget (seconds); ``None`` resolves the
@@ -343,7 +346,7 @@ def invoke_file_writing_agent(
     exclusions, relative_log = git_usage_exclusion(project_root)
     project_paths = ["--", ".", *exclusions] if relative_log is not None else []
     checkout_paths = project_paths or ["--", "."]
-    # Staging and diff span the repository even when cwd is a subdirectory.
+    # Stage the repository-wide baseline even when cwd is a subdirectory.
     repo_paths = ["--", ":/", *exclusions] if exclusions else []
     subprocess.run(["git", "add", "-A", *repo_paths], cwd=cwd, capture_output=True)
 
@@ -375,14 +378,20 @@ def invoke_file_writing_agent(
                   or f"exit code {result.returncode}")
         raise ValueError(f"AI command failed: {detail}")
 
-    # Detect files changed by the agent (unstaged vs index = agent's work)
+    # Keep UTF-8 names literal in both listings and make diff paths relative to cwd.
+    # Set the options in the subprocess environments to preserve the Git argv.
+    list_env = os.environ.copy()
+    git_config = list_env.get("GIT_CONFIG_PARAMETERS", "")
+    git_config = f"{git_config} 'core.quotepath=false'".lstrip()
+    list_env["GIT_CONFIG_PARAMETERS"] = git_config
+    diff_env = {**list_env, "GIT_CONFIG_PARAMETERS": f"{git_config} 'diff.relative=true'"}
     diff_out = subprocess.run(
         ["git", "diff", "--name-only", *repo_paths],
-        cwd=cwd, capture_output=True, text=True, encoding="utf-8",
+        cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="surrogateescape", env=diff_env,
     ).stdout.strip()
     untracked_out = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard", *project_paths],
-        cwd=cwd, capture_output=True, text=True, encoding="utf-8",
+        cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="surrogateescape", env=list_env,
     ).stdout.strip()
 
     changed_files = diff_out.splitlines() if diff_out else []
@@ -408,11 +417,18 @@ def invoke_file_writing_agent(
         note_failure("no_file_changes")
         raise ValueError("AI command did not produce any file changes")
 
+    # surrogateescape maps invalid bytes to U+DC80 through U+DCFF. Count these
+    # entries as changes, but skip reads and unlinks as with Git's quoted paths.
+    non_utf8_paths = {path for path in all_files if re.search(r"[\udc80-\udcff]", path)}
+    new_files = [path for path in new_files if path not in non_utf8_paths]
+
     # Read changed files and format as CoDD file blocks
     parts: list[str] = []
     captured_paths: set[Path] = set()
     for rel_path in all_files:
-        # A repo-relative diff name can point to the log when read from cwd.
+        if rel_path in non_utf8_paths:
+            continue
+        # Keep the usage log out of the file blocks.
         if relative_log is not None and Path(rel_path) == relative_log:
             continue
         full_path = project_root / rel_path
