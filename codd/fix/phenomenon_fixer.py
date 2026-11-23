@@ -57,6 +57,7 @@ from codd.ai_invoke import (
     prepare_read_only_codex,
     resolve_ai_command as _resolve_ai_command,
 )
+from codd.ai_usage import usage_session
 
 logger = logging.getLogger("codd.fix.phenomenon_fixer")
 
@@ -239,14 +240,27 @@ def run_phenomenon_fix(
     stage_commands = config.get("ai_commands")
     configured_stages: set[str] = set()
     if not ai_invoke and ai_command is None and isinstance(stage_commands, dict):
+        # Validate before any stage can catch a configuration error or apply a change.
         for name in stage_names:
+            key = f"ai_commands.{name}"
             value = stage_commands.get(name)
             if isinstance(value, dict):
-                value = value.get("command") or None
-            if value is not None:
+                key += ".command"
+                value = value.get("command")
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                result.aborted = True
+                result.abort_reason = f"invalid {key} = {value!r} (expected a command string)"
+                return result
+            if value.strip():
                 configured_stages.add(name)
 
-    if configured_stages:
+    if ai_invoke:
+        parse_ai = score_ai = design_ai = risk_ai = impl_ai = ai_invoke
+    else:
+        shared_ai = None if configured_stages else _build_default_ai_invoke(project_root, ai_command)
+
         @cache
         def build_ai(command_name: str) -> AiInvoke:
             return _build_default_ai_invoke(
@@ -257,14 +271,15 @@ def run_phenomenon_fix(
             command_name = name if name in configured_stages else "fix"
 
             def invoke(prompt: str) -> str:
-                return build_ai(command_name)(prompt)
+                ai = shared_ai if shared_ai is not None else build_ai(command_name)
+                # The adapter runs in a temporary workspace. Resolve usage
+                # against the project and label it independently of the command.
+                with usage_session(config, project_root, stage=name):
+                    return ai(prompt)
 
             return invoke
 
         parse_ai, score_ai, design_ai, risk_ai, impl_ai = map(ai_for_stage, stage_names)
-    else:
-        ai = ai_invoke or _build_default_ai_invoke(project_root, ai_command)
-        parse_ai = score_ai = design_ai = risk_ai = impl_ai = ai
 
     ui = prompt or InteractivePrompt(
         non_interactive=non_interactive,
