@@ -13,6 +13,8 @@ ai_commands:
   design_doc_extract: null
   criteria_expand: null
 ai:
+  # Opt-in per-attempt metadata JSONL; CODD_AI_USAGE_LOG overrides this path.
+  usage_log: null
   # Wall-clock timeout (seconds) for a SINGLE AI subprocess call. A model CLI can
   # stall one call indefinitely with no error and no output (blocked on a
   # half-open socket); the recoverable-error retry never fires because nothing is

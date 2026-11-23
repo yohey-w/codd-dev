@@ -72,6 +72,7 @@ def get_ai_command(
         return _fallback(fallback, str(exc), config, project_root, command_override)
 
     if isinstance(adapter, CodexAppServerAiCommand):
+        adapter.config = config
         adapter.fallback = fallback
         adapter.fallback_command = _subprocess(config, project_root, command_override)
     return adapter

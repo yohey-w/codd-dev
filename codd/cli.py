@@ -624,7 +624,51 @@ def main(ctx: click.Context):
     """CoDD: Coherence-Driven Development."""
     if ctx.resilient_parsing or ctx.invoked_subcommand in {None, "version"}:
         return
-    _warn_if_project_version_mismatch(Path.cwd())
+    try:
+        _warn_if_project_version_mismatch(Path.cwd())
+    except (OSError, yaml.YAMLError):
+        if ctx.invoked_subcommand != "usage":
+            raise
+        # Usage resolves its own input from --log or the selected project.
+
+
+@main.group("usage")
+def usage_cmd() -> None:
+    """Inspect opt-in AI call metadata."""
+
+
+@usage_cmd.command("summary")
+@project_root_option("project_path")
+@click.option("--log", "log_path", type=click.Path(path_type=Path), default=None,
+              help="Usage JSONL path, relative to the current directory")
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text")
+def usage_summary_cmd(project_path: str, log_path: Path | None, output_format: str) -> None:
+    """Sum calls, characters, elapsed seconds and same-prompt reissues by stage."""
+    from codd.ai_usage import resolve_usage_log, summarize_usage
+
+    try:
+        if log_path is not None:
+            path = log_path.expanduser().resolve()
+        else:
+            path = resolve_usage_log(project_root=Path(project_path).resolve())
+    except (OSError, RuntimeError, ValueError, yaml.YAMLError) as exc:
+        source = "--log" if log_path is not None else "codd.yaml or CODD_AI_USAGE_LOG"
+        raise click.ClickException(f"Cannot resolve usage log from {source}") from exc
+    if path is None:
+        raise click.ClickException("Set ai.usage_log, CODD_AI_USAGE_LOG, or --log")
+    try:
+        groups, invalid_lines = summarize_usage(path)
+    except OSError as exc:
+        raise click.ClickException(f"Cannot summarize usage log: {exc}") from exc
+    if invalid_lines:
+        click.echo(f"Usage log lines skipped as invalid (invalid_lines={invalid_lines})", err=True)
+    if output_format == "json":
+        click.echo(json.dumps(groups))
+        return
+    click.echo("stage\tcalls\tprompt_chars\toutput_chars\tseconds\treissues")
+    for group in groups:
+        click.echo(f"{group['stage'] or '(unknown)'}\t{group['calls']}\t{group['prompt_chars']}\t"
+                   f"{group['output_chars']}\t{group['seconds']:.3f}\t{group['reissues']}")
 
 
 @main.command("version")

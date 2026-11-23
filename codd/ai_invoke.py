@@ -54,6 +54,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from codd.ai_usage import git_usage_exclusion, note_failure, note_output, note_route, usage_session, usage_trial
 from codd.claude_cli import with_default_claude_permission_bypass
 from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
 
@@ -323,8 +324,12 @@ def invoke_file_writing_agent(
     cwd = str(project_root)
     call_timeout = resolve_ai_call_timeout() if timeout is None else timeout
 
-    # Stage all current state as baseline for change detection
-    subprocess.run(["git", "add", "-A"], cwd=cwd, capture_output=True)
+    exclusions, relative_log = git_usage_exclusion(project_root)
+    project_paths = ["--", ".", *exclusions] if relative_log is not None else []
+    checkout_paths = project_paths or ["--", "."]
+    # Staging and diff span the repository even when cwd is a subdirectory.
+    repo_paths = ["--", ":/", *exclusions] if exclusions else []
+    subprocess.run(["git", "add", "-A", *repo_paths], cwd=cwd, capture_output=True)
 
     try:
         result = subprocess.run(
@@ -333,8 +338,10 @@ def invoke_file_writing_agent(
             env=dict(env) if env is not None else None,
         )
     except FileNotFoundError as exc:
+        note_failure("not_found")
         raise ValueError(f"AI command not found: {command[0]}") from exc
     except subprocess.TimeoutExpired:
+        note_failure("timeout")
         # subprocess.run already SIGKILLed and reaped the child before raising.
         # Surface as a transient failure so the recovery wrapper retries it.
         raise ValueError(_AI_CALL_TIMEOUT_MESSAGE.format(seconds=_format_seconds(call_timeout)))
@@ -345,18 +352,20 @@ def invoke_file_writing_agent(
         file=sys.stderr,
     )
 
+    note_output(result.stdout)
     if result.returncode != 0:
+        note_failure("nonzero_exit")
         detail = (result.stderr.strip() or result.stdout.strip()
                   or f"exit code {result.returncode}")
         raise ValueError(f"AI command failed: {detail}")
 
     # Detect files changed by the agent (unstaged vs index = agent's work)
     diff_out = subprocess.run(
-        ["git", "diff", "--name-only"],
+        ["git", "diff", "--name-only", *repo_paths],
         cwd=cwd, capture_output=True, text=True, encoding="utf-8",
     ).stdout.strip()
     untracked_out = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"],
+        ["git", "ls-files", "--others", "--exclude-standard", *project_paths],
         cwd=cwd, capture_output=True, text=True, encoding="utf-8",
     ).stdout.strip()
 
@@ -380,11 +389,15 @@ def invoke_file_writing_agent(
         # from the same clean working tree it inherited, then surface the
         # no-usable-output failure.
         subprocess.run(["git", "reset", "--quiet"], cwd=cwd, capture_output=True)
+        note_failure("no_file_changes")
         raise ValueError("AI command did not produce any file changes")
 
     # Read changed files and format as CoDD file blocks
     parts: list[str] = []
     for rel_path in all_files:
+        # A repo-relative diff name can point to the log when read from cwd.
+        if relative_log is not None and Path(rel_path) == relative_log:
+            continue
         full_path = project_root / rel_path
         if full_path.is_file():
             content = full_path.read_text(encoding="utf-8", errors="replace")
@@ -397,16 +410,17 @@ def invoke_file_writing_agent(
         # to the staged baseline (same cleanup as the success branch below)
         # BEFORE raising, so an implement-level retry starts from a clean tree
         # rather than inheriting the agent's half-written artifacts.
-        subprocess.run(["git", "checkout", "--", "."], cwd=cwd, capture_output=True)
+        subprocess.run(["git", "checkout", *checkout_paths], cwd=cwd, capture_output=True)
         for f in new_files:
             fp = project_root / f
             if fp.is_file():
                 fp.unlink()
         subprocess.run(["git", "reset", "--quiet"], cwd=cwd, capture_output=True)
+        note_failure("no_readable_changes")
         raise ValueError("AI command did not produce any readable file changes")
 
     # Revert: restore tracked files from index, remove agent-created files
-    subprocess.run(["git", "checkout", "--", "."], cwd=cwd, capture_output=True)
+    subprocess.run(["git", "checkout", *checkout_paths], cwd=cwd, capture_output=True)
     for f in new_files:
         fp = project_root / f
         if fp.is_file():
@@ -454,6 +468,7 @@ def _invoke_subprocess(
     call_timeout = resolve_ai_call_timeout() if timeout is None else timeout
 
     if is_file_writing_agent(command) and project_root is not None:
+        note_route("file_writing")
         # Pass env/timeout only when an override is present so existing
         # monkeypatched fakes with the historical (command, prompt,
         # project_root) signature keep working (the common path passes env=None
@@ -478,17 +493,22 @@ def _invoke_subprocess(
             if working_directory is not None or project_root is not None else None,
         )
     except FileNotFoundError as exc:
+        note_failure("not_found")
         raise ValueError(f"AI command not found: {command[0]}") from exc
     except subprocess.TimeoutExpired:
+        note_failure("timeout")
         # subprocess.run already SIGKILLed and reaped the child before raising.
         # Surface as a transient failure so the recovery wrapper retries it.
         raise ValueError(_AI_CALL_TIMEOUT_MESSAGE.format(seconds=_format_seconds(call_timeout)))
 
+    note_output(result.stdout)
     if result.returncode != 0:
+        note_failure("nonzero_exit")
         detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
         raise ValueError(f"AI command failed: {detail}")
 
     if not result.stdout.strip():
+        note_failure("empty_output")
         raise ValueError("AI command returned empty output")
 
     return result.stdout
@@ -691,6 +711,7 @@ def invoke_ai(
     safe_root: Path | None = None,
     force_print_on_claude: bool = False,
     config: Mapping[str, Any] | None = None,
+    stage: str | None = None,
 ) -> str:
     """Invoke the AI CLI through the one unified path.
 
@@ -717,6 +738,7 @@ def invoke_ai(
             adapter factory (``get_ai_command``) so the Codex App Server
             transport (and its fallback chain) is honored. ``None`` keeps the
             direct subprocess path.
+        stage: Optional usage label; otherwise the Click subcommand path or empty.
 
     Wall-clock timeout: every direct-subprocess AI call carries a finite
     per-call timeout (resolved via :func:`resolve_ai_call_timeout`; default
@@ -727,62 +749,69 @@ def invoke_ai(
     timeout. The deployment-adapter path owns its own timeout (the adapter
     already applies ``resolve_timeout`` from the shared SSoT).
     """
-    command_str = ai_command
+    with usage_session(config, project_root, stage):
+        command_str = ai_command
 
-    held_workspace: tempfile.TemporaryDirectory | None = None
-    effective_root = project_root
-    try:
-        if harden_read_only:
-            workspace_root = safe_root
-            if workspace_root is None:
-                held_workspace = tempfile.TemporaryDirectory(prefix="codd-ai-")
-                workspace_root = Path(held_workspace.name)
-            command_str = prepare_read_only_codex(command_str, workspace_root)
-            effective_root = workspace_root
-        if force_print_on_claude:
-            command_str = force_claude_print(command_str)
+        held_workspace: tempfile.TemporaryDirectory | None = None
+        effective_root = project_root
+        try:
+            if harden_read_only:
+                workspace_root = safe_root
+                if workspace_root is None:
+                    held_workspace = tempfile.TemporaryDirectory(prefix="codd-ai-")
+                    workspace_root = Path(held_workspace.name)
+                command_str = prepare_read_only_codex(command_str, workspace_root)
+                effective_root = workspace_root
+            if force_print_on_claude:
+                command_str = force_claude_print(command_str)
 
-        if config is not None:
-            from codd.deployment.providers.ai_command_factory import get_ai_command
+            if config is not None:
+                from codd.deployment.providers.ai_command_factory import get_ai_command
 
-            adapter = get_ai_command(config, project_root=effective_root, command_override=command_str)
+                adapter = get_ai_command(config, project_root=effective_root, command_override=command_str)
 
-            # The deployment adapter owns its own subprocess env, so the
-            # output-ceiling env-raise cannot be threaded per-call. Recovery
-            # falls back to raising the budget on os.environ for the duration of
-            # the retried adapter call (restored in ``finally``). Transient
-            # auto-retry still applies via the same identical re-invocation.
-            def attempt(current_prompt: str, env: Mapping[str, str] | None = None) -> str:
-                return adapter.invoke(current_prompt)
-        else:
-            # Hardened calls are plain text-in/text-out by definition: never
-            # route them through the file-writing-agent capture machinery.
-            subprocess_root = None if harden_read_only else project_root
+                # The deployment adapter owns its own subprocess env, so the
+                # output-ceiling env-raise cannot be threaded per-call. Recovery
+                # falls back to raising the budget on os.environ for the duration of
+                # the retried adapter call (restored in ``finally``). Transient
+                # auto-retry still applies via the same identical re-invocation.
+                def attempt(current_prompt: str, env: Mapping[str, str] | None = None) -> str:
+                    with usage_trial(current_prompt, "adapter", command_str, defer_if_nested=True):
+                        output = adapter.invoke(current_prompt)
+                        note_output(output)
+                        return output
+            else:
+                # Hardened calls are plain text-in/text-out by definition: never
+                # route them through the file-writing-agent capture machinery.
+                subprocess_root = None if harden_read_only else project_root
 
-            def attempt(current_prompt: str, env: Mapping[str, str] | None = None) -> str:
-                # timeout is left to _invoke_subprocess to resolve (via
-                # resolve_ai_call_timeout) so the historical call sites/fakes
-                # with the (command, prompt, project_root[, env]) shape keep
-                # working; the resolver still honours the env vars and config.
-                return _invoke_subprocess(
-                    command_str, current_prompt, project_root=subprocess_root, env=env,
-                    **({"working_directory": effective_root} if harden_read_only else {}),
-                )
+                def attempt(current_prompt: str, env: Mapping[str, str] | None = None) -> str:
+                    # timeout is left to _invoke_subprocess to resolve (via
+                    # resolve_ai_call_timeout) so the historical call sites/fakes
+                    # with the (command, prompt, project_root[, env]) shape keep
+                    # working; the resolver still honours the env vars and config.
+                    with usage_trial(current_prompt, "subprocess", command_str):
+                        output = _invoke_subprocess(
+                            command_str, current_prompt, project_root=subprocess_root, env=env,
+                            **({"working_directory": effective_root} if harden_read_only else {}),
+                        )
+                        note_output(output)
+                        return output
 
-        current_prompt = prompt
-        max_attempts = max(0, retries) + 1
-        for attempt_index in range(max_attempts):
-            try:
-                return _invoke_with_recovery(attempt, current_prompt, adapter_routed=config is not None)
-            except ValueError as exc:
-                if attempt_index + 1 >= max_attempts or not _is_transient_failure(exc):
-                    raise
-                if retry_feedback is not None:
-                    current_prompt = retry_feedback(current_prompt, exc, attempt_index)
-        raise AssertionError("unreachable: retry loop always returns or raises")
-    finally:
-        if held_workspace is not None:
-            held_workspace.cleanup()
+            current_prompt = prompt
+            max_attempts = max(0, retries) + 1
+            for attempt_index in range(max_attempts):
+                try:
+                    return _invoke_with_recovery(attempt, current_prompt, adapter_routed=config is not None)
+                except ValueError as exc:
+                    if attempt_index + 1 >= max_attempts or not _is_transient_failure(exc):
+                        raise
+                    if retry_feedback is not None:
+                        current_prompt = retry_feedback(current_prompt, exc, attempt_index)
+            raise AssertionError("unreachable: retry loop always returns or raises")
+        finally:
+            if held_workspace is not None:
+                held_workspace.cleanup()
 
 
 __all__ = [
