@@ -13,6 +13,18 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.43.1] - 2026-11-24 — Fix: an agent's edit that silently vanished, and a retry that asked the same question three times
+
+Both were found by using what 3.43.0 added: the first while reviewing the usage record and then its own fix, the second in the record itself on one of its first real runs.
+
+**A file-writing agent's edits were dropped in two situations (fix).** `invoke_file_writing_agent` picks up what the agent changed from git and then reverts the working tree. When the project root is a subdirectory of the git repository, `git diff --name-only` answered with repository-relative paths that were then read from the project root, so an edit to a tracked file was not captured — and the revert undid it. Non-ASCII file names (Japanese, for example) failed the same way even at the repository root, because git quotes them by default; a new file with such a name was left behind in the tree. The two listings now run with `core.quotepath=false`, and the diff with `diff.relative=true`, passed through the child environment so the git argv is unchanged; an existing `GIT_CONFIG_PARAMETERS` is kept. Names that are not valid UTF-8 are left out of the capture and the cleanup still runs. Names with tabs or newlines remain unsupported. `diff.relative` is available from Git 2.28; with an older git the subdirectory case is expected to behave as before (not verified).
+
+**`codd fix PHENOMENON` no longer re-sends an identical design-update prompt (fix).** When the model's updated document failed validation, the next attempt was issued with the same prompt and no reason. On a real run all three attempts failed the same way — one line of preface before an otherwise correct document — at about 26,000 input and 7,800 output tokens each.
+
+- A retry now carries the previous validation reason and the attempt number. The reason says what to fix (leading text, missing or unclosed frontmatter, missing `codd:` block, changed `codd:` block); the model's output is not included. The first attempt's prompt is unchanged.
+- When the original document starts with frontmatter and the output is one plain line, a blank line, and then a complete document with frontmatter, that line is dropped and the usual checks run on the rest. Only a single line of at most 400 characters that does not look like Markdown structure is dropped, and the drop is reported in the attempt record and on stderr.
+- Everything else is rejected exactly as before: no frontmatter, a missing `codd:` block, or a changed one.
+
 ## [3.43.0] - 2026-11-24 — Token efficiency, measured first: a tool-less call that carried 450 tools, a "complete" file that was cut at 20,000 characters, and an opt-in record of every AI call
 
 Counting real transcripts of CoDD-launched AI calls (2,727 sessions, numbers only) showed where the tokens go and turned up two defects along the way. Every new setting is opt-in. Two things change by default: a Claude command with an explicit empty `--tools` list gets `--strict-mcp-config`, and an `implement` prompt whose existing files exceed the limit (or cannot be read) now says so.
