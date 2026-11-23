@@ -28,7 +28,7 @@ codd assemble --path .
 codd assemble --path . --output-dir app
 
 # Override AI command (e.g., use a different model)
-codd assemble --path . --ai-cmd 'claude --print --model claude-opus-4-6 --tools ""'
+codd assemble --path . --ai-cmd 'claude --print --model claude-opus-4-6 --tools "" --strict-mcp-config'
 ```
 
 ## What It Does

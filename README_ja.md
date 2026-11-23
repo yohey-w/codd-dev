@@ -66,6 +66,10 @@ codd version                  # インストールを確認
 - **AI CLI**（設計・コード・テストを生成/更新する `greenfield` `fix` `generate` `implement` `brownfield` などで使用）。既定は `claude --print`。`--ai-cmd "<コマンド>"` または `codd.yaml` の `ai_command:` で Codex CLI などに差し替えられます。
 - **AI 不要のコマンド**（`init` `scan` `check` `doctor` `measure` `impact` `validate` `plan`（表示）`contract verify` `dag verify` `lexicon` `version` など）は、AI CLI が無くてもそのまま動きます。
 
+Claude の `--tools` リストに `ToolSearch` がない場合、接続済み MCP の全ツール定義が呼び出しごとに読み込まれます。CoDD は、明示的な空指定 `--tools ""` に対して、`--mcp-config` も `--strict-mcp-config` もなければ `--strict-mcp-config` を自動で追加し、この読み込みを防ぎます。
+
+空でない `--tools` リストは変更しません。`ToolSearch` と上記の MCP フラグがないリストには `codd doctor` が警告します。MCP を意図して使う場合は `--mcp-config <設定ファイル>` を明示してください。
+
 ---
 
 ## クイックスタート（1分・AI 不要）

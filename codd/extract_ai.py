@@ -20,6 +20,7 @@ import warnings
 import yaml
 
 from codd.ai_invoke import invoke_ai
+from codd.claude_cli import ai_command_has_tools
 from codd.discovery import (
     DEFAULT_IGNORED_DIRS,
     SOURCE_EXTENSIONS as _SHARED_SOURCE_EXTENSIONS,
@@ -56,39 +57,6 @@ CONFIG_FILES = [
 
 # IaC patterns
 IAC_EXTENSIONS = {".bicep", ".bicepparam", ".tf", ".tfvars", ".hcl"}
-
-
-def ai_command_has_tools(ai_command: str) -> bool:
-    """Return whether ``ai_command`` grants the model file/shell tools.
-
-    The extract prompt's "Extraction Procedure" enumerates the codebase via bash
-    (``find``/``ls``/``rg``). That only works when the AI CLI can actually shell
-    out. The default ``ai_command`` disables tools (``--tools ""``), and agentic
-    CLIs are hardened to read-only from an empty workspace elsewhere — so the
-    procedural bash framing pushes the model into agentic mode and it stubs or
-    hangs. We therefore treat NO TOOLS as the safe default and require an
-    explicit grant to keep the tool-enabled path.
-
-    Tools are considered AVAILABLE only when a ``--tools``/``--allowedTools``
-    flag carries a non-empty value. ``--tools ""`` (or the flag absent) → no
-    tools. Unparseable commands fail closed to no-tools (context-only is always
-    correct because the full PROJECT CONTEXT is embedded in the prompt).
-    """
-    import shlex
-
-    try:
-        parts = shlex.split(ai_command)
-    except ValueError:
-        return False
-
-    tool_flags = {"--tools", "--allowedTools", "--allowed-tools"}
-    for i, part in enumerate(parts):
-        flag, sep, inline = part.partition("=")
-        if flag in tool_flags:
-            value = inline if sep else (parts[i + 1] if i + 1 < len(parts) else "")
-            if value.strip():
-                return True
-    return False
 
 
 # Prepended to the prompt when the AI CLI has no tools: it overrides the
