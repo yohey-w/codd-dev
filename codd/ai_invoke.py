@@ -61,7 +61,7 @@ from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
 # Default AI command (moved from codd.generator; generator re-exports it).
 DEFAULT_AI_COMMAND = (
     'claude --print --permission-mode bypassPermissions '
-    '--dangerously-skip-permissions --model claude-opus-4-8 --effort xhigh --tools ""'
+    '--dangerously-skip-permissions --model claude-opus-4-8 --effort xhigh --tools "" --strict-mcp-config'
 )
 
 # ── Wall-clock timeout on the AI subprocess (anti silent-hang) ──────────────
@@ -307,6 +307,22 @@ def is_codex_exec_command(parts: list[str]) -> bool:
 # Invocation
 # ═══════════════════════════════════════════════════════════
 
+class _CapturedFileOutput(str):
+    """File blocks captured from disk, with per-file origin surviving cleanup.
+
+    A plain stdout response carries no such evidence, even from a command
+    classified as a file-writing agent. Keep normal string behavior for callers.
+    """
+
+    def __new__(cls, output: str, captured_paths: set[Path] | frozenset[Path]) -> _CapturedFileOutput:
+        instance = super().__new__(cls, output)
+        instance.captured_paths = frozenset(captured_paths)
+        return instance
+
+    def __getnewargs__(self) -> tuple[str, frozenset[Path]]:
+        return str(self), self.captured_paths
+
+
 def invoke_file_writing_agent(
     command: list[str], prompt: str, project_root: Path,
     *, env: Mapping[str, str] | None = None, timeout: float | None = None,
@@ -394,6 +410,7 @@ def invoke_file_writing_agent(
 
     # Read changed files and format as CoDD file blocks
     parts: list[str] = []
+    captured_paths: set[Path] = set()
     for rel_path in all_files:
         # A repo-relative diff name can point to the log when read from cwd.
         if relative_log is not None and Path(rel_path) == relative_log:
@@ -404,6 +421,7 @@ def invoke_file_writing_agent(
             parts.append(f"=== FILE: {rel_path} ===")
             parts.append(content)
             parts.append("")
+            captured_paths.add(full_path)
 
     if not parts:
         # The agent touched files on disk but none were readable as text. Revert
@@ -427,7 +445,9 @@ def invoke_file_writing_agent(
             fp.unlink()
     subprocess.run(["git", "reset", "--quiet"], cwd=cwd, capture_output=True)
 
-    return "\n".join(parts)
+    # Resolve against the restored baseline, as the writer will. An atomic
+    # save can replace a symlink with a regular file during the agent's run.
+    return _CapturedFileOutput("\n".join(parts), {path.resolve() for path in captured_paths})
 
 
 #: Message raised on a wall-clock timeout. Carries the ``AI command failed:``

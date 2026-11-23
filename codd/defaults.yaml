@@ -7,7 +7,7 @@ project:
 # noisy, tool-driven contexts — the regime where a larger reasoning budget is
 # not a strict upgrade. Raise to `max` per command via `ai_commands.<name>` for
 # a narrow, closed problem; do not make it the standing default.
-ai_command: "claude --print --permission-mode bypassPermissions --dangerously-skip-permissions --model claude-opus-4-8 --effort xhigh --tools \"\""
+ai_command: "claude --print --permission-mode bypassPermissions --dangerously-skip-permissions --model claude-opus-4-8 --effort xhigh --tools \"\" --strict-mcp-config"
 ai_commands:
   plan_derive: null
   design_doc_extract: null
@@ -79,6 +79,9 @@ requirement_completeness:
   ai_generate_options: false
   ai_timeout_seconds: 30
 implement:
+  # Maximum characters of existing declared output content in the prompt.
+  # Set a positive limit to override the default of 20,000 characters.
+  existing_output_files_prompt_limit: null
   # Write-time syntax sanity gate for `codd implement`: every AI-produced file
   # payload with a stdlib-checkable format (Python via ast, JSON, YAML, TOML)
   # must parse BEFORE anything is written to disk. A failure routes a clear

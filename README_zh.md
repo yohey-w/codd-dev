@@ -66,6 +66,10 @@ codd version                  # 确认安装成功
 - **一个 AI CLI**——用于生成或更新设计、代码和测试的命令（`greenfield`、`fix`、`generate`、`implement`、`brownfield` 等）。默认是 `claude --print`；可用 `--ai-cmd "<命令>"` 或 `codd.yaml` 里的 `ai_command:` 覆盖（例如改用 Codex CLI）。
 - **无需 AI** 的检查类命令（`init`、`scan`、`check`、`doctor`、`measure`、`impact`、`validate`、`plan`（查看）、`contract verify`、`dag verify`、`lexicon`、`version` 等）可以直接运行。
 
+使用 Claude CLI 时，如果 `--tools` 列表中不包含 `ToolSearch`，每次调用都会加载所有已连接 MCP 服务器的工具定义。对于显式的空列表 `--tools ""`，只要既没有 `--mcp-config` 也没有 `--strict-mcp-config`，CoDD 就会自动添加 `--strict-mcp-config` 来避免这种加载。
+
+非空的 `--tools` 列表不会被修改；当列表中既没有 `ToolSearch` 也没有上述 MCP 选项时，`codd doctor` 会给出警告。若确实需要使用 MCP 工具，请显式指定 `--mcp-config <配置文件>`。
+
 ---
 
 ## 快速上手（60 秒，无需 AI）
