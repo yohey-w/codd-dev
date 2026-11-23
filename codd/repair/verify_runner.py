@@ -582,7 +582,12 @@ class VerifyRunner:
         dependency_dir = self.project_root / NODE_MODULES_DIRNAME
         if dependency_dir.is_symlink():
             try:
-                dependency_target = dependency_dir.resolve(strict=False)
+                try:
+                    # Python 3.13 suppresses symlink loops in non-strict mode.
+                    dependency_target = dependency_dir.resolve(strict=True)
+                except (FileNotFoundError, NotADirectoryError):
+                    # A missing target still has a location to check against the project root.
+                    dependency_target = dependency_dir.resolve(strict=False)
             except (OSError, RuntimeError):
                 dependency_target = None
             if dependency_target is None or not dependency_target.is_relative_to(

@@ -710,6 +710,64 @@ def test_empty_internal_dependency_symlink_runs_install(tmp_path: Path, monkeypa
     assert result.tests_executed is True
 
 
+@pytest.mark.parametrize(
+    ("links", "refusal"),
+    [
+        pytest.param(
+            [("node_modules", "node_modules")],
+            "target could not be resolved",
+            id="self-loop",
+        ),
+        pytest.param(
+            [("node_modules", "dependencies"), ("dependencies", "node_modules")],
+            "target could not be resolved",
+            id="two-hop-loop",
+        ),
+        pytest.param([("node_modules", "missing-dependencies")], None, id="dangling-internal"),
+        pytest.param(
+            [("node_modules", "../missing-dependencies")],
+            "resolves outside the project root",
+            id="dangling-external",
+        ),
+    ],
+)
+def test_install_preflight_dependency_symlink_target(
+    tmp_path: Path, monkeypatch, links: list[tuple[str, str]], refusal: str | None
+) -> None:
+    _patch_dag_pipeline_green(monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text('{"name": "x"}', encoding="utf-8")
+    for link, target in links:
+        (project / link).symlink_to(target, target_is_directory=True)
+
+    install_resolutions: list[Path] = []
+
+    def resolve_install(root: Path) -> str:
+        install_resolutions.append(root)
+        return "echo installed > install.marker"
+
+    monkeypatch.setattr(verify_runner_module, "node_install_command", resolve_install)
+
+    result = VerifyRunner(project, _node_settings(test_command="true")).run()
+
+    marker = project / "install.marker"
+    if refusal is None:
+        assert marker.read_text(encoding="utf-8") == "installed\n"
+        assert install_resolutions == [project]
+        assert result.passed is True
+        assert result.tests_executed is True
+    else:
+        assert not marker.exists()
+        assert install_resolutions == []
+        assert result.passed is False
+        assert result.tests_executed is False
+        [failure] = [f for f in result.failures if f.check_name == "install_preflight"]
+        reason = f"node_modules symlink {refusal}"
+        assert reason in failure.message
+        assert reason in result.tests_summary
+
+
 def test_linked_tree_with_one_package_directory_counts_as_installed(tmp_path, monkeypatch) -> None:
     """The other side of the same boundary: bookkeeping PLUS one real package
     directory is a populated tree, so the installer is still skipped."""
