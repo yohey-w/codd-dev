@@ -68,7 +68,7 @@ codd version                  # 确认安装成功
 
 使用 Claude CLI 时，如果 `--tools` 列表中不包含 `ToolSearch`，每次调用都会加载所有已连接 MCP 服务器的工具定义。对于显式的空列表 `--tools ""`，只要既没有 `--mcp-config` 也没有 `--strict-mcp-config`，CoDD 就会自动添加 `--strict-mcp-config` 来避免这种加载。
 
-非空的 `--tools` 列表不会被修改；当列表中既没有 `ToolSearch` 也没有上述 MCP 选项时，`codd doctor` 会给出警告（`default` 表示 CLI 自带的默认工具集，其中包含 `ToolSearch`，因此不在警告范围内）。若确实需要使用 MCP 工具，请显式指定 `--mcp-config <配置文件>`。
+非空的 `--tools` 列表不会被修改；当列表中既没有 `ToolSearch` 也没有上述 MCP 选项时，`codd doctor` 会给出警告（`default` 表示 CLI 自带的默认工具集，其中包含 `ToolSearch`，因此不在警告范围内）。若确实需要使用 MCP 工具，请显式指定 `--mcp-config <配置文件>`。AI CLI 每次调用附带的固定上下文有多大、如何测量，见 [docs/ai-cli-context-overhead.md](docs/ai-cli-context-overhead.md)。
 
 ---
 
