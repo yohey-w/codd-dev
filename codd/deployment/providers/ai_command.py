@@ -10,6 +10,7 @@ import shlex
 import subprocess
 from typing import Any, Callable, Mapping, Protocol
 
+from codd.ai_usage import note_failure, note_output, usage_session, usage_trial
 from codd.claude_cli import with_default_claude_permission_bypass
 from codd.config import load_project_config
 from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
@@ -59,28 +60,36 @@ class SubprocessAiCommand:
         resolved_timeout = resolve_timeout(config, timeout if timeout is not None else self.timeout)
         prepared = _prepare_command(command, resolved_model)
 
-        try:
-            completed = self.runner(
-                prepared,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=resolved_timeout,
-                check=False,
-                cwd=str(self.project_root) if self.project_root is not None else None,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise AiCommandTimeout(f"AI command timed out after {resolved_timeout:g}s") from exc
-        except FileNotFoundError as exc:
-            raise AiCommandError(f"AI command not found: {prepared[0]}") from exc
+        with usage_session(config, self.project_root), usage_trial(
+            prompt, "adapter_subprocess", prepared
+        ):
+            try:
+                completed = self.runner(
+                    prepared,
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=resolved_timeout,
+                    check=False,
+                    cwd=str(self.project_root) if self.project_root is not None else None,
+                )
+            except subprocess.TimeoutExpired as exc:
+                note_failure("timeout")
+                raise AiCommandTimeout(f"AI command timed out after {resolved_timeout:g}s") from exc
+            except FileNotFoundError as exc:
+                note_failure("not_found")
+                raise AiCommandError(f"AI command not found: {prepared[0]}") from exc
 
-        if completed.returncode != 0:
-            detail = completed.stderr.strip() or completed.stdout.strip() or f"exit code {completed.returncode}"
-            raise AiCommandError(f"AI command failed: {detail}")
-        if not completed.stdout.strip():
-            raise AiCommandError("AI command returned empty output")
-        return completed.stdout
+            note_output(completed.stdout)
+            if completed.returncode != 0:
+                note_failure("nonzero_exit")
+                detail = completed.stderr.strip() or completed.stdout.strip() or f"exit code {completed.returncode}"
+                raise AiCommandError(f"AI command failed: {detail}")
+            if not completed.stdout.strip():
+                note_failure("empty_output")
+                raise AiCommandError("AI command returned empty output")
+            return completed.stdout
 
     def provider_id(self, model: str | None = None) -> str:
         config = _load_config(self.project_root, self.config)
@@ -163,17 +172,23 @@ class CodexAppServerAiCommand:
             CodexAppServerTurnError,
         )
 
-        try:
-            return str(self._run_async(self._invoke_app_server(prompt, model=model, timeout=timeout)))
-        except (CodexAppServerInitError, CodexAppServerTimeout, CodexAppServerTurnError) as exc:
-            if self.fallback == "silent":
-                return ""
-            if self.fallback == "subprocess":
-                import logging
+        with usage_session(getattr(self, "config", None), self.project_root):
+            try:
+                with usage_trial(
+                    prompt, "app_server", lambda: getattr(self.client, "command", []), model or self.model
+                ):
+                    output = str(self._run_async(self._invoke_app_server(prompt, model=model, timeout=timeout)))
+                    note_output(output)
+                    return output
+            except (CodexAppServerInitError, CodexAppServerTimeout, CodexAppServerTurnError) as exc:
+                if self.fallback == "silent":
+                    return ""
+                if self.fallback == "subprocess":
+                    import logging
 
-                logging.getLogger(__name__).warning("Codex App Server fallback: %s", exc)
-                return self.fallback_command.invoke(prompt, model=model, timeout=timeout)
-            raise
+                    logging.getLogger(__name__).warning("Codex App Server fallback: %s", exc)
+                    return self.fallback_command.invoke(prompt, model=model, timeout=timeout)
+                raise
 
     def close(self) -> None:
         try:
