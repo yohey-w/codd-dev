@@ -656,6 +656,7 @@ def _run_attempt_loop(
     allow_delete: bool,
 ) -> _AttemptLoopOutcome:
     attempts: list[PhenomenonFixAttempt] = []
+    retry_feedback: str | None = None
 
     for attempt_num in range(1, max_attempts + 1):
         try:
@@ -665,8 +666,13 @@ def _run_attempt_loop(
                 analysis=analysis,
                 ai_invoke=design_ai,
                 allow_delete=allow_delete,
+                retry_feedback=retry_feedback,
             )
         except DesignUpdateError as exc:
+            retry_feedback = (
+                f"Design update attempt {attempt_num + 1}. The previous proposal failed validation:\n"
+                f"{exc}\nCorrect this issue and return the full updated document."
+            )
             attempts.append(
                 PhenomenonFixAttempt(
                     attempt=attempt_num,
@@ -679,6 +685,7 @@ def _run_attempt_loop(
             )
             continue
         except Exception as exc:  # noqa: BLE001
+            retry_feedback = None
             attempts.append(
                 PhenomenonFixAttempt(
                     attempt=attempt_num,
