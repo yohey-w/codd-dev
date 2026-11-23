@@ -7,6 +7,7 @@ from click.testing import CliRunner
 import codd.dag.checks.deployment_completeness as deployment_module
 from codd.cli import main
 from codd.dag import DAG, Edge, Node
+from codd.dag.builder import build_dag
 from codd.dag.checks import get_registry
 from codd.dag.checks.deployment_completeness import (
     DeploymentChainViolation,
@@ -118,7 +119,170 @@ def test_complete_chain_reports_checked_count(tmp_path):
     assert result.passed is True
     assert result.skipped is False
     assert result.status == "pass"
-    assert result.checked_count >= 1
+    assert result.checked_count == 1
+
+
+def test_downstream_only_edges_skip_with_zero_checked(tmp_path):
+    downstream_kinds = (
+        EDGE_EXECUTES_IN_ORDER,
+        EDGE_PRODUCES_STATE,
+        EDGE_VERIFIED_BY,
+    )
+    for edge_kind in downstream_kinds:
+        dag = DAG()
+        dag.add_node(Node(id="docs/design/job.md", kind="design_doc"))
+        dag.add_node(Node(id="downstream:from", kind="impl_file"))
+        dag.add_node(Node(id="downstream:to", kind="runtime_state"))
+        dag.add_edge(Edge(from_id="downstream:from", to_id="downstream:to", kind=edge_kind))
+
+        result = _run(dag, tmp_path)
+
+        assert result.status == "skip", edge_kind
+        assert result.skipped is True, edge_kind
+        assert result.checked_count == 0, edge_kind
+        assert "1 downstream deploy edge(s) observed" in result.message, edge_kind
+
+
+def test_deployment_doc_without_declared_root_skips_with_zero_checked(tmp_path):
+    dag = DAG()
+    dag.add_node(Node(id="docs/design/job.md", kind="design_doc"))
+    dag.add_node(
+        Node(
+            id="DEPLOYMENT.md",
+            kind="deployment_doc",
+            attributes={"sections": ["seed"]},
+        )
+    )
+
+    result = _run(dag, tmp_path)
+
+    assert result.status == "skip"
+    assert result.skipped is True
+    assert result.checked_count == 0
+    assert "1 deployment_doc node(s)" in result.message
+
+
+def test_checked_count_is_declared_requirement_roots_not_design_docs(tmp_path):
+    dag = _complete_seed_dag()
+    dag.add_node(
+        Node(
+            id="SECOND_DEPLOYMENT.md",
+            kind="deployment_doc",
+            path="SECOND_DEPLOYMENT.md",
+            attributes={"sections": ["seed"], "post_deploy": ["npm run test:smoke"]},
+        )
+    )
+    dag.add_edge(
+        Edge(
+            from_id="docs/design/api.md",
+            to_id="SECOND_DEPLOYMENT.md",
+            kind=EDGE_REQUIRES_DEPLOYMENT_STEP,
+            attributes={"keywords": ["seed"]},
+        )
+    )
+    dag.add_edge(
+        Edge(
+            from_id="SECOND_DEPLOYMENT.md",
+            to_id="prisma/seed.ts",
+            kind=EDGE_EXECUTES_IN_ORDER,
+            attributes={"order": 1, "section": "seed"},
+        )
+    )
+
+    result = _run(dag, tmp_path)
+
+    assert result.passed is True
+    assert result.checked_count == 2
+
+
+def test_two_declared_roots_count_both_and_keep_one_broken_chain_red(tmp_path):
+    dag = _complete_seed_dag()
+    dag.add_node(
+        Node(
+            id="SECOND_DEPLOYMENT.md",
+            kind="deployment_doc",
+            attributes={"sections": ["seed"], "post_deploy": ["npm run test:smoke"]},
+        )
+    )
+    dag.add_edge(
+        Edge(
+            from_id="docs/design/api.md",
+            to_id="SECOND_DEPLOYMENT.md",
+            kind=EDGE_REQUIRES_DEPLOYMENT_STEP,
+            attributes={"keywords": ["seed"]},
+        )
+    )
+
+    result = _run(dag, tmp_path)
+
+    assert result.status == "fail"
+    assert result.checked_count == 2
+    assert [violation.design_doc for violation in result.violations] == [
+        "docs/design/api.md"
+    ]
+    assert [violation.broken_at for violation in result.violations] == [
+        "missing_impl_for_step"
+    ]
+
+
+def test_declared_requirement_without_expected_steps_fails_not_vacuous_pass(tmp_path):
+    dag = DAG()
+    dag.add_node(Node(id="docs/design/job.md", kind="design_doc"))
+    dag.add_node(
+        Node(
+            id="DEPLOYMENT.md",
+            kind="deployment_doc",
+            attributes={"sections": []},
+        )
+    )
+    dag.add_edge(
+        Edge(
+            from_id="docs/design/job.md",
+            to_id="DEPLOYMENT.md",
+            kind=EDGE_REQUIRES_DEPLOYMENT_STEP,
+            attributes={"source": "deployment_frontmatter"},
+        )
+    )
+
+    result = _run(dag, tmp_path)
+
+    assert result.status == "fail"
+    assert result.checked_count == 1
+    assert result.violations[0].broken_at == "missing_step_in_deployment_doc"
+    assert "None" not in result.violations[0].remediation
+    assert "deployment_step" in result.violations[0].remediation
+
+
+def test_builder_can_generate_declared_requirement_without_expected_steps(tmp_path):
+    design_dir = tmp_path / "docs" / "design"
+    design_dir.mkdir(parents=True)
+    (design_dir / "job.md").write_text("# Generic job\n", encoding="utf-8")
+    (tmp_path / "DEPLOYMENT.md").write_text(
+        "---\ndepends_on:\n  - docs/design/job.md\n---\n# Deployment\n",
+        encoding="utf-8",
+    )
+
+    dag = build_dag(
+        tmp_path,
+        {
+            "design_doc_patterns": ["docs/design/*.md"],
+            "impl_file_patterns": [],
+            "test_file_patterns": [],
+        },
+    )
+    declared_roots = [
+        edge
+        for edge in dag.edges
+        if edge.kind == EDGE_REQUIRES_DEPLOYMENT_STEP
+    ]
+
+    assert len(declared_roots) == 1
+    assert declared_roots[0].from_id == "docs/design/job.md"
+    assert declared_roots[0].to_id == "DEPLOYMENT.md"
+    result = _run(dag, tmp_path)
+    assert result.status == "fail"
+    assert result.checked_count == 1
+    assert result.violations[0].broken_at == "missing_step_in_deployment_doc"
 
 
 def test_complete_chain_passes(tmp_path):
@@ -140,18 +304,22 @@ def test_missing_deployment_doc_detected(tmp_path):
         )
     )
 
-    violation = _single_violation(dag, tmp_path)
+    result = _run(dag, tmp_path)
 
-    assert violation.broken_at == "missing_deployment_doc"
+    assert result.status == "fail"
+    assert result.checked_count == 1
+    assert result.violations[0].broken_at == "missing_deployment_doc"
 
 
 def test_missing_deployment_doc_when_target_is_wrong_kind(tmp_path):
     dag = _complete_seed_dag()
     dag.nodes["DEPLOYMENT.md"].kind = "impl_file"
 
-    violation = _single_violation(dag, tmp_path)
+    result = _run(dag, tmp_path)
 
-    assert violation.broken_at == "missing_deployment_doc"
+    assert result.status == "fail"
+    assert result.checked_count == 1
+    assert result.violations[0].broken_at == "missing_deployment_doc"
 
 
 def test_missing_step_from_edge_keywords_detected(tmp_path):

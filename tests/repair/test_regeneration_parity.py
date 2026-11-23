@@ -153,6 +153,14 @@ def test_source_repair_prompt_carries_producer_signature_and_mechanical_blocks(t
     assert _REGENERATION_RULE_MARKER in prompt
 
 
+def test_repair_prompt_does_not_state_greenfield_module_default_as_project_fact(tmp_path: Path):
+    prompt = _propose_prompt(tmp_path, "src/server.ts")
+
+    normalized_prompt = " ".join(prompt.split())
+    assert "this project uses NodeNext/Node16 module resolution" not in normalized_prompt
+    assert "existing project's authored module-resolution configuration" in normalized_prompt
+
+
 # ── (b) the producer BODY is never carried (signature is floor AND ceiling) ─────
 
 

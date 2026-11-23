@@ -219,9 +219,8 @@ def _linked_installed_dependencies(project_root: Path) -> Path | None:
 
     Anti-false-green: only a link that resolves to a directory holding at least one
     PACKAGE counts as an already-installed tree (see :func:`_has_installed_packages`).
-    A dangling link, a link to an empty directory, and a symlink LOOP (``is_dir()``
-    swallows ``ELOOP``) are NOT installations and must still reach the installer so a
-    genuinely missing dependency tree stays red.
+    Dangling links, links to empty directories, and symlink loops do not count as
+    installed. The caller checks whether it can install through such a link.
     """
     candidate = Path(project_root) / NODE_MODULES_DIRNAME
     try:
@@ -559,7 +558,10 @@ class VerifyRunner:
         ``typescript``/``node`` OR (no language declared but) a ``package.json``
         present. Non-node projects and explicitly-disabled
         (``verify.install_preflight: false``) are no-ops. No implicit global
-        ``npx``: the command is the project's own package manager.
+        ``npx``: the command is the project's own package manager. A symlink to a
+        populated dependency tree needs no install. For other dependency-directory
+        symlinks, check that the target is inside the project before resolving the
+        install command, because an installer may erase the target.
         """
         if _verify_setting(settings, "install_preflight", True) is False:
             return None
@@ -577,6 +579,33 @@ class VerifyRunner:
                 "dependency tree (treated as already installed)"
             )
             return None
+        dependency_dir = self.project_root / NODE_MODULES_DIRNAME
+        if dependency_dir.is_symlink():
+            try:
+                dependency_target = dependency_dir.resolve(strict=False)
+            except (OSError, RuntimeError):
+                dependency_target = None
+            if dependency_target is None or not dependency_target.is_relative_to(
+                self.project_root
+            ):
+                cause = (
+                    "target could not be resolved"
+                    if dependency_target is None
+                    else "resolves outside the project root"
+                )
+                reason = f"dependency install refused: {NODE_MODULES_DIRNAME} symlink {cause}"
+                return VerificationFailure(
+                    check_name="install_preflight",
+                    source="install_preflight",
+                    message=f"{reason} ({_link_target_note(dependency_dir)})",
+                    details={
+                        "dependency_path": NODE_MODULES_DIRNAME,
+                        "node_modules_is_symlink": True,
+                        "skip_reason": reason,
+                        "failure_class": "environment_build_error",
+                        "code_addressable": False,
+                    },
+                )
         command = node_install_command(self.project_root)
         timeout = _install_timeout_seconds(settings)
         try:

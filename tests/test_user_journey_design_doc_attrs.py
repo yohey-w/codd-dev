@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
 import warnings
 from pathlib import Path
 
+import pytest
 import yaml
 
-from codd.dag.builder import build_dag
+from codd.dag import DAG, Node
+from codd.dag.builder import _add_design_doc_expected_outcome_edges, build_dag
 from codd.dag.checks.node_completeness import NodeCompletenessCheck
+from codd.dag.checks.user_journey_coherence import UserJourneyCoherenceCheck
 from codd.dag.extractor import extract_design_doc_journey_attrs, extract_design_doc_metadata
 
 
@@ -60,30 +64,51 @@ def _journey(**overrides) -> dict:
     return journey
 
 
-def _write_project_with_expected(tmp_path: Path, journey: dict | None = None):
+def _write_project_with_frontmatter(
+    tmp_path: Path,
+    frontmatter: dict,
+    *,
+    artifacts: list[dict] | None = None,
+):
     _write(tmp_path / "src" / "login.ts", "export const login = true;\n")
-    _write(
-        tmp_path / "project_lexicon.yaml",
-        yaml.safe_dump(
-            {
-                "required_artifacts": [
-                    {
-                        "id": "e2e_login_journey",
-                        "title": "Login journey",
-                        "scope": "auth",
-                        "source": "ai_derived",
-                        "path": "src/login.ts",
-                    }
-                ]
-            },
-            sort_keys=False,
-        ),
-    )
+    if artifacts is not None:
+        _write(
+            tmp_path / "project_lexicon.yaml",
+            yaml.safe_dump({"required_artifacts": artifacts}, sort_keys=False),
+        )
     _write(
         tmp_path / "docs" / "design" / "auth.md",
-        _doc_with_frontmatter({"user_journeys": [journey or _journey()]}),
+        _doc_with_frontmatter(frontmatter),
     )
     return build_dag(tmp_path, _settings())
+
+
+def _expected_artifact(artifact_id: str = "e2e_login_journey") -> dict:
+    return {
+        "id": artifact_id,
+        "title": "Completed workflow",
+        "scope": "generic",
+        "source": "declared",
+        "path": "src/login.ts",
+    }
+
+
+def _write_project_with_expected(tmp_path: Path, journey: dict | None = None):
+    return _write_project_with_frontmatter(
+        tmp_path,
+        {"user_journeys": [journey or _journey()]},
+        artifacts=[_expected_artifact()],
+    )
+
+
+def _expected_ref_edges(dag: DAG) -> list:
+    return [
+        edge
+        for edge in dag.edges
+        if edge.from_id == "docs/design/auth.md"
+        and edge.kind == "expects"
+        and (edge.attributes or {}).get("source") == "expected_outcome_refs"
+    ]
 
 
 def test_runtime_constraints_missing_defaults_to_empty_attributes(tmp_path):
@@ -167,6 +192,182 @@ def test_expected_outcome_refs_lexicon_creates_expects_edge_to_expected_node(tmp
         for edge in dag.edges
     )
     assert NodeCompletenessCheck().run(dag, tmp_path).passed is True
+
+
+def test_canonical_user_journey_creates_serialized_expected_outcome_edge(tmp_path):
+    dag = _write_project_with_frontmatter(
+        tmp_path,
+        {"codd": {"user_journeys": [_journey()]}},
+        artifacts=[_expected_artifact()],
+    )
+
+    edges = _expected_ref_edges(dag)
+    assert [(edge.to_id, edge.attributes) for edge in edges] == [
+        (
+            "lexicon:e2e_login_journey",
+            {
+                "source": "expected_outcome_refs",
+                "ref": "lexicon:e2e_login_journey",
+                "journey": "login_to_dashboard",
+            },
+        )
+    ]
+    saved = json.loads((tmp_path / ".codd" / "dag.json").read_text(encoding="utf-8"))
+    assert [
+        edge
+        for edge in saved["edges"]
+        if edge["from_id"] == "docs/design/auth.md"
+        and edge["to_id"] == "lexicon:e2e_login_journey"
+        and edge["kind"] == "expects"
+        and edge.get("attributes", {}).get("source") == "expected_outcome_refs"
+    ] == [
+        {
+            "from_id": "docs/design/auth.md",
+            "to_id": "lexicon:e2e_login_journey",
+            "kind": "expects",
+            "attributes": {
+                "source": "expected_outcome_refs",
+                "ref": "lexicon:e2e_login_journey",
+                "journey": "login_to_dashboard",
+            },
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "attributes",
+    [
+        {"user_journeys": [_journey()]},
+        {"frontmatter": {"user_journeys": [_journey()]}},
+    ],
+    ids=["direct-attributes", "raw-top-level-frontmatter"],
+)
+def test_expected_outcome_edges_accept_existing_builder_attribute_shapes(attributes):
+    dag = DAG()
+    dag.add_node(Node(id="docs/design/auth.md", kind="design_doc", attributes=attributes))
+    dag.add_node(Node(id="lexicon:e2e_login_journey", kind="expected"))
+
+    _add_design_doc_expected_outcome_edges(dag, {"docs/design/auth.md": {"attributes": {}}})
+
+    assert len(_expected_ref_edges(dag)) == 1
+
+
+def test_expected_outcome_edge_dedup_preserves_distinct_refs_and_journeys(tmp_path):
+    login = _journey(
+        expected_outcome_refs=[
+            "lexicon:e2e_login_journey",
+            "lexicon:e2e_login_journey",
+            "lexicon:e2e_export_journey",
+        ]
+    )
+    audit = _journey(name="audit_completion", expected_outcome_refs=["lexicon:e2e_login_journey"])
+    dag = _write_project_with_frontmatter(
+        tmp_path,
+        {
+            "user_journeys": [login],
+            "codd": {"user_journeys": [login, audit]},
+        },
+        artifacts=[_expected_artifact(), _expected_artifact("e2e_export_journey")],
+    )
+
+    assert {
+        (edge.to_id, edge.attributes["journey"])
+        for edge in _expected_ref_edges(dag)
+    } == {
+        ("lexicon:e2e_login_journey", "login_to_dashboard"),
+        ("lexicon:e2e_export_journey", "login_to_dashboard"),
+        ("lexicon:e2e_login_journey", "audit_completion"),
+    }
+    assert len(_expected_ref_edges(dag)) == 3
+
+
+def test_same_named_journeys_in_top_level_and_canonical_keep_distinct_refs(tmp_path):
+    top_level = _journey(expected_outcome_refs=["lexicon:e2e_login_journey"])
+    canonical = _journey(expected_outcome_refs=["lexicon:e2e_export_journey"])
+    dag = _write_project_with_frontmatter(
+        tmp_path,
+        {
+            "user_journeys": [top_level],
+            "codd": {"user_journeys": [canonical]},
+        },
+        artifacts=[_expected_artifact(), _expected_artifact("e2e_export_journey")],
+    )
+
+    assert {
+        (edge.to_id, edge.attributes["journey"])
+        for edge in _expected_ref_edges(dag)
+    } == {
+        ("lexicon:e2e_login_journey", "login_to_dashboard"),
+        ("lexicon:e2e_export_journey", "login_to_dashboard"),
+    }
+    assert len(_expected_ref_edges(dag)) == 2
+
+
+def test_canonical_missing_expected_catalog_keeps_c7_red_without_substitute_node(tmp_path):
+    with pytest.warns(UserWarning, match="missing lexicon node"):
+        dag = _write_project_with_frontmatter(
+            tmp_path,
+            {"codd": {"user_journeys": [_journey()]}},
+        )
+
+    assert "lexicon:e2e_login_journey" not in dag.nodes
+    assert _expected_ref_edges(dag) == []
+    result = UserJourneyCoherenceCheck().run(dag, tmp_path, {})
+    assert result.passed is False
+    assert "missing_journey_lexicon" in {item["type"] for item in result.violations}
+
+
+def test_canonical_expected_ref_to_wrong_kind_warns_without_edge():
+    attributes = {"frontmatter": {"codd": {"user_journeys": [_journey()]}}}
+    dag = DAG()
+    dag.add_node(Node(id="docs/design/auth.md", kind="design_doc", attributes=attributes))
+    dag.add_node(Node(id="lexicon:e2e_login_journey", kind="impl_file"))
+
+    with pytest.warns(UserWarning, match="missing lexicon node"):
+        _add_design_doc_expected_outcome_edges(dag, {"docs/design/auth.md": {"attributes": {}}})
+
+    assert _expected_ref_edges(dag) == []
+
+
+def test_canonical_unknown_prefix_warns_without_edge(tmp_path):
+    with pytest.warns(UserWarning, match="unknown prefix"):
+        dag = _write_project_with_frontmatter(
+            tmp_path,
+            {"codd": {"user_journeys": [_journey(expected_outcome_refs=["artifact:result"])]}},
+            artifacts=[_expected_artifact()],
+        )
+
+    assert _expected_ref_edges(dag) == []
+
+
+@pytest.mark.parametrize("journeys", [None, "not-a-list", ["not-a-mapping"]])
+def test_canonical_invalid_journey_shapes_do_not_create_edges(tmp_path, journeys):
+    dag = _write_project_with_frontmatter(
+        tmp_path,
+        {"codd": {"user_journeys": journeys}},
+        artifacts=[_expected_artifact()],
+    )
+
+    assert _expected_ref_edges(dag) == []
+
+
+def test_canonical_design_self_reference_adds_no_edge_or_cycle(tmp_path):
+    dag = _write_project_with_frontmatter(
+        tmp_path,
+        {
+            "codd": {
+                "user_journeys": [
+                    _journey(expected_outcome_refs=["design:login_to_dashboard"]),
+                ]
+            }
+        },
+        artifacts=[_expected_artifact()],
+    )
+
+    assert not any(
+        edge.from_id == "docs/design/auth.md" and edge.to_id == "docs/design/auth.md" for edge in dag.edges
+    )
+    assert dag.detect_cycles() == []
 
 
 def test_expected_outcome_refs_design_self_reference_is_graceful_skip(tmp_path):

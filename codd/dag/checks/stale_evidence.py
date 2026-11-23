@@ -2,8 +2,10 @@
 
 Some evidence payloads attached to DAG nodes (for example extraction caches or
 runtime-evidence records) can carry a *content fingerprint* of the source file
-they were derived from: a ``source_path`` plus a recorded ``source_sha256``. If
-the source file is later edited, that recorded evidence is **stale** — it
+they were derived from: a ``source_path`` plus a recorded ``source_sha256``.
+CoDD can also record those fields in a project-local snapshot, but only through
+the explicit ``codd dag build --refresh-evidence`` command. If the source file
+is later edited, that recorded evidence is **stale** — it
 describes a version of the file that no longer exists, a quiet false-green source
 ("the cache says capability X is verified" while the file it was read from has
 since changed).
@@ -23,10 +25,9 @@ This check surfaces that drift, and *only* that drift:
   ``stale_evidence``, and still never red.
 * **no fingerprint ⇒ silent.** Evidence without a recorded hash is *not*
   warned about (no ``freshness_not_provable`` spam); it is simply not checkable.
-* **0 checkable evidence ⇒ skip** (``checked_count == 0``, ``skipped=True``).
-  This is the current real-world state: ``runtime_evidence`` does not yet record
-  ``source_sha256``, so on real projects this check is a dormant forward-guard
-  that activates automatically once a writer starts recording fingerprints.
+* **0 checkable evidence ⇒ skip** (``checked_count == 0``, ``skipped=True``),
+  unless a present snapshot is invalid. Invalid snapshot input is an amber WARN
+  that checked 0 records, never a silent SKIP or clean PASS.
 * **generality.** The core carries no project / framework / language literal; it
   inspects whatever node attributes look like a fingerprinted evidence payload.
 
@@ -46,19 +47,17 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from codd.dag.checks import DagCheck, register_dag_check
+from codd.dag.evidence_snapshot import (
+    EVIDENCE_ATTRIBUTE_KEYS,
+    EvidenceSnapshotError,
+    load_evidence_snapshot,
+)
 
 
 # Node attribute keys that may hold a list (or single mapping) of evidence
 # payloads. These are *candidate carriers*: a payload only becomes checkable when
 # it actually contains both a source path and a recorded sha256. Adding a new
 # carrier key here is the only change needed to extend coverage to a new payload.
-_EVIDENCE_ATTRIBUTE_KEYS = (
-    "runtime_evidence",
-    "extraction_evidence",
-    "extraction_diagnostics",
-    "evidence",
-)
-
 # Accepted key spellings for the source path and the recorded fingerprint, so the
 # check matches whatever a future writer happens to emit without a schema change.
 _SOURCE_PATH_KEYS = ("source_path", "path", "file", "source")
@@ -95,7 +94,7 @@ class StaleEvidenceCheck(DagCheck):
         settings: dict[str, Any] | None = None,
         codd_config: dict[str, Any] | None = None,
     ) -> StaleEvidenceResult:
-        del codd_config  # config-free: this check reads node evidence only
+        del codd_config  # config-free: node evidence + fixed project-local snapshot
         target_dag = dag if dag is not None else self.dag
         if project_root is not None:
             self.project_root = Path(project_root)
@@ -114,41 +113,60 @@ class StaleEvidenceCheck(DagCheck):
 
         checked_count = 0
         warnings: list[dict[str, Any]] = []
+        checkable_records: list[tuple[Any, Mapping[str, Any]]] = []
 
         for node in _iter_nodes(target_dag):
             for record in _evidence_records(node):
-                source_path = _first_str(record, _SOURCE_PATH_KEYS)
-                recorded_hash = _first_str(record, _SOURCE_HASH_KEYS)
-                # Only fingerprinted evidence is checkable. No hash -> silent
-                # (never freshness_not_provable). No path -> nothing to hash.
-                if not recorded_hash or not source_path:
-                    continue
+                checkable_records.append((node, record))
 
-                checked_count += 1
-                resolved = _resolve_source(root, source_path)
-                if resolved is None or not resolved.is_file():
-                    warnings.append(
-                        _source_missing_warning(node, source_path, recorded_hash)
-                    )
-                    continue
+        try:
+            snapshot = load_evidence_snapshot(root)
+        except EvidenceSnapshotError as exc:
+            warnings.append(_snapshot_invalid_warning(str(exc)))
+        else:
+            # Snapshot records are independent of the current DAG. A source that
+            # disappeared also loses its node during rebuild, but its prior T0
+            # record must survive so this check can report source_missing.
+            checkable_records.extend(
+                (record["node_id"], record) for record in snapshot.records
+            )
 
-                current_hash = _sha256_of(resolved)
-                if current_hash is None:
-                    # Unreadable (binary / permission) — treat like missing, amber,
-                    # never red, never a false stale claim.
-                    warnings.append(
-                        _source_missing_warning(node, source_path, recorded_hash)
-                    )
-                    continue
+        seen: set[tuple[str | None, str, str]] = set()
+        for node, record in checkable_records:
+            source_path = _first_str(record, _SOURCE_PATH_KEYS)
+            recorded_hash = _first_str(record, _SOURCE_HASH_KEYS)
+            # Only fingerprinted evidence is checkable. No hash -> silent
+            # (never freshness_not_provable). No path -> nothing to hash.
+            if not recorded_hash or not source_path:
+                continue
+            record_key = (_node_id(node), source_path, recorded_hash)
+            if record_key in seen:
+                continue
+            seen.add(record_key)
 
-                if current_hash != recorded_hash:
-                    warnings.append(
-                        _stale_warning(
-                            node, source_path, recorded_hash, current_hash
-                        )
-                    )
+            checked_count += 1
+            resolved = _resolve_source(root, source_path)
+            if resolved is None or not resolved.is_file():
+                warnings.append(
+                    _source_missing_warning(node, source_path, recorded_hash)
+                )
+                continue
 
-        if checked_count == 0:
+            current_hash = _sha256_of(resolved)
+            if current_hash is None:
+                # Unreadable (binary / permission) — treat like missing, amber,
+                # never red, never a false stale claim.
+                warnings.append(
+                    _source_missing_warning(node, source_path, recorded_hash)
+                )
+                continue
+
+            if current_hash != recorded_hash:
+                warnings.append(
+                    _stale_warning(node, source_path, recorded_hash, current_hash)
+                )
+
+        if checked_count == 0 and not warnings:
             return StaleEvidenceResult(
                 status="skip",
                 skipped=True,
@@ -164,6 +182,7 @@ class StaleEvidenceCheck(DagCheck):
         if warnings:
             stale = sum(1 for w in warnings if w.get("type") == "stale_evidence")
             missing = sum(1 for w in warnings if w.get("type") == "source_missing")
+            invalid = sum(1 for w in warnings if w.get("type") == "snapshot_invalid")
             return StaleEvidenceResult(
                 status="warn",
                 severity="amber",
@@ -172,8 +191,9 @@ class StaleEvidenceCheck(DagCheck):
                 checked_count=checked_count,
                 warnings=warnings,
                 message=(
-                    f"stale_evidence found {stale} stale and {missing} missing-source "
-                    f"evidence record(s) ({checked_count} fingerprinted record(s) checked)"
+                    f"stale_evidence found {stale} stale, {missing} missing-source, "
+                    f"and {invalid} invalid-snapshot warning(s) "
+                    f"({checked_count} fingerprinted record(s) checked)"
                 ),
             )
 
@@ -205,7 +225,7 @@ def _evidence_records(node: Any) -> list[Mapping[str, Any]]:
     if not isinstance(attributes, Mapping):
         return []
     records: list[Mapping[str, Any]] = []
-    for key in _EVIDENCE_ATTRIBUTE_KEYS:
+    for key in EVIDENCE_ATTRIBUTE_KEYS:
         payload = attributes.get(key)
         if isinstance(payload, Mapping):
             records.append(payload)
@@ -258,7 +278,7 @@ def _stale_warning(
     return {
         "type": "stale_evidence",
         "severity": "amber",
-        "node": getattr(node, "id", None),
+        "node": _node_id(node),
         "source_path": source_path,
         "recorded_sha256": recorded_hash,
         "current_sha256": current_hash,
@@ -276,7 +296,7 @@ def _source_missing_warning(
     return {
         "type": "source_missing",
         "severity": "amber",
-        "node": getattr(node, "id", None),
+        "node": _node_id(node),
         "source_path": source_path,
         "recorded_sha256": recorded_hash,
         "remediation": (
@@ -284,6 +304,25 @@ def _source_missing_warning(
             "(cannot recompute fingerprint). Re-point or remove the evidence record."
         ),
     }
+
+
+def _snapshot_invalid_warning(error: str) -> dict[str, Any]:
+    return {
+        "type": "snapshot_invalid",
+        "severity": "amber",
+        "error": error,
+        "remediation": (
+            "Repair or remove the invalid evidence fingerprint snapshot, then run "
+            "'codd dag build --refresh-evidence' explicitly."
+        ),
+    }
+
+
+def _node_id(node: Any) -> str | None:
+    if isinstance(node, str):
+        return node
+    value = getattr(node, "id", None)
+    return str(value) if value is not None else None
 
 
 __all__ = ["StaleEvidenceCheck", "StaleEvidenceResult"]
