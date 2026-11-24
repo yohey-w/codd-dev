@@ -3988,8 +3988,9 @@ def generate(
                 config = _load_project_config(project_root)
                 if not config.get("wave_config"):
                     raise ValueError("wave_config is missing")
-                enforce_design_consistency(project_root, config, complete=True, required=True)
-                click.echo("Declared design behaviors are consistent")
+                summary = enforce_design_consistency(project_root, config, complete=True, required=True)
+                if summary is not None:
+                    click.echo(str(summary))
         except (FileNotFoundError, ValueError) as exc:
             raise click.ClickException(str(exc)) from exc
         return
@@ -4054,9 +4055,11 @@ def generate(
             total_generated += generated
             total_skipped += skipped
         try:
-            enforce_design_consistency(project_root, _load_project_config(project_root), complete=True)
+            summary = enforce_design_consistency(project_root, _load_project_config(project_root), complete=True)
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc
+        if summary is not None:
+            click.echo(str(summary))
         click.echo(
             f"All waves complete ({len(completed)} wave(s)): "
             f"{total_generated} generated, {total_skipped} skipped"
@@ -5966,7 +5969,9 @@ def _run_chunked_implementation(
     from codd.implementer.chunked_runner import ChunkedRunner
 
     config = _load_optional_project_config(project_root)
-    enforce_design_consistency(project_root, config, complete=True)
+    summary = enforce_design_consistency(project_root, config, complete=True)
+    if summary is not None:
+        click.echo(str(summary))
     if language:
         # Per-invocation language override (Issue #20, v-kato): align with
         # implement_tasks() so both code paths honour the CLI flag without

@@ -66,8 +66,27 @@ def _write(project, name, content):
     return path
 
 
+def _assign_operation_flow_to_peer(project):
+    config = load_project_config(project)
+    output = "docs/design/operations.md"
+    config["wave_config"]["1"].append({
+        "node_id": "design:operations",
+        "output": output,
+        "title": "Operations",
+        "behavior_owners": [],
+        "owns_operation_flow": True,
+    })
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+    _write(
+        project, output,
+        "# Operations\n\n```yaml\noperation_flow:\n  operations: [{id: import-file}]\n```\n\n"
+        "```codd-behavior\nowns: {}\ncases: []\n```\n",
+    )
+
+
 def test_generation_retries_just_derivative_using_established_owner(tmp_path, monkeypatch):
     project = _project(tmp_path)
+    _assign_operation_flow_to_peer(project)
     prompts = []
 
     def generate(_command, prompt):
@@ -244,6 +263,7 @@ def test_legacy_migration_keeps_original_text_and_blocks_implementation(tmp_path
 
 def test_owner_declaration_and_operation_role_cannot_be_bypassed(tmp_path, monkeypatch):
     project = _project(tmp_path)
+    _assign_operation_flow_to_peer(project)
     no_owner = _document(ALLOW, _block(ALLOW, "accept"))
     monkeypatch.setattr("codd.generator._invoke_ai_command", lambda *_: no_owner)
     with pytest.raises(ValueError, match="behavior owners differ from wave_config"):
@@ -379,3 +399,209 @@ def test_new_plan_retries_forward_owner_dependency(tmp_path, monkeypatch):
     result = plan_init(project, force=True)
     assert len(prompts) == 2
     assert result.wave_config["1"][0]["behavior_owners"] == [SPEC]
+
+
+@pytest.mark.parametrize("peer_outcome", ["reject", "accept"])
+def test_different_spec_owners_can_declare_same_case(tmp_path, monkeypatch, peer_outcome):
+    project = _project(tmp_path)
+    peer = "docs/design/parser.md"
+    peer_spec = "parser-syntax"
+    config = load_project_config(project)
+    config["wave_config"]["2"][0].update(
+        node_id="design:parser", output=peer, behavior_owners=[peer_spec],
+    )
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+    owner = _document(DENY, _block(DENY, "reject", owner=True))
+    quote = f"The parser outcome is {peer_outcome}."
+    peer_body = _document(quote, _block(quote, peer_outcome, owner=True).replace(SPEC, peer_spec))
+    monkeypatch.setattr(
+        "codd.generator._invoke_ai_command",
+        lambda _, prompt: owner if "Node ID: design:import" in prompt else peer_body,
+    )
+
+    generate_wave(project, 1)
+    if peer_outcome == "reject":
+        generate_wave(project, 2)
+        enforce_design_consistency(project, config, complete=True)
+    else:
+        with pytest.raises(ValueError, match="conflicts with") as error:
+            generate_wave(project, 2)
+        assert "both claim ownership" not in str(error.value)
+        assert 'import-file' in str(error.value)
+        assert r'["id\n"]' in str(error.value)
+        assert '{"format": "csv"}' in str(error.value)
+        assert not (project / peer).exists()
+
+
+def test_duplicate_spec_ownership_reports_case_details(tmp_path):
+    project = _project(tmp_path)
+    peer = "docs/design/parser.md"
+    config = load_project_config(project)
+    config["wave_config"]["2"][0].update(node_id="design:parser", output=peer, behavior_owners=[SPEC])
+    _write(project, OWNER, _document(ALLOW, _block(ALLOW, "accept", owner=True)))
+    _write(project, peer, _document(EXPECTED, _block(EXPECTED, "accept", owner=True)))
+    with pytest.raises(ValueError, match="both own specification") as exc:
+        enforce_design_consistency(project, config, complete=True)
+    ownership_issue = next(line for line in str(exc.value).splitlines() if "both own specification" in line)
+    assert 'import-file' in ownership_issue
+    assert r'["id\n"]' in ownership_issue
+    assert '{"format": "csv"}' in ownership_issue
+
+
+@pytest.mark.parametrize("surface", ["IMPORT FILE()", "import_file", "Import-File"])
+def test_case_surface_variants_conflict_and_keep_original_spelling(tmp_path, surface):
+    project = _project(tmp_path)
+    _write(project, OWNER, _document(ALLOW, _block(ALLOW, "accept", owner=True)))
+    _write(project, CONSUMER, _document(DENY, _block(DENY, "reject").replace("import-file", surface)))
+    with pytest.raises(ValueError, match="conflicts with") as exc:
+        enforce_design_consistency(project, load_project_config(project), complete=True)
+    assert "import-file" in str(exc.value)
+    assert surface in str(exc.value)
+
+
+@pytest.mark.parametrize("surface", ["import.file", "importfile", "import-file(arg)", "import-file()()"])
+def test_other_surface_spellings_remain_distinct(tmp_path, surface):
+    project = _project(tmp_path)
+    _write(project, OWNER, _document(ALLOW, _block(ALLOW, "accept", owner=True)))
+    _write(project, CONSUMER, _document(DENY, _block(DENY, "reject").replace("import-file", surface)))
+    enforce_design_consistency(project, load_project_config(project), complete=True)
+
+
+def test_scalar_input_is_rejected_and_retried_with_feedback(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    _write(project, OWNER, _document(ALLOW, _block(ALLOW, "accept", owner=True)))
+    _write(project, CONSUMER, _document(DENY, _block(DENY, "reject", sample="id\n")))
+    with pytest.raises(ValueError, match="input must be a list"):
+        enforce_design_consistency(project, load_project_config(project), complete=True)
+
+    prompts = []
+
+    def derive(_, prompt):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            return _document(DENY, _block(DENY, "reject", sample="id\n"))
+        assert "input must be a list" in prompt
+        return _document(EXPECTED, _block(EXPECTED, "accept"))
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", derive)
+    generate_wave(project, 2, force=True)
+    assert len(prompts) == 2
+    assert EXPECTED in (project / CONSUMER).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(("role", "owner_elsewhere"), [(False, False), (None, False), (None, True)])
+def test_unassigned_operation_flow_can_be_declared(tmp_path, monkeypatch, role, owner_elsewhere):
+    project = _project(tmp_path)
+    if owner_elsewhere:
+        _assign_operation_flow_to_peer(project)
+    config = load_project_config(project)
+    if role is None:
+        config["wave_config"]["1"][0].pop("owns_operation_flow")
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+    body = _document(ALLOW, _block(ALLOW, "accept", owner=True))
+    body += "\n```yaml\noperation_flow:\n  operations: [{id: import-file}]\n```\n"
+    monkeypatch.setattr("codd.generator._invoke_ai_command", lambda *_: body)
+
+    generate_wave(project, 1)
+    assert "operation_flow" in (project / OWNER).read_text(encoding="utf-8")
+    _write(project, CONSUMER, _document(EXPECTED, _block(EXPECTED, "accept")))
+    enforce_design_consistency(project, config, complete=True)
+
+
+@pytest.mark.parametrize("problem", ["wave-key", "missing-title", "outside-output"])
+@pytest.mark.parametrize("entrypoint", ["normal", "chunk", "greenfield"])
+def test_unmanaged_implement_bypasses_strict_wave_checks(tmp_path, monkeypatch, problem, entrypoint):
+    from codd.cli import _run_chunked_implementation
+    from codd.implementer import implement_tasks
+
+    project = _project(tmp_path, managed=False)
+    config = load_project_config(project)
+    config["ai_command"] = "sh -c 'cat >/dev/null; exit 3'"
+    wave = config["wave_config"]
+    wave.pop("2")
+    if problem == "wave-key":
+        wave["waves"] = wave.pop("1")
+    elif problem == "missing-title":
+        wave["1"][0].pop("title")
+    else:
+        wave["1"].append({
+            "node_id": "design:external", "output": "docs/design/../../../outside.md", "title": "External",
+        })
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+    _write(
+        project, OWNER,
+        "---\ncodd:\n  node_id: design:import\n  type: design\n---\n\n" + _document(ALLOW),
+    )
+
+    def fake_implementation(*_args):
+        return "implementation entry reached"
+
+    if entrypoint == "normal":
+        with pytest.raises(ValueError, match="AI command failed: exit code 3"):
+            implement_tasks(project, design="design:import", output_paths=["src"])
+    elif entrypoint == "chunk":
+        monkeypatch.setattr("codd.cli._chunked_task_and_steps", lambda *_: ("task", ["step"]))
+        monkeypatch.setattr("codd.implementer.chunked_runner.ChunkedRunner.run_steps", fake_implementation)
+        assert _run_chunked_implementation(
+            project_root=project, task_id="task", ai_cmd=None, chunk_size=1, timeout_per_chunk=1, history=None,
+        ) == "implementation entry reached"
+    else:
+        def list_tasks(_):
+            raise RuntimeError(fake_implementation())
+
+        with pytest.raises(RuntimeError, match="implementation entry reached"):
+            GreenfieldPipeline(task_lister=list_tasks)._stage_implement(project, {}, {})
+
+
+@pytest.mark.parametrize(
+    ("scenario", "counts"),
+    [
+        ("no-cases", (2, 1, 0, 0)),
+        ("one-document", (2, 1, 1, 0)),
+        ("no-documents", (0, 0, 0, 0)),
+        ("cross-document", (2, 1, 2, 1)),
+    ],
+)
+@pytest.mark.parametrize("command", ["generate-check", "generate-all", "implement", "greenfield"])
+def test_full_design_check_reports_comparison_counts(tmp_path, monkeypatch, scenario, counts, command):
+    project = _project(tmp_path)
+    config = load_project_config(project)
+    if scenario == "no-documents":
+        for entries in config["wave_config"].values():
+            for entry in entries:
+                entry["output"] = entry["output"].replace("docs/", "other/")
+                _write(project, entry["output"], _document(ALLOW))
+    else:
+        owner = _block(ALLOW, "accept", owner=True)
+        consumer = _block(EXPECTED, "accept")
+        if scenario == "no-cases":
+            owner = f"```codd-behavior\nowns: {{{SPEC}: {ALLOW}}}\ncases: []\n```\n"
+        if scenario != "cross-document":
+            consumer = "```codd-behavior\nowns: {}\ncases: []\n```\n"
+        _write(project, OWNER, _document(ALLOW, owner))
+        _write(project, CONSUMER, _document(EXPECTED, consumer))
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+    if command == "greenfield":
+        messages = []
+        GreenfieldPipeline(echo=messages.append)._check_design_consistency(project)
+        output = "\n".join(messages)
+    else:
+        if command == "implement":
+            def run_implement(*_args, **_kwargs):
+                raise ValueError("AI command failed: exit code 3")
+
+            monkeypatch.setattr("codd.implementer.Implementer.run_implement", run_implement)
+            args = ["implement", "--design", "design:import", "--output", "src", "--no-contract-gate"]
+        else:
+            args = ["generate", "--check-design"] if command == "generate-check" else ["generate", "--all-waves"]
+        result = CliRunner().invoke(main, [*args, "--path", str(project)])
+        if command == "implement":
+            assert result.exit_code == 1 and "AI command failed: exit code 3" in result.output
+        else:
+            assert result.exit_code == 0, result.output
+        output = result.output
+
+    expected = "Declared design behaviors are consistent" if counts[-1] else "No design cases were compared across documents"
+    assert expected in output
+    for label, count in zip(("documents", "owned specifications", "case declarations", "cross-document cases"), counts):
+        assert f"{label}: {count}" in output

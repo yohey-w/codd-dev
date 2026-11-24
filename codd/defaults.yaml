@@ -303,7 +303,8 @@ restore:
 generate:
   # New requirements-based plans enable this. Legacy plans can annotate their
   # existing wave documents with `codd generate --reconcile-design <node-id>`.
-  design_consistency: false
+  # null leaves the setting unset; false preserves an explicit opt-out.
+  design_consistency: null
   body_retry:
     # `codd generate` re-asks the AI when a produced design-doc body fails
     # structural validation (missing required sections, malformed frontmatter).

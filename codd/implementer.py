@@ -1291,7 +1291,9 @@ def implement_tasks(
 ) -> list[ImplementationResult]:
     project_root = Path(project_root).resolve()
     config = _load_project_config(project_root)
-    enforce_design_consistency(project_root, config, complete=True)
+    summary = enforce_design_consistency(project_root, config, complete=True)
+    if summary is not None:
+        print(summary, flush=True)
     if language:
         # Per-invocation language override (Issue #20, v-kato): mismatched
         # codd init --language doesn't force a full re-init; spec authors can

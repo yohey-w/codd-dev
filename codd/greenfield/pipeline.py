@@ -1233,7 +1233,7 @@ class GreenfieldPipeline:
 
         try:
             config = load_project_config(project_root)
-            enforce_design_consistency(
+            summary = enforce_design_consistency(
                 project_root,
                 config,
                 complete=True,
@@ -1242,6 +1242,8 @@ class GreenfieldPipeline:
             return
         except ValueError as exc:
             raise StageError(str(exc)) from exc
+        if summary is not None:
+            self.echo(str(summary))
 
     def _enforce_generate_vb_registry_gate(
         self, project_root: Path, options: dict[str, Any]

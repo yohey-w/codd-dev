@@ -23,11 +23,11 @@ from codd.design_consistency import (
     CONTRACT_GUIDANCE,
     DesignConsistencyError,
     StrictDesignLoader,
-    consistency_required,
     enforce_design_consistency,
-    has_behavior_contract,
+    has_other_operation_flow_owner,
     is_behavior_document,
     is_behavior_owner_document,
+    is_managed_behavior_document,
     parse_behavior_contract,
     validate_document_role,
     without_behavior_contract,
@@ -765,21 +765,25 @@ def _generate_one_artifact(
     this helper's, so a scoped repair can overwrite exactly one doc.
     """
 
-    output_path = resolve_project_path(project_root, artifact.output)
-    if output_path is None:
-        raise ValueError(f"{artifact.output}: design output escapes the project")
-    managed = is_behavior_document(artifact.output) and (
-        consistency_required(config)
-        or artifact.behavior_owners is not None
-        or artifact.owns_operation_flow is not None
-        or (
-            output_path.is_file()
-            and has_behavior_contract(output_path.read_text(encoding="utf-8"))
-        )
+    managed = is_managed_behavior_document(
+        config, artifact.output,
+        planned=artifact.behavior_owners is not None or artifact.owns_operation_flow is not None,
+        project_root=project_root,
+    )
+    output_path = project_root / artifact.output
+    if managed:
+        output_path = resolve_project_path(project_root, artifact.output)
+        if output_path is None:
+            raise ValueError(f"{artifact.output}: design output escapes the project")
+    operation_flow_owner_elsewhere = (
+        managed and artifact.owns_operation_flow is False
+        and has_other_operation_flow_owner(config, artifact.output)
     )
     dependency_documents = _load_dependency_documents(
         project_root, artifact.depends_on, document_node_paths
     )
+    if not managed:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
     combined_conventions = deepcopy(global_conventions) + deepcopy(artifact.conventions)
 
     def render(body: str) -> str:
@@ -791,9 +795,7 @@ def _generate_one_artifact(
         )
 
     def check_candidate(body: str) -> None:
-        content = render(body)
-        validate_document_role(artifact, content, required=True)
-        enforce_design_consistency(project_root, config, candidate=(artifact.output, content))
+        enforce_design_consistency(project_root, config, candidate=(artifact.output, render(body)))
 
     body = _generate_document_body(
         artifact=artifact,
@@ -808,8 +810,10 @@ def _generate_one_artifact(
         layout_placement=layout_placement,
         behavior_contract=managed,
         validate_body=check_candidate if managed else None,
+        operation_flow_owner_elsewhere=operation_flow_owner_elsewhere,
     )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if managed:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(render(body), encoding="utf-8")
     return GenerationResult(node_id=artifact.node_id, path=output_path, status="generated")
 
@@ -957,13 +961,17 @@ def reconcile_design_artifact(
     separator = newline * (0 if source.endswith(newline * 2) else 1 if source.endswith(newline) else 2)
     prompt = base_prompt
     retries = _body_max_retries(config)
+    operation_flow_owner_elsewhere = has_other_operation_flow_owner(config, artifact.output)
     for attempt in range(retries + 1):
         block = _invoke_ai_command(command, prompt).strip()
         try:
             if not re.fullmatch(r"```codd-behavior[ \t]*\n(?:(?!^```)[\s\S])*\n```", block, flags=re.MULTILINE):
                 raise ValueError(f"{artifact.output}: expected one fenced codd-behavior block from AI")
             updated = f"{source}{separator}{block.replace(chr(10), newline)}{newline}"
-            validate_document_role(artifact, updated, required=True)
+            validate_document_role(
+                artifact, updated, required=True,
+                operation_flow_owner_elsewhere=operation_flow_owner_elsewhere,
+            )
             break
         except ValueError as exc:
             if attempt == retries:
@@ -1385,6 +1393,7 @@ def _generate_document_body(
     layout_placement: str = "",
     behavior_contract: bool = False,
     validate_body: Callable[[str], None] | None = None,
+    operation_flow_owner_elsewhere: bool = False,
 ) -> str:
     """Generate one document body with a bounded validation-feedback retry loop.
 
@@ -1404,6 +1413,7 @@ def _generate_document_body(
             project_language=project_language,
             layout_placement=layout_placement,
             behavior_contract=behavior_contract,
+            operation_flow_owner_elsewhere=operation_flow_owner_elsewhere,
         )
         prompt = _inject_lexicon(prompt, project_root)
         try:
@@ -1465,6 +1475,7 @@ def _build_generation_prompt(
     project_language: str | None = None,
     layout_placement: str = "",
     behavior_contract: bool = False,
+    operation_flow_owner_elsewhere: bool = False,
 ) -> str:
     if capabilities is None:
         capabilities = WEB_FALLBACK_CAPABILITIES
@@ -1535,14 +1546,24 @@ def _build_generation_prompt(
             "'Let me...', 'Now I have enough context...'). **Start directly with the document content.** "
             "Violating this instruction is a **CRITICAL ERROR** and breaks a release-blocking constraint."
         ),
-        "Treat requirements as the source of truth. Cover the requirements assigned to this document.",
-        "Use dependencies for facts and existing decisions. Cite the relevant owning section and explain only how this document applies it. Omit unrelated capabilities and constraints.",
+    ]
+    if behavior_contract:
+        lines.extend([
+            "Treat requirements as the source of truth. Cover the requirements assigned to this document.",
+            "Use dependencies for facts and existing decisions. Cite the relevant owning section and explain only how this document applies it.",
+        ])
+    else:
+        lines.extend([
+            "Treat requirement documents as the source of truth and reflect every feature, screen, workflow, API, integration, and operational rule they describe.",
+            "Before finalizing, self-check that every capability and constraint mentioned in the depends_on documents is represented in the document body.",
+        ])
+    lines.extend([
         "Use concrete tool names, framework names, services, table names, endpoints, thresholds, counts, and timelines wherever applicable.",
         "Never use vague placeholders such as '推奨なし', '要検討', or 'TBD'.",
         f"Prefer a structure that covers: {preferred_sections}.",
         "After the title, immediately continue with section headings such as '## Overview' or '## 1. Overview'; do not acknowledge that you created the file.",
         "Do not write summary phrases like '`docs/...` を作成しました。', '本設計書は以下を網羅しています:', or '主な構成:'. Write the actual sections instead.",
-    ]
+    ])
 
     if is_detailed_design:
         lines.extend(
@@ -1562,13 +1583,15 @@ def _build_generation_prompt(
             lines.append("Emit owns: {}. This document applies or tests upstream specifications. VB ids are separate.")
         elif artifact.behavior_owners is not None:
             lines.append(f"Specification ids owned here (exact list): {list(artifact.behavior_owners)}")
-    if doc_type == "design" and (not behavior_contract or artifact.owns_operation_flow):
+    reference_operation_flow = (
+        behavior_contract and artifact.owns_operation_flow is False and operation_flow_owner_elsewhere
+    )
+    if doc_type == "design" and not reference_operation_flow:
         lines.extend(build_operational_behavior_model_block(capabilities))
-    if behavior_contract:
-        if artifact.owns_operation_flow:
-            lines.append("You own the assigned operational model. Emit operation_flow for the operations assigned here.")
-        else:
-            lines.append("Apply the operation_flow in its owning document. Cite its operation ids. Do not emit operation_flow here.")
+    if behavior_contract and artifact.owns_operation_flow is True:
+        lines.append("You own the assigned operational model. Emit operation_flow for the operations assigned here.")
+    elif reference_operation_flow:
+        lines.append("Apply the operation_flow in its owning document. Cite its operation ids. Do not emit operation_flow here.")
 
     lines.extend(
         [
@@ -1602,20 +1625,28 @@ def _build_generation_prompt(
         lines.extend(_build_operations_doc_block(capabilities))
 
     if conventions:
-        lines.extend(
-            [
-                "",
-                "Non-negotiable conventions:",
-                "- These are release-blocking constraints. Describe the controls or measures this document owns.",
-                "- Where an applicable constraint is defined elsewhere, cite its owning section and explain the local consequence.",
-                "- For a control assigned here, give its concrete design and verification measure. Examples include tenant isolation in security/data model sections, authentication and audit events in access control, data handling for privacy, and measurable performance or SLA thresholds.",
-            ]
-        )
+        lines.extend(["", "Non-negotiable conventions:"])
+        if behavior_contract:
+            lines.extend([
+                "- These are release-blocking constraints.",
+                "- For each listed convention and invariant, give the local concrete design and verification measure or cite its owning section and explain the local consequence. Do not omit any listed item.",
+            ])
+        else:
+            lines.extend([
+                "- These are release-blocking constraints. Reflect them explicitly in the document body.",
+                "- Explicitly state how the document complies with each convention and invariant listed below.",
+                "- For security or access-control constraints, state the concrete controls in architecture, security, data, or workflow sections.",
+                "- For legal/privacy constraints, add explicit compliance or data-handling requirements.",
+                "- For SLA/performance constraints, include measurable thresholds in non-functional sections.",
+            ])
         for index, convention in enumerate(conventions, start=1):
             targets = ", ".join(str(target) for target in convention.get("targets", []) if isinstance(target, str))
             reason = str(convention.get("reason") or "").strip() or "(no reason provided)"
             lines.append(f"{index}. Targets: {targets or '(no explicit targets)'}")
             lines.append(f"   Reason: {reason}")
+        lines.append(
+            "- Example reflections: tenant isolation in security/data model sections, auth requirements in access control, privacy rules in compliance, performance thresholds in non-functional requirements."
+        )
 
     lines.extend(
         [

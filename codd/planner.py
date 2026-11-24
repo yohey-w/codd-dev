@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import sys
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import asdict, dataclass
@@ -16,7 +17,6 @@ import yaml
 
 import codd.generator as generator_module
 from codd.design_consistency import is_behavior_document, is_behavior_owner_document
-from codd.frontmatter import codd_block, parse_frontmatter
 from codd.generator import (
     WaveArtifact,
     _load_project_config,
@@ -25,7 +25,6 @@ from codd.generator import (
 )
 from codd.path_safety import is_glob_decl
 from codd.project_types import ProjectCapabilities
-from codd.requirements_meta import operation_flow_operations
 from codd.validator import _iter_doc_files, _parse_codd_frontmatter, validate_project
 
 
@@ -64,7 +63,11 @@ Typical wave patterns:
 """
 
 
-def _standard_v_model_patterns(capabilities: ProjectCapabilities | None = None) -> str:
+def _standard_v_model_patterns(
+    capabilities: ProjectCapabilities | None = None,
+    *,
+    requirements_derived: bool = False,
+) -> str:
     """Return the V-model wave patterns, dropping the UX domain for non-UI types.
 
     For UI projects (or the backward-compatible default), the domain-design wave
@@ -79,13 +82,22 @@ def _standard_v_model_patterns(capabilities: ProjectCapabilities | None = None) 
         domains = "API, database, auth, UX, infrastructure/CI/CD, and integration design"
     else:
         domains = "API, database, auth, infrastructure/CI/CD, and integration design"
+    if requirements_derived:
+        design_waves = (
+            "- Wave 5, when needed: separate implementation decisions or independent verification contracts that do not fit in an existing design section\n"
+            "- Wave 6: implementation planning and infrastructure/build setup after their required designs\n"
+        )
+    else:
+        design_waves = (
+            "- Wave 5: detailed design artifacts under docs/detailed_design/ with Mermaid diagrams, ownership boundaries, and runtime flows\n"
+            "- Wave 6: implementation planning and infrastructure/build setup that depend on the approved overview + detailed design set\n"
+        )
     return (
         "Typical wave patterns:\n"
         "- Wave 1: acceptance criteria and decision records derived directly from requirements\n"
         "- Wave 2: overview/system design that depends on requirements and wave 1 outputs\n"
         f"- Wave 3-4: domain design such as {domains}\n"
-        "- Wave 5, when needed: separate implementation decisions or independent verification contracts that do not fit in an existing design section\n"
-        "- Wave 6: implementation planning and infrastructure/build setup after their required designs\n"
+        f"{design_waves}"
         "- Baseline: after all waves are done and code is implemented, run codd extract to capture a factual snapshot of the codebase — this serves as the baseline for drift detection during maintenance\n"
     )
 
@@ -442,7 +454,11 @@ def plan_init(
                 if is_behavior_document(entry["output"]):
                     entry.setdefault("owns_operation_flow", False)
         generate_config = config.get("generate")
-        config["generate"] = {**(generate_config if isinstance(generate_config, dict) else {}), "design_consistency": True}
+        if not isinstance(generate_config, dict):
+            generate_config = {}
+            config["generate"] = generate_config
+        if generate_config.get("design_consistency") is not False:
+            generate_config["design_consistency"] = True
 
     from codd.config import find_codd_dir
     config["wave_config"] = wave_config
@@ -460,13 +476,6 @@ def plan_init(
         requirement_paths=[d.path for d in requirement_documents] or [d.path for d in extracted_documents],
         wave_config=wave_config,
     )
-
-
-def _requirements_declare_operations(text: str) -> bool:
-    frontmatter = parse_frontmatter(text)
-    metadata = codd_block(frontmatter.mapping, fallback_top_level=True) or {}
-    flow = metadata.get("operation_flow") or generator_module._extract_operation_flow_contract(frontmatter.body)
-    return bool(operation_flow_operations(flow))
 
 
 def _validate_behavior_wave_config(
@@ -498,8 +507,8 @@ def _validate_behavior_wave_config(
             owner = dependency["id"]
             if owner_positions.get(owner, -1) >= position:
                 raise ValueError(f"{artifact.output}: place behavior owner {owner!r} before its dependent")
-    if not flow_owner and any(_requirements_declare_operations(document.content) for document in requirements):
-        raise ValueError("Requirements declare operation_flow operations, but no design artifact is assigned to own them")
+    if requirements and not flow_owner:
+        print("Warning: No design artifact is assigned as the operation_flow owner.", file=sys.stderr, flush=True)
 
 
 def _set_canonical_vb_doc_config(
@@ -1226,7 +1235,7 @@ def _build_plan_init_prompt(
         MECE_DOCUMENT_STRUCTURE.rstrip(),
         "",
         "Standard V-model artifact patterns:",
-        _standard_v_model_patterns(capabilities).rstrip(),
+        _standard_v_model_patterns(capabilities, requirements_derived=True).rstrip(),
         "",
         "Instructions:",
         "- Read the requirement documents below and produce a MECE (Mutually Exclusive, Collectively Exhaustive) document set: every requirement section maps to at least one design artifact (no gaps), and each artifact has a distinct responsibility (no overlaps).",
@@ -1504,12 +1513,16 @@ def _plan_init_max_retries(config: dict[str, Any]) -> int:
     return DEFAULT_PLAN_INIT_MAX_RETRIES
 
 
-def _append_wave_config_retry_feedback(prompt: str, error: str) -> str:
-    """Re-state the strict-YAML contract after a parse failure, for the next attempt."""
-
+def _append_wave_config_retry_feedback(
+    prompt: str, error: str, *, behavior_validation: bool = False,
+) -> str:
+    """Include the rejection reason and re-state the strict-YAML contract."""
+    rejection = "it could not be parsed as valid wave_config YAML"
+    if behavior_validation:
+        rejection = "fix this wave_config issue"
     note = (
         "\n\n---\n"
-        "YOUR PREVIOUS RESPONSE WAS REJECTED: fix this wave_config issue "
+        f"YOUR PREVIOUS RESPONSE WAS REJECTED: {rejection} "
         f"({error}). Output ONLY the wave_config mapping as STRICT, valid YAML — no "
         "prose, no Markdown fences, no arrows (`->`) or annotations. Every key must be "
         "followed by a colon and a value, and every list item must start with `- `. "
@@ -1536,7 +1549,11 @@ def _invoke_and_parse_wave_config(
     last_error: ValueError | None = None
     feedback: str | None = None
     for _attempt in range(max(0, max_retries) + 1):
-        prompt = base_prompt if feedback is None else _append_wave_config_retry_feedback(base_prompt, feedback)
+        prompt = base_prompt
+        if feedback is not None:
+            prompt = _append_wave_config_retry_feedback(
+                base_prompt, feedback, behavior_validation=validate is not None,
+            )
         try:
             raw = generator_module._invoke_ai_command(ai_command, prompt)
             wave_config = _parse_wave_config_output(raw)

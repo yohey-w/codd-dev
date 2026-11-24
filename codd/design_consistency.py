@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 import json
 from pathlib import Path, PurePosixPath
@@ -32,7 +33,7 @@ CONTRACT_GUIDANCE = """Behavior ownership and concrete examples:
   unresolved:
     - documents: ["docs/design/first.md", "docs/design/second.md"]
       quote: "verbatim passage reporting an unresolved disagreement about behavior"
-- Record concrete accept/reject boundary cases whose classification matters across documents. Copy the owner's exact spec id, surface name, input and conditions for the same case. Include every distinguishing condition, and use {} only for unconditional examples. Use JSON-compatible YAML types and quote strings. Do not repeat the entire design or test matrix.
+- Record concrete accept/reject boundary cases whose classification matters across documents. Copy the owner's exact spec id, surface name, input and conditions for the same case. Always use a list for input, including [] for no arguments. Include every distinguishing condition, and use {} only for unconditional examples. Use JSON-compatible YAML types and quote strings. Do not repeat the entire design or test matrix.
 - Quote the shortest clear support from this document outside the block. A general rule may support a concrete comparison if its application to that input and conditions is explicit and unambiguous. Do not guess. References that merely report another document's decision as disputed or historical are not this document's assertions.
 - Before choosing examples, inspect all notes about a reported disagreement, open design decision, or a hold pending design reconciliation. Record every such unresolved disagreement between design documents in unresolved, even if one side seems preferable or the example cannot yet be normalized. Give the actual two document paths and quote the local passage that reports the disagreement. Omit resolved history and hypothetical future disagreements. Use unresolved: [] if there are no such disagreements.
 - Use owns: {} or cases: [] where genuinely empty. Do not omit the block. Do not make up decisions or use the block to paper over a conflict in the source text."""
@@ -47,6 +48,19 @@ class BehaviorCase:
     location: str
     quote: str
 
+    @property
+    def comparison_key(self) -> tuple[str, str, str]:
+        surface, sample, conditions = self.key
+        normalized = re.sub(r"[-_ ]", "-", surface.lower().removesuffix("()"))
+        return normalized, sample, conditions
+
+    def describe(self, other_surface: str | None = None) -> str:
+        surface, sample, conditions = self.key
+        names = repr(surface)
+        if other_surface is not None and other_surface != surface:
+            names += f" / {other_surface!r}"
+        return f"{names} with input {sample} and conditions {conditions}"
+
 
 @dataclass
 class BehaviorContract:
@@ -54,6 +68,25 @@ class BehaviorContract:
     cases: list[BehaviorCase] = field(default_factory=list)
     operations: dict[str, str] = field(default_factory=dict)
     unresolved: list[tuple[str, tuple[str, ...], str]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class DesignConsistencySummary:
+    documents: int
+    owned_specifications: int
+    case_declarations: int
+    cross_document_cases: int
+
+    def __str__(self) -> str:
+        outcome = (
+            "Declared design behaviors are consistent"
+            if self.documents and self.cross_document_cases
+            else "No design cases were compared across documents"
+        )
+        return (
+            f"{outcome} (documents: {self.documents}, owned specifications: {self.owned_specifications}, "
+            f"case declarations: {self.case_declarations}, cross-document cases: {self.cross_document_cases})"
+        )
 
 
 class DesignConsistencyError(ValueError):
@@ -100,6 +133,63 @@ def is_behavior_owner_document(output: str) -> bool:
 def consistency_required(config: dict[str, Any]) -> bool:
     generate = config.get("generate")
     return isinstance(generate, dict) and generate.get("design_consistency") is True
+
+
+def is_managed_behavior_document(
+    config: dict[str, Any],
+    output: str,
+    *,
+    planned: bool = False,
+    project_root: Path | None = None,
+    content: str | None = None,
+) -> bool:
+    if not is_behavior_document(output):
+        return False
+    if consistency_required(config) or planned:
+        return True
+    if content is None and project_root is not None:
+        content = _read_behavior_document(project_root, output)
+    return content is not None and has_behavior_contract(content)
+
+
+def _read_behavior_document(project_root: Path, output: str) -> str | None:
+    """Probe an existing document for opt-in without imposing new legacy errors."""
+    try:
+        path = resolve_project_path(project_root, output)
+        return path.read_text(encoding="utf-8") if path is not None and path.is_file() else None
+    except (OSError, UnicodeError, RuntimeError):
+        return None
+
+
+def _planned_entries(config: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    """Find declaration candidates without requiring a strictly valid wave plan."""
+    waves = config.get("wave_config")
+    if isinstance(waves, dict):
+        for entries in waves.values():
+            if isinstance(entries, list):
+                yield from (entry for entry in entries if isinstance(entry, dict))
+
+
+def _operation_flow_owner_paths(config: dict[str, Any]) -> set[str]:
+    return {
+        str(entry["output"]) for entry in _planned_entries(config)
+        if entry.get("owns_operation_flow") is True and is_behavior_owner_document(str(entry.get("output", "")))
+    }
+
+
+def has_other_operation_flow_owner(config: dict[str, Any], output: str) -> bool:
+    return bool(_operation_flow_owner_paths(config) - {output})
+
+
+def _has_managed_documents(project_root: Path, config: dict[str, Any]) -> bool:
+    return any(
+        is_managed_behavior_document(
+            config, str(entry.get("output", "")),
+            planned="behavior_owners" in entry or "owns_operation_flow" in entry,
+            project_root=project_root,
+        )
+        for entry in _planned_entries(config)
+    )
 
 
 def _contract_blocks(text: str) -> list[tuple[int, int]]:
@@ -187,9 +277,15 @@ def parse_behavior_contract(text: str, path: str) -> BehaviorContract | None:
                 raise ValueError("each case requires spec, surface, input, conditions, outcome and quote")
             if case["outcome"] not in ("accept", "reject") or not isinstance(case["conditions"], dict):
                 raise ValueError("outcome must be accept or reject and conditions must be a mapping")
+            surface = _string(case["surface"], "surface")
+            if not isinstance(case["input"], list):
+                raise ValueError(
+                    f"input must be a list for {surface!r} with input {case['input']!r} "
+                    f"and conditions {_exact_value(case['conditions'])}"
+                )
             contract.cases.append(BehaviorCase(
                 spec=_string(case["spec"], "spec"),
-                key=(_string(case["surface"], "surface"), _exact_value(case["input"]), _exact_value(case["conditions"])),
+                key=(surface, _exact_value(case["input"]), _exact_value(case["conditions"])),
                 outcome=case["outcome"],
                 path=path,
                 location=location(case["quote"]),
@@ -225,7 +321,9 @@ def without_behavior_contract(text: str) -> str:
     return "".join([*lines[:first], *lines[last + 1:]])
 
 
-def validate_document_role(artifact: WaveArtifact, text: str, *, required: bool) -> BehaviorContract | None:
+def validate_document_role(
+    artifact: WaveArtifact, text: str, *, required: bool, operation_flow_owner_elsewhere: bool = False,
+) -> BehaviorContract | None:
     from codd.frontmatter import codd_block, parse_frontmatter
     from codd.generator import _extract_operation_flow_contract
     from codd.requirements_meta import normalize_operation_flow, operation_flow_operations
@@ -257,7 +355,9 @@ def validate_document_role(artifact: WaveArtifact, text: str, *, required: bool)
         strict=True,
         source=f"{artifact.output}: operation_flow frontmatter",
     )
-    if artifact.owns_operation_flow is False and (body_flow is not None or metadata_flow is not None):
+    if artifact.owns_operation_flow is False and operation_flow_owner_elsewhere and (
+        body_flow is not None or metadata_flow is not None
+    ):
         raise ValueError(f"{artifact.output}: this document must reference the operation_flow owner")
     if artifact.owns_operation_flow is True and not (body_flow or metadata_flow or {}).get("operations"):
         raise ValueError(f"{artifact.output}: this document owns operation_flow but declares no operations")
@@ -280,22 +380,28 @@ def enforce_design_consistency(
     complete: bool = False,
     required: bool = False,
     candidate: tuple[str, str] | None = None,
-) -> None:
+) -> DesignConsistencySummary | None:
     """Require consistent declared examples before using a generated document set.
 
-    Comparison is exact (surface id, typed input, typed conditions); prose and
-    unenumerated rules are outside this deterministic check.
+    Compare operation spelling variants and exact typed inputs and conditions.
     """
     from codd.generator import _load_wave_artifacts
 
+    candidate_managed = candidate is not None and is_managed_behavior_document(
+        config, candidate[0], content=candidate[1],
+    )
+    if not (
+        required or consistency_required(config) or candidate_managed
+        or _has_managed_documents(project_root, config)
+    ):
+        return None
     if not config.get("wave_config"):
-        return
+        return DesignConsistencySummary(0, 0, 0, 0) if complete else None
     wave_artifacts = _load_wave_artifacts(config)
     artifacts = [artifact for artifact in wave_artifacts if is_behavior_document(artifact.output)]
     documents: list[tuple[WaveArtifact, str | None]] = []
     candidate_path = candidate[0] if candidate else None
     prior_specs: set[str] = set()
-    managed = required or consistency_required(config)
     for artifact in artifacts:
         path = resolve_project_path(project_root, artifact.output)
         if path is None:
@@ -314,39 +420,41 @@ def enforce_design_consistency(
         else:
             content = path.read_text(encoding="utf-8") if path.is_file() else None
         documents.append((artifact, content))
-        managed = (
-            managed or artifact.behavior_owners is not None or artifact.owns_operation_flow is not None
-            or bool(content and has_behavior_contract(content))
-        )
-    if not managed:
-        return
 
     errors: list[str] = []
     owners: dict[str, dict[str, str]] = {}
     operations: dict[str, str] = {}
     cases: dict[tuple[str, str, str], list[BehaviorCase]] = {}
     output_paths = {artifact.output for artifact in artifacts}
+    operation_flow_owners = _operation_flow_owner_paths(config)
     for artifact, content in documents:
         if content is None:
             if complete:
                 errors.append(f"{artifact.output}: planned document is missing")
             continue
         try:
-            contract = validate_document_role(artifact, content, required=complete or artifact.output == candidate_path)
+            contract = validate_document_role(
+                artifact, content,
+                required=complete or artifact.output == candidate_path,
+                operation_flow_owner_elsewhere=bool(operation_flow_owners - {artifact.output}),
+            )
         except ValueError as exc:
-            if not candidate_path or artifact.output == candidate_path:
+            if artifact.output == candidate_path:
+                raise  # Return a candidate's declaration error to the generation retry loop.
+            if not candidate_path:
                 errors.append(str(exc))
             continue
         if contract is None:
             continue
         for spec, location in contract.owns.items():
             owners.setdefault(spec, {})[artifact.output] = location
-        for operation, location in contract.operations.items():
-            previous = operations.setdefault(operation, location)
-            if previous != location and (not candidate_path or candidate_path in {previous, location}):
-                errors.append(f"{previous} and {location}: both own operation_flow id {operation!r}")
+        if artifact.owns_operation_flow is True:
+            for operation, location in contract.operations.items():
+                previous = operations.setdefault(operation, location)
+                if previous != location and (not candidate_path or candidate_path in {previous, location}):
+                    errors.append(f"{previous} and {location}: both own operation_flow id {operation!r}")
         for case in contract.cases:
-            cases.setdefault(case.key, []).append(case)
+            cases.setdefault(case.comparison_key, []).append(case)
         for location, paths, quote in contract.unresolved:
             if candidate_path and artifact.output != candidate_path:
                 continue
@@ -359,7 +467,12 @@ def enforce_design_consistency(
         if len(claims) > 1 and (not candidate_path or candidate_path in claims):
             one = candidate_path or next(iter(claims))
             other = next(path for path in claims if path != one)
-            errors.append(f"{claims[one]} and {claims[other]}: both own specification {spec!r}")
+            examples = dict.fromkeys(
+                case.describe() for group in cases.values() for case in group
+                if case.spec == spec and case.path in {one, other}
+            )
+            detail = ", ".join(examples) or "no concrete operation, input or conditions declared"
+            errors.append(f"{claims[one]} and {claims[other]}: both own specification {spec!r} ({detail})")
 
     if complete:
         errors.extend(
@@ -378,19 +491,12 @@ def enforce_design_consistency(
                             errors.append(f"{case.location}: add a dependency on {location}, owner of {case.spec!r}")
 
     retry_candidate = candidate is not None and not errors
-    for key, claims in cases.items():
+    for claims in cases.values():
         current = [case for case in claims if case.path == candidate_path]
         if candidate_path and not current:
             continue
         authoritative = [case for case in claims if case.path in owners.get(case.spec, {})]
         distinct_owner = {(case.path, case.spec) for case in authoritative}
-        direct_owner = next((case for case in authoritative if case.path == candidate_path), None)
-        if len(distinct_owner) > 1 and (not candidate_path or direct_owner):
-            one = direct_owner or authoritative[0]
-            other = next(case for case in authoritative if (case.path, case.spec) != (one.path, one.spec))
-            errors.append(f"{one.location} and {other.location}: both claim ownership of the same concrete case")
-            retry_candidate = False
-
         accepted = [case for case in claims if case.outcome == "accept"]
         rejected = [case for case in claims if case.outcome == "reject"]
         if not accepted or not rejected:
@@ -422,11 +528,19 @@ def enforce_design_consistency(
             retry_candidate = False
         errors.append(
             f"{one.location} ({one.outcome}) conflicts with {other.location} ({other.outcome}) "
-            f"for {key[0]} with input {key[1]} and conditions {key[2]}:\n"
+            f"for {one.describe(other.key[0])}:\n"
             f"    {one.quote}\n    {other.quote}"
         )
     if errors:
         raise DesignConsistencyError(errors, retry_candidate=retry_candidate)
+    if not complete:
+        return None
+    return DesignConsistencySummary(
+        documents=len(artifacts),
+        owned_specifications=len(owners),
+        case_declarations=sum(len(claims) for claims in cases.values()),
+        cross_document_cases=sum(len({case.path for case in claims}) > 1 for claims in cases.values()),
+    )
 
 
 def _depends_on(consumer: str, owner: str, dependencies: dict[str, list[str]]) -> bool:
