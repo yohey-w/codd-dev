@@ -26,7 +26,6 @@ def test_built_wheel_bundles_every_builtin_lexicon_file(tmp_path: Path) -> None:
             "pip",
             "wheel",
             "--no-deps",
-            "--no-build-isolation",
             "--wheel-dir",
             str(tmp_path),
             str(REPO_ROOT),
@@ -41,12 +40,13 @@ def test_built_wheel_bundles_every_builtin_lexicon_file(tmp_path: Path) -> None:
     )
     stack_map = "codd_plugins/stack_map.yaml"
 
-    assert len(source_manifests) == 39
-    assert len(api_rest_openapi_files) == 6
+    # Counts are taken from the source tree, so adding a lexicon needs no edit here.
+    assert source_manifests
+    assert api_rest_openapi_files
     assert f"codd_plugins/lexicons/api_rest_openapi/manifest.yaml" in source_manifests
     assert (REPO_ROOT / stack_map).is_file()
 
-    wheels = list(tmp_path.glob("codd_dev-3.37.0-*.whl"))
+    wheels = list(tmp_path.glob("codd_dev-*.whl"))
     assert len(wheels) == 1
     with zipfile.ZipFile(wheels[0]) as wheel:
         wheel_files = set(wheel.namelist())
@@ -57,6 +57,15 @@ def test_built_wheel_bundles_every_builtin_lexicon_file(tmp_path: Path) -> None:
         if path.startswith("codd_plugins/lexicons/") and path.endswith("/manifest.yaml")
     }
     assert wheel_manifests == source_manifests
-    assert len(wheel_manifests) == 39
     assert api_rest_openapi_files <= wheel_files
     assert stack_map in wheel_files
+
+    # Every data file of the plug-in tree ships, not only the manifests.
+    source_plugin_files = _relative_paths(
+        sorted(
+            path
+            for path in PLUGIN_ROOT.rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts
+        )
+    )
+    assert source_plugin_files <= wheel_files
