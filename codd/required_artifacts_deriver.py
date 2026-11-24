@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from copy import deepcopy
+from graphlib import CycleError, TopologicalSorter
 import json
 from pathlib import Path
 import re
@@ -24,10 +26,13 @@ from codd.project_types import (
     resolve_project_type,
     supported_project_types,
 )
+from codd.required_artifact_requirements import number_requirements
 
 
 DEFAULTS_DIR = Path(__file__).parent / "required_artifacts" / "defaults"
 VALID_ARTIFACT_SOURCES = {"ai_derived", "user_override", "default_template"}
+_ARTIFACT_TEXT_FIELDS = ("id", "title", "scope", "rationale", "source")
+_ACCOUNTED_ATTEMPTS = 3
 # Sourced from codd.defaults; see feedback_codd_default_values_policy.
 AI_TIMEOUT_SECONDS = int(_DEFAULT_AI_TIMEOUT_SECONDS)
 
@@ -35,13 +40,15 @@ AI_TIMEOUT_SECONDS = int(_DEFAULT_AI_TIMEOUT_SECONDS)
 class RequiredArtifactsDeriver:
     """Derive the complete design artifact set required by a project."""
 
-    def __init__(self, project_root: Path, ai_command: str = "claude --print"):
+    def __init__(
+        self, project_root: Path, ai_command: str = "claude --print", *, warn: Callable[[str], None] = print,
+    ):
         self.project_root = Path(project_root)
         self.ai_command = ai_command
         self.project_config = self._load_project_config()
         self.config = self._load_config()
         self.fetcher = KnowledgeFetcher(self.project_root)
-        self.project_type = self._detect_project_type()
+        self.project_type = self._detect_project_type(warn)
 
     def derive(
         self,
@@ -58,6 +65,46 @@ class RequiredArtifactsDeriver:
             defaults=defaults,
         )
         return self._parse_ai_response(self._call_ai(prompt))
+
+    def derive_accounted(
+        self,
+        requirement_docs: list[str],
+        coverage_decisions: list[AskItem] | None = None,
+    ) -> dict[str, Any]:
+        """Derive a validated selection and account for all candidates and requirements."""
+        root = self.project_root.resolve()
+        documents = []
+        for path in _unique_paths(self._requirement_paths(requirement_docs)):
+            resolved = path.resolve()
+            if not resolved.exists():
+                raise FileNotFoundError(f"Requirement document not found: {path}")
+            documents.append((resolved.relative_to(root).as_posix(), resolved.read_text(encoding="utf-8")))
+        items, requirements = number_requirements(documents)
+        defaults = self._load_defaults(self.project_type, strict=True)
+        candidates: dict[str, dict[str, Any]] = {}
+        for artifact in defaults:
+            artifact_id = artifact["id"].strip()
+            if artifact_id in candidates:
+                raise ValueError(f"duplicate default artifact id: {artifact_id}")
+            candidates[artifact_id] = {**artifact, "id": artifact_id}
+        prompt = _accounted_prompt(
+            self.project_type, requirements, list(candidates.values()),
+            self._summarize_decisions(coverage_decisions or []),
+        )
+        feedback = ""
+        for _ in range(_ACCOUNTED_ATTEMPTS):
+            response = self._call_ai(prompt + feedback, allow_empty=True)
+            try:
+                return _validate_accounted_response(response, candidates, items)
+            except ValueError as exc:
+                violations = str(exc)
+                feedback = (
+                    "\nThe previous response failed validation. Correct every issue below "
+                    "and return the complete JSON object again.\n" + violations + "\n"
+                )
+        raise ValueError(
+            f"Artifact derivation failed after {_ACCOUNTED_ATTEMPTS} attempts:\n{violations}"
+        )
 
     def _build_ai_prompt(
         self,
@@ -110,7 +157,7 @@ class RequiredArtifactsDeriver:
         ]
         return "\n".join(lines).rstrip() + "\n"
 
-    def _call_ai(self, prompt: str) -> str:
+    def _call_ai(self, prompt: str, *, allow_empty: bool = False) -> str:
         """Invoke the configured AI command with the prompt on stdin."""
         command = with_default_claude_permission_bypass(shlex.split(self.ai_command.strip()))
         if not command:
@@ -133,7 +180,7 @@ class RequiredArtifactsDeriver:
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
             raise ValueError(f"AI command failed: {detail}")
-        if not result.stdout.strip():
+        if not allow_empty and not result.stdout.strip():
             raise ValueError("AI command returned empty output")
         return result.stdout
 
@@ -158,15 +205,13 @@ class RequiredArtifactsDeriver:
             artifacts.append(artifact)
         return artifacts
 
-    def _load_defaults(self, project_type: str) -> list[dict[str, Any]]:
+    def _load_defaults(self, project_type: str, *, strict: bool = False) -> list[dict[str, Any]]:
         """Load project-type defaults, allowing codd.yaml overrides."""
         override_artifacts = self.config.get("default_artifacts")
         if isinstance(override_artifacts, list):
-            return [
-                _normalize_default_artifact(item)
-                for item in override_artifacts
-                if isinstance(item, dict)
-            ]
+            return _normalize_defaults(override_artifacts, strict=strict)
+        if strict and "default_artifacts" in self.config:
+            raise ValueError("required_artifacts.default_artifacts must be a list")
 
         if project_type == CUSTOM_PROJECT_TYPE:
             return []
@@ -179,11 +224,7 @@ class RequiredArtifactsDeriver:
         artifacts = payload.get("default_artifacts", [])
         if not isinstance(artifacts, list):
             raise ValueError(f"{defaults_path} default_artifacts must be a list")
-        return [
-            _normalize_default_artifact(item)
-            for item in artifacts
-            if isinstance(item, dict)
-        ]
+        return _normalize_defaults(artifacts, strict=strict)
 
     def _load_project_config(self) -> dict[str, Any]:
         try:
@@ -195,7 +236,7 @@ class RequiredArtifactsDeriver:
         section = self.project_config.get("required_artifacts", {})
         return section if isinstance(section, dict) else {}
 
-    def _detect_project_type(self) -> str:
+    def _detect_project_type(self, warn: Callable[[str], None] = print) -> str:
         project = self.project_config.get("project", {})
         configured = ""
         if isinstance(project, dict):
@@ -212,10 +253,18 @@ class RequiredArtifactsDeriver:
         )
         if configured and resolved == GENERIC_PROJECT_TYPE:
             # Unknown configured type: warn, then use the generic baseline (NOT web).
-            print(f"warning: {reason}")
+            warn(f"warning: {reason}")
         return resolved
 
     def _read_requirement_docs(self, requirement_docs: list[str]) -> str:
+        contents: list[str] = []
+        for path in self._requirement_paths(requirement_docs):
+            if not path.exists():
+                raise FileNotFoundError(f"Requirement document not found: {path}")
+            contents.append(path.read_text(encoding="utf-8", errors="ignore"))
+        return "\n\n".join(contents)
+
+    def _requirement_paths(self, requirement_docs: list[str]) -> list[Path]:
         # Jail every user-supplied requirement_doc path: an absolute/``../`` value
         # (or in-root symlink) resolving outside the project root is excluded so
         # its contents never enter the requirement evidence text.
@@ -228,12 +277,7 @@ class RequiredArtifactsDeriver:
         if not paths:
             raise FileNotFoundError("No requirement documents found")
 
-        contents: list[str] = []
-        for path in paths:
-            if not path.exists():
-                raise FileNotFoundError(f"Requirement document not found: {path}")
-            contents.append(path.read_text(encoding="utf-8", errors="ignore"))
-        return "\n\n".join(contents)
+        return paths
 
     def _discover_requirement_docs(self) -> list[Path]:
         configured_paths = self.config.get("requirement_docs")
@@ -277,6 +321,221 @@ class RequiredArtifactsDeriver:
         return "\n".join(lines)
 
 
+def _accounted_prompt(
+    project_type: str,
+    requirements: str,
+    defaults: list[dict[str, Any]],
+    decisions: str,
+) -> str:
+    return f"""Derive the complete, minimal, non-overlapping set of design artifacts for this project.
+Project type: {project_type}
+
+Requirements (R markers start items; other lines continue the item or provide context):
+{requirements}
+
+User decisions from requirement completeness audit:
+{decisions or '(none)'}
+
+Default candidate artifacts for this project type:
+{yaml.safe_dump(defaults, sort_keys=False, allow_unicode=True).rstrip()}
+
+Rules:
+- List each candidate ID exactly once, in required_artifacts or omitted_artifacts.
+- Select every always_required candidate. Use the candidate conditions for the other selections.
+- Add a new artifact ID only if the requirements need a separate artifact beyond the candidates.
+- Every selected artifact, including additions, needs a rationale and at least one requirement_ids reference to an actual R marker that supports it.
+- Every R marker must be referenced by at least one selected artifact or listed once in unassigned_requirements with a rationale. Use unassigned only where no design artifact is needed.
+- Every depends_on ID must also be selected. Do not create dependency cycles.
+- Use source ai_derived, user_override or default_template. Include derived_from with ASK item IDs when user decisions materially influenced the artifact.
+- Return only a JSON object with these three lists. Use empty lists where applicable.
+{{
+  "required_artifacts": [{{"id": "category:name", "title": "Artifact title", "scope": "What it covers", "rationale": "Why it is needed", "source": "ai_derived", "depends_on": [], "requirement_ids": ["R1"]}}],
+  "omitted_artifacts": [{{"id": "category:optional", "rationale": "Why it is unnecessary"}}],
+  "unassigned_requirements": [{{"id": "R2", "rationale": "Why it needs no artifact"}}]
+}}
+"""
+
+
+def _validate_accounted_response(
+    response: str,
+    candidates: dict[str, dict[str, Any]],
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Collect all report violations before accepting a selection."""
+    if not response.strip():
+        raise ValueError("AI response is empty; expected a JSON object")
+    # Accept one surrounding Markdown fence, as the legacy derivation does, so a
+    # correct selection is not sent back for a retry over its wrapper alone.
+    fenced = re.fullmatch(r"\s*```[A-Za-z]*[ \t]*\n(.*?)\n?```\s*", response, flags=re.DOTALL)
+    if fenced:
+        response = fenced.group(1)
+    try:
+        payload = json.loads(response, object_pairs_hook=_unique_json_object, parse_constant=_invalid_json_constant)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"AI response is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("AI response must be a JSON object")
+
+    errors: list[str] = []
+    selected = _decision_rows(payload, "required_artifacts", errors)
+    omitted = _decision_rows(payload, "omitted_artifacts", errors)
+    unassigned = _decision_rows(payload, "unassigned_requirements", errors)
+    selected_ids = {artifact_id for artifact_id, _ in selected}
+    omitted_ids = {artifact_id for artifact_id, _ in omitted}
+    unassigned_ids = {item_id for item_id, _ in unassigned}
+    known_items = {item["id"] for item in items}
+
+    for artifact_id, candidate in candidates.items():
+        if artifact_id in selected_ids and artifact_id in omitted_ids:
+            errors.append(f"candidate {artifact_id!r} is both selected and omitted (duplicate id)")
+        if candidate["always_required"] and artifact_id not in selected_ids:
+            errors.append(f"always_required candidate {artifact_id!r} must be selected")
+        elif artifact_id not in selected_ids and artifact_id not in omitted_ids:
+            errors.append(f"candidate {artifact_id!r} is missing from both selection lists")
+
+    omissions = []
+    for artifact_id, row in omitted:
+        label = f"omitted candidate {artifact_id!r}"
+        rationale = _decision_text(row, "rationale", label, errors)
+        if artifact_id not in candidates:
+            errors.append(f"{label} is not in the candidate list")
+        else:
+            omissions.append({"id": artifact_id, "title": candidates[artifact_id]["title"], "rationale": rationale})
+
+    artifacts = []
+    evidence: dict[str, list[str]] = {}
+    dependencies: dict[str, list[str]] = {}
+    assigned_ids: set[str] = set()
+    for artifact_id, row in selected:
+        label = f"required artifact {artifact_id!r}"
+        artifact = {key: value for key, value in row.items() if key != "requirement_ids"}
+        for field in _ARTIFACT_TEXT_FIELDS:
+            artifact[field] = _decision_text(row, field, label, errors)
+        if artifact["source"] and artifact["source"] not in VALID_ARTIFACT_SOURCES:
+            errors.append(f"{label} has invalid source {artifact['source']!r}")
+        artifact["depends_on"] = _decision_ids(row, "depends_on", label, errors)
+        if "derived_from" in row:
+            artifact["derived_from"] = _decision_ids(row, "derived_from", label, errors)
+        for dependency in artifact["depends_on"]:
+            if dependency not in selected_ids:
+                errors.append(f"{label} depends_on {dependency!r}, which is not selected")
+        dependencies[artifact_id] = [dep for dep in artifact["depends_on"] if dep in selected_ids]
+        artifacts.append(artifact)
+
+        refs = _decision_ids(row, "requirement_ids", label, errors, nonempty=True)
+        evidence[artifact_id] = refs
+        for ref in refs:
+            if ref not in known_items:
+                errors.append(f"{label} cites unknown requirement {ref!r} in requirement_ids")
+            else:
+                assigned_ids.add(ref)
+
+    try:
+        TopologicalSorter(dependencies).prepare()
+    except CycleError as exc:
+        errors.append("depends_on cycle: " + " -> ".join(exc.args[1]))
+
+    unassigned_items = []
+    for item_id, row in unassigned:
+        label = f"unassigned requirement {item_id!r}"
+        rationale = _decision_text(row, "rationale", label, errors)
+        if item_id not in known_items:
+            errors.append(f"{label} is an unknown requirement")
+        elif item_id in assigned_ids:
+            errors.append(f"{label} is already assigned to a selected artifact")
+        unassigned_items.append({"id": item_id, "rationale": rationale})
+
+    accounted_ids = assigned_ids | unassigned_ids
+    for item in items:
+        if item["id"] not in accounted_ids:
+            errors.append(
+                f"Unaccounted requirement {item['id']} ({item['path']}:{item['start_line']}): "
+                f"{item['text'][:200]!r}"
+            )
+    if errors:
+        raise ValueError("\n".join(f"- {error}" for error in errors))
+
+    return {
+        "required_artifacts": artifacts,
+        "artifact_evidence": evidence,
+        "added_artifact_ids": [artifact_id for artifact_id, _ in selected if artifact_id not in candidates],
+        "omitted_artifacts": omissions,
+        "requirement_items": items,
+        "unassigned_requirements": unassigned_items,
+    }
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in output:
+            raise ValueError(f"AI response repeats JSON key {key!r}")
+        output[key] = value
+    return output
+
+
+def _invalid_json_constant(value: str) -> None:
+    raise ValueError(f"AI response is not valid JSON: invalid constant {value}")
+
+
+def _decision_rows(
+    payload: dict[str, Any], field: str, errors: list[str],
+) -> list[tuple[str, dict[str, Any]]]:
+    raw = payload.get(field)
+    if not isinstance(raw, list):
+        errors.append(f"{field} must be a list")
+        return []
+    rows = []
+    seen = set()
+    for index, row in enumerate(raw):
+        label = f"{field}[{index}]"
+        if not isinstance(row, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        row_id = _decision_text(row, "id", label, errors)
+        if row_id:
+            if row_id in seen:
+                errors.append(f"{label} has duplicate id {row_id!r}")
+            seen.add(row_id)
+            rows.append((row_id, row))
+    return rows
+
+
+def _decision_text(row: dict[str, Any], field: str, label: str, errors: list[str]) -> str:
+    value = row.get(field)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    errors.append(f"{label} needs a non-empty {field} string")
+    return ""
+
+
+def _decision_ids(
+    row: dict[str, Any], field: str, label: str, errors: list[str], *, nonempty: bool = False,
+) -> list[str]:
+    raw = row.get(field)
+    if not isinstance(raw, list) or (nonempty and not raw):
+        qualifier = "a non-empty" if nonempty else "a"
+        errors.append(f"{label} needs {qualifier} {field} list")
+        return []
+    ids = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, str) or not item.strip():
+            errors.append(f"{label} {field}[{index}] must be a non-empty ID string")
+        else:
+            ids.append(item.strip())
+    return ids
+
+
+def _normalize_defaults(artifacts: list, *, strict: bool) -> list[dict[str, Any]]:
+    defaults = []
+    for index, item in enumerate(artifacts):
+        if isinstance(item, dict):
+            defaults.append(_normalize_default_artifact(item))
+        elif strict:
+            raise ValueError(f"default_artifacts[{index}] must be a mapping")
+    return defaults
+
+
 def _parse_json_payload(output: str) -> Any:
     text = output.strip()
     if not text:
@@ -297,7 +556,7 @@ def _normalize_artifact(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError(f"required artifact entries must be mappings: {raw}")
     artifact = deepcopy(raw)
-    for field_name in ("id", "title", "scope", "rationale", "source"):
+    for field_name in _ARTIFACT_TEXT_FIELDS:
         if not isinstance(artifact.get(field_name), str) or not artifact[field_name].strip():
             raise ValueError(f"required artifact missing non-empty {field_name}: {raw}")
 
