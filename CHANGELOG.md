@@ -13,6 +13,14 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.45.1] - 2026-11-24 — The wheel on PyPI shipped without the built-in lexicons
+
+**`pip install codd-dev` now includes the built-in lexicons (fix, #34 by @fight18-ui, landed as #63).** The wheel was built from `packages = ["codd"]` only, so the top-level `codd_plugins` data tree — 39 lexicon manifests, 234 files — was left out. The source tree and the sdist had it; the wheel did not. On a clean install `codd lexicon list` reported `Installed (0)` / `Available (0)`, and a coverage check that names a built-in lexicon failed with `Unknown lexicon`. This was true of every wheel up to and including 3.45.0 (checked on the 3.45.0 wheel downloaded from PyPI: 425 files, none under `codd_plugins/`).
+
+- The wheel now force-includes `codd_plugins`. Built from this version it has 659 files, 234 of them under `codd_plugins/`, and a clean install lists 39 available lexicons.
+- A test builds the wheel and compares its lexicon manifests, and every other file of the plug-in tree, with the source tree. It takes the counts from the source, so adding a lexicon needs no edit there. The test needs `pip` in the test interpreter and a build backend it can fetch.
+- An editable install (`pip install -e .`) was never affected: it reads the source tree.
+
 ## [3.45.0] - 2026-11-24 — Opt-in: send self-contained implement tasks to a second, one-shot command
 
 **`codd implement` can route each task to one of two commands (feature, opt-in, #61).** Until now one command served every implement task (`ai_commands.implement`). A run mixes tasks that need nothing beyond the prompt with tasks that do: editing an existing file larger than the prompt limit, or building on dependency artifacts that could not be shown in full. A command that cannot read files fails on the second kind; an agent that can read files spends its extra round trips on the first kind. On a small sample project, with the same CLI, model, reasoning setting and prompts, three tasks that each write one new source file and its test took 7–14 round trips and 567k–1,500k input tokens (cache reads included) with file access, and 1 round trip and 62k–73k without. The sample's own 123 tests passed in all 18 runs. Nearly all of the difference is cache reads: without them, input plus output was 68k–134k against 52k–84k.
