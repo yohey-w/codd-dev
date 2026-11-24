@@ -90,9 +90,12 @@ class DesignConsistencySummary:
 
 
 class DesignConsistencyError(ValueError):
-    def __init__(self, details: list[str], *, retry_candidate: bool) -> None:
+    def __init__(
+        self, details: list[str], *, retry_candidate: bool, dependency_repairs: dict[str, str] | None = None,
+    ) -> None:
         super().__init__("Unresolved design consistency issues:\n  - " + "\n  - ".join(details))
         self.retry_candidate = retry_candidate
+        self.dependency_repairs = dependency_repairs or {}
 
 
 class StrictDesignLoader(yaml.SafeLoader):
@@ -184,6 +187,13 @@ def _operation_flow_owner_paths(config: dict[str, Any]) -> set[str]:
 
 def has_other_operation_flow_owner(config: dict[str, Any], output: str) -> bool:
     return bool(_operation_flow_owner_paths(config) - {output})
+
+
+def has_planned_behavior_owners(config: dict[str, Any]) -> bool:
+    return any(
+        entry.get("behavior_owners") and is_behavior_owner_document(str(entry.get("output", "")))
+        for entry in _planned_entries(config)
+    )
 
 
 def _has_managed_documents(project_root: Path, config: dict[str, Any]) -> bool:
@@ -484,16 +494,6 @@ def enforce_design_consistency(
             f"{case.location}: no design document owns {case.spec!r}"
             for claims in cases.values() for case in claims if case.spec not in owners
         )
-        if consistency_required(config):
-            dependencies = {artifact.node_id: [entry["id"] for entry in artifact.depends_on] for artifact in wave_artifacts}
-            nodes = {artifact.output: artifact.node_id for artifact in artifacts}
-            for claims in cases.values():
-                for case in claims:
-                    sources = owners.get(case.spec, {})
-                    if len(sources) == 1:
-                        owner, location = next(iter(sources.items()))
-                        if owner != case.path and not _depends_on(nodes[case.path], nodes[owner], dependencies):
-                            errors.append(f"{case.location}: add a dependency on {location}, owner of {case.spec!r}")
 
     retry_candidate = candidate is not None and not errors
     for claims in cases.values():
@@ -536,8 +536,22 @@ def enforce_design_consistency(
             f"for {one.describe(other.key[0])}:\n"
             f"    {one.quote}\n    {other.quote}"
         )
-    if errors:
-        raise DesignConsistencyError(errors, retry_candidate=retry_candidate)
+
+    dependency_details: list[str] = []
+    repair_feedback: dict[str, str] = {}
+    if (complete or candidate_path) and not design_consistency_disabled(config):
+        dependency_details, repair_feedback = _check_case_dependencies(
+            wave_artifacts, owners,
+            (case for claims in cases.values() for case in claims if not candidate_path or case.path == candidate_path),
+            candidate=candidate_path is not None,
+            required=consistency_required(config),
+        )
+    if errors or dependency_details:
+        raise DesignConsistencyError(
+            errors + (list(repair_feedback.values()) if candidate_path else dependency_details),
+            retry_candidate=retry_candidate,
+            dependency_repairs=repair_feedback if complete and not errors else None,
+        )
     if not complete:
         return None
     return DesignConsistencySummary(
@@ -546,6 +560,57 @@ def enforce_design_consistency(
         case_declarations=sum(len(claims) for claims in cases.values()),
         cross_document_cases=sum(len({case.path for case in claims}) > 1 for claims in cases.values()),
     )
+
+
+_DEPENDENCY_REWRITE_GUIDANCE = (
+    "The wave_config is fixed for this rewrite. For each issue below, remove the case and its local outcome "
+    "assertion and cite the owner for the decision. Keep cases supported by existing dependencies or this "
+    "document's own specifications. Keep the codd-behavior block, using cases: [] if no cases remain. "
+    "Preserve any unresolved disagreements."
+)
+
+
+def _check_case_dependencies(
+    artifacts: list[WaveArtifact],
+    owners: dict[str, dict[str, str]],
+    cases: Iterator[BehaviorCase],
+    *,
+    candidate: bool,
+    required: bool,
+) -> tuple[list[str], dict[str, str]]:
+    """Find consumers that cannot reach the owner through the planned dependencies."""
+    planned_owners: dict[str, set[str]] = {}
+    for artifact in artifacts:
+        if is_behavior_owner_document(artifact.output):
+            for spec in artifact.behavior_owners or ():
+                planned_owners.setdefault(spec, set()).add(artifact.output)
+    dependencies = {artifact.node_id: [entry["id"] for entry in artifact.depends_on] for artifact in artifacts}
+    nodes = {artifact.output: artifact.node_id for artifact in artifacts}
+    details = []
+    feedback_by_path: dict[str, list[str]] = {}
+    for case in cases:
+        planned = planned_owners.get(case.spec)
+        if not (planned or required):
+            continue
+        declared = owners.get(case.spec, {})
+        # A candidate may precede its owner. Complete checks use the validated declarations.
+        sources = planned if candidate and planned else declared.keys()
+        if len(sources) != 1:
+            continue
+        owner = next(iter(sources))
+        if owner == case.path or _depends_on(nodes[case.path], nodes[owner], dependencies):
+            continue
+        location = declared.get(owner, owner)
+        owner_detail = f"{location}, owner of {case.spec!r}"
+        details.append(f"{case.location}: add a dependency on {owner_detail}")
+        feedback_by_path.setdefault(case.path, []).append(
+            f"{case.location}: no planned dependency on {owner_detail}. "
+            f"The affected case is {case.describe()}: {case.quote!r}."
+        )
+    return details, {
+        path: "\n".join([_DEPENDENCY_REWRITE_GUIDANCE, *feedback])
+        for path, feedback in feedback_by_path.items()
+    }
 
 
 def _depends_on(consumer: str, owner: str, dependencies: dict[str, list[str]]) -> bool:

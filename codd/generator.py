@@ -25,7 +25,9 @@ from codd.design_consistency import (
     StrictDesignLoader,
     design_consistency_disabled,
     enforce_design_consistency,
+    has_behavior_contract,
     has_other_operation_flow_owner,
+    has_planned_behavior_owners,
     is_behavior_document,
     is_behavior_owner_document,
     is_managed_behavior_document,
@@ -771,6 +773,10 @@ def _generate_one_artifact(
         planned=artifact.behavior_owners is not None or artifact.owns_operation_flow is not None,
         project_root=project_root,
     )
+    check_emitted_contract = (
+        not managed and not design_consistency_disabled(config)
+        and is_behavior_document(artifact.output) and has_planned_behavior_owners(config)
+    )
     output_path = project_root / artifact.output
     if managed:
         output_path = resolve_project_path(project_root, artifact.output)
@@ -795,8 +801,13 @@ def _generate_one_artifact(
             body=body,
         )
 
+    validate_contract = managed
+
     def check_candidate(body: str) -> None:
-        enforce_design_consistency(project_root, config, candidate=(artifact.output, render(body)))
+        nonlocal validate_contract
+        validate_contract = validate_contract or has_behavior_contract(body)
+        if validate_contract:
+            enforce_design_consistency(project_root, config, candidate=(artifact.output, render(body)))
 
     body = _generate_document_body(
         artifact=artifact,
@@ -810,7 +821,7 @@ def _generate_one_artifact(
         project_language=project_language,
         layout_placement=layout_placement,
         behavior_contract=managed,
-        validate_body=check_candidate if managed else None,
+        validate_body=check_candidate if managed or check_emitted_contract else None,
         operation_flow_owner_elsewhere=operation_flow_owner_elsewhere,
     )
     if managed:

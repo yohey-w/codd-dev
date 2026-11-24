@@ -378,6 +378,146 @@ def test_fresh_consumer_must_reach_owner_via_dependency(tmp_path):
         enforce_design_consistency(project, config, complete=True)
 
 
+def _same_wave_without_dependency(project, *, owner_first=True, owner_only_plan=False):
+    config = load_project_config(project)
+    waves = config["wave_config"]
+    owner = waves["1"][0]
+    consumer = waves.pop("2")[0]
+    consumer.pop("depends_on")
+    if owner_only_plan:
+        config["generate"]["design_consistency"] = None
+        consumer.pop("behavior_owners")
+        consumer.pop("owns_operation_flow")
+    waves["1"] = [owner, consumer] if owner_first else [consumer, owner]
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+
+
+@pytest.mark.parametrize("owner_first", [True, False])
+@pytest.mark.parametrize("owner_only_plan", [False, True])
+def test_same_wave_case_without_dependency_retries_before_write(tmp_path, monkeypatch, owner_first, owner_only_plan):
+    project = _project(tmp_path)
+    _same_wave_without_dependency(project, owner_first=owner_first, owner_only_plan=owner_only_plan)
+    calls = []
+
+    def generate(_command, prompt):
+        if "Node ID: design:import" in prompt:
+            calls.append("owner")
+            return _document(ALLOW, _block(ALLOW, "accept", owner=True))
+        if "REVIEW FEEDBACK" not in prompt:
+            calls.append("consumer")
+            return _document(EXPECTED, _block(EXPECTED, "accept"))
+        calls.append("retry")
+        assert not (project / CONSUMER).exists()
+        assert SPEC in prompt and OWNER in prompt
+        assert "remove the case" in prompt and "cite the owner" in prompt
+        return _document(f"See {OWNER} for the decision.", "```codd-behavior\nowns: {}\ncases: []\n```\n")
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", generate)
+    generate_wave(project, 1)
+
+    assert calls == (["owner", "consumer", "retry"] if owner_first else ["consumer", "retry", "owner"])
+    enforce_design_consistency(project, load_project_config(project), complete=True)
+
+
+def test_dependency_retry_cannot_drop_the_behavior_block(tmp_path, monkeypatch):
+    project = _project(tmp_path)
+    _same_wave_without_dependency(project, owner_first=False, owner_only_plan=True)
+    responses = iter([
+        _document(EXPECTED, _block(EXPECTED, "accept")),
+        _document(f"See {OWNER} for the decision."),
+    ])
+
+    def generate(_command, prompt):
+        assert "Node ID: test:acceptance" in prompt
+        return next(responses)
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", generate)
+    with pytest.raises(ValueError, match="missing codd-behavior declarations"):
+        generate_wave(project, 1)
+    assert not (project / CONSUMER).exists()
+
+
+def _run_through_design_check(project):
+    from codd.greenfield.pipeline import new_session, save_session
+
+    session = new_session({"ai_command": "fake-ai"})
+    for stage in ("init", "elicit", "plan"):
+        session["stages"][stage]["status"] = "done"
+    save_session(project, session)
+    return GreenfieldPipeline(coverage_gate=False).run(project, resume=True)
+
+
+@pytest.mark.parametrize("repair_succeeds", [True, False])
+def test_greenfield_resume_repairs_only_consumer_after_full_design_check(tmp_path, monkeypatch, repair_succeeds):
+    from codd.greenfield.pipeline import format_greenfield_result, load_session
+
+    project = _project(tmp_path)
+    _same_wave_without_dependency(project)
+    owner = _write(project, OWNER, _document(ALLOW, _block(ALLOW, "accept", owner=True)))
+    consumer = _write(project, CONSUMER, _document(EXPECTED, _block(EXPECTED, "accept")))
+    before_owner, before_consumer = owner.read_bytes(), consumer.read_bytes()
+    prompts = []
+
+    def generate(command, prompt):
+        prompts.append(prompt)
+        assert command == "fake-ai"
+        assert "Node ID: test:acceptance" in prompt
+        assert SPEC in prompt and OWNER in prompt and "remove the case" in prompt
+        if repair_succeeds:
+            return _document(f"See {OWNER} for the decision.", "```codd-behavior\nowns: {}\ncases: []\n```\n")
+        return _document(EXPECTED, _block(EXPECTED, "accept"))
+
+    def stop_at_implementation(_project):
+        raise StageError("implementation reached")
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", generate)
+    failed = _run_through_design_check(project)
+    assert failed.failed_stage == "generate" and failed.resume_command
+    assert "add a dependency on" in failed.error
+    assert load_session(project)["stages"]["generate"]["units"] == {"1": "done"}
+    assert not prompts
+
+    resumed = GreenfieldPipeline(coverage_gate=False, task_lister=stop_at_implementation).run(project, resume=True)
+    assert owner.read_bytes() == before_owner
+    if repair_succeeds:
+        assert len(prompts) == 1
+        assert resumed.failed_stage == "implement" and resumed.error == "implementation reached"
+        assert load_session(project)["stages"]["generate"]["status"] == "done"
+        assert consumer.read_bytes() != before_consumer
+    else:
+        assert len(prompts) == 2
+        assert resumed.failed_stage == "generate" and resumed.resume_command is None
+        assert "--resume" not in format_greenfield_result(resumed, "text")
+        assert consumer.read_bytes() == before_consumer
+
+
+@pytest.mark.parametrize("issue", ["conflict", "unresolved"])
+def test_greenfield_complete_disagreement_requires_manual_resolution(tmp_path, monkeypatch, issue):
+    from codd.greenfield.pipeline import format_greenfield_result
+
+    project = _project(tmp_path)
+    _same_wave_without_dependency(project)
+    _write(project, OWNER, _document(ALLOW, _block(ALLOW, "accept", owner=True)))
+    block = _block(DENY, "reject" if issue == "conflict" else "accept")
+    if issue == "unresolved":
+        data = yaml.safe_load(block.split("\n", 1)[1].rsplit("```", 1)[0])
+        data["unresolved"] = [{"documents": [OWNER, CONSUMER], "quote": DENY}]
+        block = f"```codd-behavior\n{yaml.safe_dump(data)}```\n"
+    _write(project, CONSUMER, _document(DENY, block))
+
+    def unexpected_ai_call(*_args):
+        pytest.fail("a reported disagreement must be reconciled before regeneration")
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", unexpected_ai_call)
+    result = _run_through_design_check(project)
+
+    assert result.failed_stage == "generate"
+    assert ("conflicts with" if issue == "conflict" else "unresolved disagreement") in result.error
+    assert result.resume_command is None
+    assert "--resume" not in format_greenfield_result(result, "text")
+    assert "codd generate --check-design" in result.inspect_command
+
+
 def test_new_plan_retries_forward_owner_dependency(tmp_path, monkeypatch):
     project = _project(tmp_path, managed=None)
     _write(project, "docs/requirements/import.md", "---\ncodd:\n  node_id: req:import\n  type: requirement\n---\n\n# Import requirements\n")
@@ -721,3 +861,18 @@ def test_explicit_opt_out_ignores_malformed_leftover_ownership_keys(opted_out_wi
 
     assert result.exit_code == 0, result.output
     assert "0 generated, 2 skipped" in result.output
+
+
+def test_explicit_check_on_opted_out_project_skips_dependency_reachability(tmp_path):
+    project = _project(tmp_path)
+    config = load_project_config(project)
+    config["generate"]["design_consistency"] = False
+    config["wave_config"]["2"][0].pop("depends_on")
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+    _write(project, OWNER, _document(ALLOW, _block(ALLOW, "accept", owner=True)))
+    _write(project, CONSUMER, _document(EXPECTED, _block(EXPECTED, "accept")))
+
+    result = CliRunner().invoke(main, ["generate", "--check-design", "--path", str(project)])
+
+    assert result.exit_code == 0, result.output
+    assert "add a dependency" not in result.output
