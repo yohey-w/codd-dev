@@ -1,4 +1,4 @@
-"""Opt-in metadata for invoke_ai and built-in adapters, not arbitrary subprocesses.
+"""Opt-in AI invocation metadata and implementation routing events.
 
 No prompts, responses, argv, environments or exception messages are persisted.
 File-writing output length measures the returned file contract; other routes
@@ -118,6 +118,31 @@ def _append(path: Path, record: dict) -> None:
         stream.write(json.dumps(record, ensure_ascii=True) + "\n")
 
 
+def note_implement_routing(
+    *, route: str, reason: str, detail: str, fallback: bool, design_node: str, outputs: list[str],
+    incomplete_distant_artifacts: int,
+) -> None:
+    """Record a task decision without advancing the AI call counter."""
+    session = _session.get()
+    if session is None:
+        return
+    try:
+        _append(session.path, {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "stage": session.stage,
+            "event": "implement_routing",
+            "route": route,
+            "reason": reason,
+            "detail": detail,
+            "fallback": fallback,
+            "design_node": design_node,
+            "outputs": outputs,
+            "incomplete_distant_artifacts": incomplete_distant_artifacts,
+        })
+    except Exception:
+        pass  # Recording must never change the AI call's result.
+
+
 @contextmanager
 def usage_trial(prompt: str, route: str, command, model: str | None = None, *, defer_if_nested=False):
     session = _session.get()
@@ -217,6 +242,8 @@ def summarize_usage(path: Path) -> tuple[list[dict], int]:
         for line in stream:
             try:
                 record = json.loads(line.decode("utf-8"))
+                if isinstance(record, dict) and record.get("event") == "implement_routing":
+                    continue
                 stage = record["stage"]
                 prompt_hash = record["prompt_sha256"]
                 prompt_chars = record["prompt_chars"]
