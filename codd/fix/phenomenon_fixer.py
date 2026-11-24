@@ -9,6 +9,7 @@ path is never touched.
 from __future__ import annotations
 
 import logging
+import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from functools import cache
@@ -17,7 +18,7 @@ from typing import Any, Callable
 
 from codd.config import load_project_config
 from codd.dag.builder import build_dag
-from codd.deployment.providers.ai_command import SubprocessAiCommand
+from codd.deployment.providers.ai_command import AiCommandError, SubprocessAiCommand
 from codd.deployment.providers.ai_command_factory import get_ai_command
 from codd.fix.candidate_selector import (
     Candidate,
@@ -259,10 +260,10 @@ def run_phenomenon_fix(
     if ai_invoke:
         parse_ai = score_ai = design_ai = risk_ai = impl_ai = ai_invoke
     else:
-        shared_ai = None if configured_stages else _build_default_ai_invoke(project_root, ai_command)
-
         @cache
         def build_ai(command_name: str) -> AiInvoke:
+            if not configured_stages:
+                return _build_default_ai_invoke(project_root, ai_command)
             return _build_default_ai_invoke(
                 project_root, None, command_name=command_name, config=config
             )
@@ -271,7 +272,7 @@ def run_phenomenon_fix(
             command_name = name if name in configured_stages else "fix"
 
             def invoke(prompt: str) -> str:
-                ai = shared_ai if shared_ai is not None else build_ai(command_name)
+                ai = build_ai(command_name)
                 # The adapter runs in a temporary workspace. Resolve usage
                 # against the project and label it independently of the command.
                 with usage_session(config, project_root, stage=name):
@@ -299,6 +300,10 @@ def run_phenomenon_fix(
         lexicon_context=lexicon_context,
         design_summaries=design_summaries,
     )
+    if analysis.invocation_error is not None:
+        result.aborted = True
+        result.abort_reason = f"phenomenon analysis failed: {_analysis_failure_detail(analysis.invocation_error)}"
+        return result
     result.analysis = analysis
 
     if analysis.is_ambiguous():
@@ -783,6 +788,24 @@ def _run_attempt_loop(
         )
 
     return _AttemptLoopOutcome(attempts=attempts, applied_path=None)
+
+
+def _analysis_failure_detail(error: Exception) -> str:
+    if isinstance(error, OSError):
+        return f"could not launch AI command: {error}"
+
+    cause = error.__cause__ if isinstance(error, AiCommandError) else error
+    detail = str(error) or type(error).__name__
+    if isinstance(cause, subprocess.CalledProcessError):
+        detail = f"AI command failed (exit code {cause.returncode})"
+    if isinstance(cause, (subprocess.CalledProcessError, subprocess.TimeoutExpired)):
+        stderr = cause.stderr
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        head = (stderr or "").lstrip()[:240].partition("\n")[0].rstrip()
+        if head:
+            detail += f": {head}"
+    return detail
 
 
 def _resolve_ambiguity(

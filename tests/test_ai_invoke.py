@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -129,6 +130,48 @@ def test_prepare_read_only_codex_hardens_codex_exec(tmp_path):
     assert "--skip-git-repo-check" in resolved
     assert "--ephemeral" in resolved
     assert resolved.endswith(" -")
+
+
+@pytest.mark.parametrize(
+    ("existing_flags", "missing_flags"),
+    [
+        ([], ["--skip-git-repo-check", "--ephemeral"]),
+        (["--skip-git-repo-check"], ["--ephemeral"]),
+        (["--ephemeral"], ["--skip-git-repo-check"]),
+        (["--ephemeral", "--skip-git-repo-check"], []),
+    ],
+)
+def test_prepare_read_only_codex_adds_only_missing_flags(tmp_path, existing_flags, missing_flags):
+    user_args = [
+        "codex", "exec", "--model", "example-model", *existing_flags,
+        "-c", 'model_reasoning_effort="medium"', "--disable", "shell_tool",
+    ]
+    command = shlex.join([
+        *user_args, "-s", "workspace-write", "--cd=/other", "--add-dir", "/extra",
+        "--dangerously-bypass-hook-trust", "-",
+    ])
+
+    resolved = shlex.split(prepare_read_only_codex(command, tmp_path))
+
+    assert resolved == [
+        *user_args, "--sandbox", "read-only", "--cd", tmp_path.as_posix(), *missing_flags, "-",
+    ]
+
+
+def test_prepare_read_only_codex_keeps_first_occurrence_of_repeated_flags(tmp_path):
+    command = (
+        "codex exec --ephemeral --model example-model --skip-git-repo-check "
+        "-c 'model_reasoning_effort=\"medium\"' --skip-git-repo-check "
+        "--disable shell_tool --ephemeral -"
+    )
+
+    resolved = shlex.split(prepare_read_only_codex(command, tmp_path))
+
+    assert resolved == [
+        "codex", "exec", "--ephemeral", "--model", "example-model", "--skip-git-repo-check",
+        "-c", 'model_reasoning_effort="medium"', "--disable", "shell_tool",
+        "--sandbox", "read-only", "--cd", tmp_path.as_posix(), "-",
+    ]
 
 
 def test_prepare_read_only_codex_leaves_non_codex_command_unchanged(tmp_path):

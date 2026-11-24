@@ -85,7 +85,9 @@ class SubprocessAiCommand:
             if completed.returncode != 0:
                 note_failure("nonzero_exit")
                 detail = completed.stderr.strip() or completed.stdout.strip() or f"exit code {completed.returncode}"
-                raise AiCommandError(f"AI command failed: {detail}")
+                raise AiCommandError(f"AI command failed: {detail}") from subprocess.CalledProcessError(
+                    completed.returncode, prepared, stderr=completed.stderr
+                )
             if not completed.stdout.strip():
                 note_failure("empty_output")
                 raise AiCommandError("AI command returned empty output")

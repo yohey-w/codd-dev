@@ -449,3 +449,109 @@ def test_doctor_recognizes_all_fix_stage_command_keys(scripted_project):
     assert result.exit_code == 0, result.output
     assert "unknown config key 'unknown_test_config_key'" in result.output
     assert all(f"ai_commands.{stage}" not in result.output for stage in STAGE_PROMPTS)
+
+
+@pytest.fixture
+def fix_dry_run(tmp_path, monkeypatch):
+    """Run the interactive CLI with the real adapter and a mocked subprocess."""
+    codd_dir = tmp_path / ".codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text("{}\n", encoding="utf-8")
+    runner = Mock()
+    original_init = SubprocessAiCommand.__init__
+
+    def init_adapter(adapter, *args, **kwargs):
+        original_init(adapter, *args, **kwargs, runner=runner)
+
+    monkeypatch.delenv("CODD_AI_USAGE_LOG", raising=False)
+    monkeypatch.setattr(SubprocessAiCommand, "__init__", init_adapter)
+
+    def run():
+        return CliRunner().invoke(main, [
+            "fix", PHENOMENON, "--path", str(tmp_path), "--dry-run", "--ai-cmd", "mock-ai",
+        ], input="abort\n")
+
+    return runner, run
+
+
+@pytest.mark.parametrize(
+    ("outcome", "diagnostics"),
+    [
+        pytest.param(
+            subprocess.CompletedProcess(
+                ["mock-ai"], 2, stdout='{"ambiguity_score": 1.0}',
+                stderr="invalid command arguments\nremaining stderr",
+            ),
+            ("exit code 2", "invalid command arguments"),
+            id="nonzero-with-stderr",
+        ),
+        pytest.param(
+            subprocess.CompletedProcess(["mock-ai"], 2, stdout="", stderr=""),
+            ("exit code 2",),
+            id="nonzero-without-stderr",
+        ),
+        pytest.param(
+            FileNotFoundError("missing executable"), ("command not found", "mock-ai"), id="not-found",
+        ),
+        pytest.param(
+            PermissionError("permission denied"), ("permission denied",), id="cannot-launch",
+        ),
+        pytest.param(
+            subprocess.TimeoutExpired("mock-ai", 3, stderr=b"waiting for response\nremaining stderr"),
+            ("timed out", "waiting for response"),
+            id="timeout",
+        ),
+    ],
+)
+def test_dry_run_parse_execution_failure_aborts_without_asking_for_focus(fix_dry_run, outcome, diagnostics):
+    runner, run = fix_dry_run
+    if isinstance(outcome, Exception):
+        runner.side_effect = outcome
+    else:
+        runner.return_value = outcome
+
+    result = run()
+
+    assert result.exit_code == 1, (result.output, result.exception)
+    assert "Pick a focus" not in result.output, result.output
+    assert "ambiguity=" not in result.output
+    assert "Aborted: phenomenon analysis failed" in result.output
+    for diagnostic in diagnostics:
+        assert diagnostic in result.output
+    assert "remaining stderr" not in result.output
+    runner.assert_called_once()
+    assert runner.call_args.kwargs["input"].startswith(STAGE_PROMPTS["fix_phenomenon_parse"])
+
+
+def test_dry_run_parse_success_with_ambiguity_still_asks_for_focus(fix_dry_run):
+    runner, run = fix_dry_run
+    runner.return_value = subprocess.CompletedProcess(
+        ["mock-ai"], 0,
+        stdout='{"intent": "clarification", "subject_terms": ["login", "error"], "ambiguity_score": 0.9}',
+        stderr="",
+    )
+
+    result = run()
+
+    assert result.exit_code == 1, (result.output, result.exception)
+    assert "(score=0.90). Pick a focus:" in result.output
+    assert "focus on: login" in result.output
+    assert "clarification aborted: user aborted" in result.output
+    runner.assert_called_once()
+
+
+def test_dry_run_parse_reports_unavailable_app_server_when_fallback_is_error(fix_dry_run, tmp_path, monkeypatch):
+    runner, run = fix_dry_run
+    (tmp_path / ".codd/codd.yaml").write_text(yaml.safe_dump({
+        "codex_app_server": {"enabled": True, "command": "missing-app-server", "fallback": "error"},
+    }), encoding="utf-8")
+    monkeypatch.setattr(ai_command_factory.shutil, "which", lambda _command: None)
+
+    result = run()
+
+    assert result.exit_code == 1, (result.output, result.exception)
+    assert "Aborted: phenomenon analysis failed" in result.output
+    assert "Codex App Server binary not found: missing-app-server" in result.output
+    assert "Pick a focus" not in result.output
+    assert "ambiguity=" not in result.output
+    runner.assert_not_called()
