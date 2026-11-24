@@ -22,6 +22,7 @@ from codd.generator import DependencyDocument, _load_project_config, _normalize_
 from codd.languages import resolve_assertion_guidance, resolve_test_framework_guidance
 from codd.project_types import ProjectCapabilities
 from codd.scanner import _extract_frontmatter, build_document_node_path_map
+from codd.verifiable_behavior_audit import VB_BLOCKER_SCOPE_GUIDANCE
 import unicodedata
 
 
@@ -3473,6 +3474,7 @@ def _build_implementation_prompt(
             [
                 "Verifiable-behavior traceability markers (release-blocking — the implement stage gate fails the build on any gap):",
                 "- The design and its dependency test documents declare verifiable behaviors in a traceability table whose first column is `VB-<id>`. Reconcile EVERY declared VB id against the tests you write: for each VB, produce either a real test that PROVES it (carrying a `codd: covers vb=<id>` comment marker) or, if it genuinely cannot be tested yet, an explicit `codd: blocked vb=<id> reason=<short_reason>` marker. Never leave a declared VB silently uncovered.",
+                f"- {VB_BLOCKER_SCOPE_GUIDANCE}",
                 "- A `codd: covers vb=<id>` marker is a CLAIM that the test proves that behavior. Only attach it to a test that (a) is actually executed — not `it.skip`/`test.todo`/`describe.skip`/`@pytest.mark.skip`/disabled — and (b) contains at least one assertion that would FAIL if the behavior were broken. A marker on an empty test, a skipped test, or a smoke test with no assertion is a false coverage claim and the authenticity gate will reject it. If no proving test exists, create or extend a real one FIRST, then mark it — do not add the marker to make the gate pass.",
                 "- One marker per behavior, placed inside the test file as a line comment in the TARGET LANGUAGE's own comment syntax, immediately above the proving test; the marker text after the comment prefix is identical across languages. Example (pytest): `# codd: covers vb=VB-07` directly above `def test_rejects_missing_id(): ...` whose body asserts the rejection. Example (vitest): `// codd: covers vb=VB-07` directly above `it('rejects missing id', () => { expect(...).toThrow(); })`. Example (Go): `// codd: covers vb=VB-07` directly above `func TestRejectsMissingID(t *testing.T) { ... }` whose body calls `t.Fatal`/`t.Error` (or a testify assertion) when the behavior is broken. For any other language, use that language's line-comment prefix (`#`, `//`, `--`, …) with the same `codd: covers vb=<id>` text.",
                 "",

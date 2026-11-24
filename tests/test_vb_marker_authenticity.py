@@ -171,6 +171,29 @@ def test_gate_rejects_marker_on_skipped_test(tmp_path):
     assert any(v.kind == "skipped" and v.vb_id == "VB-01" for v in report.violations)
 
 
+@pytest.mark.parametrize(
+    ("kind", "test_source"),
+    [
+        ("skipped", "@pytest.mark.skip\ndef test_example():\n    assert example() == 1\n"),
+        ("unobservable_test_structure", "def helper():\n    return 1\n"),
+    ],
+)
+def test_authenticity_feedback_limits_blocked_marker_scope(tmp_path, kind, test_source):
+    _canonical(tmp_path, "| VB-01 | returns one |\n")
+    _write(
+        tmp_path / "tests/test_example.py",
+        "# @generated-by: codd implement\n# codd: covers vb=VB-01\n" + test_source,
+    )
+    report = build_authenticity_report(tmp_path, profile=PY_PROFILE, strict_observability=True)
+
+    assert not report.passed
+    assert [violation.kind for violation in report.violations] == [kind]
+    feedback = format_authenticity_feedback(report)
+    assert "`codd: blocked vb=… reason=…`" in feedback
+    assert "this task's own outputs are responsible for the behavior" in feedback
+    assert "Do not declare behaviors that belong to other modules or other tests blocked." in feedback
+
+
 def test_gate_rejects_orphan_marker_stage1(tmp_path):
     project = tmp_path
     _canonical(project, "| VB-01 | add |\n")

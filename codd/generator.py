@@ -29,6 +29,7 @@ from codd.project_types import (
     resolve_project_type,
 )
 from codd.requirements_meta import normalize_operation_flow
+from codd.verifiable_behavior_audit import VB_BLOCKER_SCOPE_GUIDANCE
 
 
 # Full-capability profile used as the backward-compatible default when a project
@@ -1607,6 +1608,7 @@ def _build_test_code_prompt(
         "Verifiable-behavior traceability markers:",
         "- If a dependency test document declares verifiable-behavior ids (a traceability table whose first column is `VB-<id>`), annotate each test with a comment marker `codd: covers vb=<id>` for every behavior that test proves (`codd test audit` reconciles these markers).",
         "- If a declared behavior cannot be tested yet, add an explicit `codd: blocked vb=<id> reason=<short_reason>` comment marker instead of leaving it silently uncovered.",
+        f"- {VB_BLOCKER_SCOPE_GUIDANCE}",
         "",
     ])
 

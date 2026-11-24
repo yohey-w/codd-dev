@@ -15,6 +15,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from codd.generator import WaveArtifact, _build_generation_prompt
 from codd.generator import _resolve_layout_placement_contract
 from codd.implementer import _build_implementation_prompt
 from codd.implementer import DesignContext, ImplementSpec
@@ -226,6 +229,40 @@ def test_implement_prompt_omits_contract_without_project_root():
         coding_principles=None,
     )
     assert "Verifiable-behavior CONTRACT" not in prompt
+
+
+@pytest.mark.parametrize("prompt_kind", ["generator", "implementer", "contract"])
+def test_test_authoring_guidance_limits_blocked_markers_to_task_outputs(tmp_path, prompt_kind):
+    if prompt_kind == "generator":
+        artifact = WaveArtifact(
+            wave=1, node_id="test:behavior", output="tests/behavior.spec.ts",
+            title="Behavior tests", depends_on=[], conventions=[],
+        )
+        prompt = _build_generation_prompt(artifact, [], [])
+    elif prompt_kind == "implementer":
+        # Exercise the marker instructions without the projected contract.
+        prompt = _build_implementation_prompt(
+            config={"scan": {"test_dirs": ["tests/"]}},
+            design_context=DesignContext(
+                node_id="test:test-strategy", path=Path("docs/test/test_strategy.md"), content="# Tests\n"
+            ),
+            spec=ImplementSpec("test:test-strategy", ["tests"]),
+            dependency_documents=[],
+            conventions=[],
+            coding_principles=None,
+        )
+        assert "Reconcile EVERY declared VB id against the tests you write" in prompt
+        assert "Never leave a declared VB silently uncovered." in prompt
+    else:
+        prompt = render_vb_contract(collect_declared_vb_ids(_make_project(tmp_path)))
+        assert "COVERAGE IS THE COMPLETION CONDITION — for EVERY id in the closed list above" in prompt
+        assert "a behavior genuinely cannot be tested yet) must exist." in prompt
+
+    assert "`codd: blocked vb=<id> reason=<short_reason>`" in prompt
+    assert "this task's own outputs are responsible for the behavior" in prompt
+    assert "Do not declare behaviors that belong to other modules or other tests blocked." in prompt
+    assert "The full list is a project-wide completion condition." not in prompt
+    assert "Each task addresses the behaviors assigned to its own outputs." not in prompt
 
 
 # ---------------------------------------------------------------------------

@@ -8555,6 +8555,8 @@ def test_audit(
         f"{summary['orphan_vb_markers']} orphan vb marker(s): "
         f"{_display_path(written_path, project_root)}"
     )
+    if summary["marker_conflicts"]:
+        click.echo(f"{summary['marker_conflicts']} covers/blocked marker conflict(s) included in blocked.")
 
 
 @main.group(cls=_AliasedGroup, aliases={"list": "show"})
