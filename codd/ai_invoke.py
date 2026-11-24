@@ -544,8 +544,13 @@ def _invoke_subprocess(
     note_output(result.stdout)
     if result.returncode != 0:
         note_failure("nonzero_exit")
-        detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
-        raise ValueError(f"AI command failed: {detail}")
+        stderr = result.stderr.strip()
+        exit_code = f"exit code {result.returncode}"
+        detail = stderr or result.stdout.strip() or exit_code
+        error = ValueError(f"AI command failed: {detail}")
+        # Keep the existing exception contract and provide feedback without stdout.
+        error.__dict__["retry_diagnostic"] = stderr or exit_code
+        raise error
 
     if not result.stdout.strip():
         note_failure("empty_output")

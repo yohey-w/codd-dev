@@ -13,6 +13,20 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.46.0] - 2026-11-24 — A behavior marked both covered and blocked is now visible; `codd extract --ai` no longer retries blind
+
+**The verifiable-behavior audit shows covers/blocked marker conflicts (behaviour change in reports and prompts, #64).** A behavior with a `codd: blocked vb=<id>` marker anywhere is counted as blocked, even when another test carries `codd: covers vb=<id>` for it. Nothing reported that. On 130 local projects with VB tables (5,654 behaviors), 88 were blocked and 78 of those also had a covering test. In one project 35 of 36 behaviors were blocked and all 35 were covered. A tool-less implement run was also seen marking ten behaviors of other modules blocked: every test passed and the implement gate, which fails only on uncovered behaviors, passed too.
+
+- The audit row gets `marker_conflict`, the summary `marker_conflicts` (a subset of blocked), and the JSON row `marker_conflict_files` with the files on each side. The Markdown report adds a summary line and a `Marker Conflict` column, `codd test audit` prints one extra line, and the implement gate names the files — all only when a conflict exists. The row's next action says to remove a stale blocked marker, or to fix the covering test if it does not actually prove the behavior.
+- What does not change: how a behavior's status is decided, and every gate's pass or fail. A behavior with both markers is still blocked. A project without conflicts gets byte-identical Markdown and CLI output, and JSON that differs only by the new keys.
+- Every prompt and message that teaches the blocked marker now adds that it is for behaviors this task's own outputs are responsible for and cannot test yet, not for behaviors owned by other modules or tests. Existing sentences are untouched.
+- Known and not fixed here: consecutive blocked marker lines are parsed every other line, because the optional details part of the marker pattern runs across the line break. On the same projects 323 blocked marker lines yield 183 parsed markers. Fixing it changes statuses under the current precedence, so it waits for a decision on which marker wins.
+
+**`codd extract --ai` adds the reason to a retry after a failure that reached the model (fix, #65).** Extraction retries up to twice. It retried with exactly the same prompt even when the call had gone through and failed on content — empty output, or a non-zero exit for a reason other than transport. The three prompts had the same hash. It was the only caller of the shared retry without retry feedback.
+
+- After empty output or a non-transport non-zero exit, the next attempt carries the previous failure as quoted diagnostic data (stderr or the exit code, at most 1,200 characters; never the model's response) and restates the output format.
+- Transport failures, timeouts and output-ceiling recovery are retried with the same prompt, as before. A command that cannot be found fails at once. The retry limit is unchanged, and a call that succeeds first time is byte-identical to 3.45.1.
+
 ## [3.45.1] - 2026-11-24 — The wheel on PyPI shipped without the built-in lexicons
 
 **`pip install codd-dev` now includes the built-in lexicons (fix, #34 by @fight18-ui, landed as #63).** The wheel was built from `packages = ["codd"]` only, so the top-level `codd_plugins` data tree — 39 lexicon manifests, 234 files — was left out. The source tree and the sdist had it; the wheel did not. On a clean install `codd lexicon list` reported `Installed (0)` / `Available (0)`, and a coverage check that names a built-in lexicon failed with `Unknown lexicon`. This was true of every wheel up to and including 3.45.0 (checked on the 3.45.0 wheel downloaded from PyPI: 425 files, none under `codd_plugins/`).
