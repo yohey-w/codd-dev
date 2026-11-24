@@ -13,6 +13,19 @@ Install or upgrade with:
 pip install -U codd-dev
 ```
 
+## [3.44.1] - 2026-11-24 — Codex text-only calls died at startup when the command already carried a flag CoDD adds
+
+**CoDD no longer adds `--skip-git-repo-check` or `--ephemeral` to a Codex command that already has it (fix, #59).** For calls that only return text (every stage of `codd fix`, review-style calls), CoDD re-launches Codex read-only and appends those two flags. It appended them even when the user's own command already had them. Current Codex CLIs reject a repeated flag (`error: the argument '--skip-git-repo-check' cannot be used multiple times`, exit 2), so with such a command every text-only call failed in a few hundredths of a second. Calls that write files (`codd implement`) do not take this path, which made it easy to miss. The duplicate has been appended since June.
+
+- If the flag is already in the command, it is kept once (also when the user wrote it twice). If it is not, it is appended as before. A command without either flag produces exactly the same arguments as 3.44.0.
+- `codd fix` strips the user's `--system-prompt` and supplies its own. The `--system-prompt=<value>` form was not stripped, so two system prompts were passed. It is stripped now; `--append-system-prompt` and `--system-prompt-file` are untouched.
+
+**`codd fix` stops with the reason when the AI command of its first stage fails, instead of asking an ambiguity question (behaviour change in a failure path, #59).** When the phenomenon-analysis call failed, the failure was turned into "the phenomenon is ambiguous (score=1.00) — pick a focus". In an unattended run that question waits for input that never arrives (or is cut off at end of input), and the actual error was never shown.
+
+- What changes: a non-zero exit, a command that cannot be started, empty output or a timeout in that first call now ends the run with exit code 1 and `Aborted: phenomenon analysis failed: <reason>` (for a non-zero exit the reason reads `AI command failed (exit code N): <first line of stderr>`). Before, a person could answer the question and continue, and `--non-interactive --on-ambiguity top1` continued without asking. Both now stop. If the failure was transient, run the command again.
+- What does not change: when the AI answered and the answer is ambiguous (malformed JSON, a high ambiguity score), the question is asked as before. Failures in later stages are handled as before.
+- For a non-zero exit the message carries the first line of stderr only; when stderr is empty it shows the exit code alone.
+
 ## [3.44.0] - 2026-11-24 — One line of history again: six core fixes that never reached `main`, and a guard that contradicted itself
 
 **Six commits from a branch that was never merged are now on `main` (feature + fixes, #56).** Since September the maintainer's shared `codd` command ran from `fix/canonical-user-journey-edges-20260909`. `main` went from 3.41.0 to 3.43.1 without that branch, and the shared command ran without 3.41.0–3.43.1: neither line had the other's fixes. Moving the shared command to `main` as it was would not have turned anything red. On a copy of a real project two checks got quietly weaker instead — `stale_evidence` went from PASS with 3 records compared to SKIP with 0, and `unresolved_import_residue` from 258 items checked to 166. After the merge the output of those checks is identical to the branch's. The branch is merged with a merge commit, so its six commits are ancestors of `main`.
