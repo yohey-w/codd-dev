@@ -483,25 +483,65 @@ def test_plan_command_init_generates_wave_config_from_requirement_docs(tmp_path,
 
 @pytest.mark.parametrize("explicit_false", [True, False], ids=["disabled", "unset"])
 def test_plan_init_preserves_explicitly_disabled_design_consistency(
-    tmp_path, mock_plan_init_ai, explicit_false,
+    tmp_path, monkeypatch, explicit_false,
 ):
     project = _setup_project(tmp_path, include_wave_config=False)
     _write_requirement(project)
+    # Keep the prompt independent of inferred lexicon timestamps.
+    (project / "project_lexicon.yaml").write_text(
+        "node_vocabulary: []\nnaming_conventions: []\ndesign_principles: []\n",
+        encoding="utf-8",
+    )
     config_path = project / "codd" / "codd.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     config["generate"] = {"body_retry": {"max_retries": 1}}
     if explicit_false:
         config["generate"]["design_consistency"] = False
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    waves = deepcopy(WAVE_CONFIG)
+    if explicit_false:
+        # Even ownership metadata returned unsolicited must be ignored.
+        waves["1"][0].update(behavior_owners=["spec"], owns_operation_flow=True)
+    prompts = _seq_invoke(monkeypatch, [yaml.safe_dump(waves)] * 3)
 
     result = CliRunner().invoke(main, ["plan", "--init", "--path", str(project)])
 
+    if explicit_false:
+        # Captured from the 3.46.0 planner at d943740 with the same project.
+        assert sha256(prompts[0].encode("utf-8")).hexdigest() == (
+            "06d494ef81246f29ddb91593472eb8b49e80316517470961ba2e0ee73738eaf8"
+        )
     assert result.exit_code == 0, result.output
     written = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert written["generate"] == {
         "body_retry": {"max_retries": 1},
         "design_consistency": not explicit_false,
     }
+    if explicit_false:
+        assert len(prompts) == 1
+        assert "operation_flow owner" not in result.stderr
+        assert all(
+            {"behavior_owners", "owns_operation_flow"}.isdisjoint(entry)
+            for entries in written["wave_config"].values() for entry in entries
+        )
+
+
+@pytest.mark.parametrize("setting", [None, True], ids=["unset", "enabled"])
+def test_requirements_plan_prompt_uses_managed_wave_patterns(tmp_path, mock_plan_init_ai, setting):
+    project = _setup_project(tmp_path, include_wave_config=False)
+    _write_requirement(project)
+    config_path = project / "codd/codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["generate"] = {"design_consistency": setting}
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    planner_module.plan_init(project)
+
+    assert (
+        "- Wave 5, when needed: separate implementation decisions or independent verification "
+        "contracts that do not fit in an existing design section\n"
+        "- Wave 6: implementation planning and infrastructure/build setup after their required designs\n"
+    ) in mock_plan_init_ai[0]["input"]
 
 
 @pytest.mark.parametrize("declare_operations", [False, True], ids=["implicit", "formal"])

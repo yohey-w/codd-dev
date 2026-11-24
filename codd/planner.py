@@ -16,7 +16,11 @@ from typing import Any, Callable
 import yaml
 
 import codd.generator as generator_module
-from codd.design_consistency import is_behavior_document, is_behavior_owner_document
+from codd.design_consistency import (
+    design_consistency_disabled,
+    is_behavior_document,
+    is_behavior_owner_document,
+)
 from codd.generator import (
     WaveArtifact,
     _load_project_config,
@@ -419,6 +423,8 @@ def plan_init(
     requirement_documents = _load_requirement_documents(project_root, config)
     extracted_documents: list[ExtractedDocument] = []
     capabilities = _resolve_generation_capabilities(config, project_root)
+    include_behavior_ownership = not design_consistency_disabled(config)
+    assign_behavior_ownership = bool(requirement_documents) and include_behavior_ownership
 
     if requirement_documents:
         # Greenfield: use requirements
@@ -439,9 +445,10 @@ def plan_init(
     prompt = generator_module._inject_lexicon(prompt, project_root)
     wave_config = _invoke_and_parse_wave_config(
         resolved_ai_command, prompt, max_retries=_plan_init_max_retries(config),
+        include_behavior_ownership=include_behavior_ownership,
         validate=(
             lambda waves: _validate_behavior_wave_config(waves, requirement_documents)
-        ) if requirement_documents else None,
+        ) if assign_behavior_ownership else None,
     )
     if requirement_documents:
         # Greenfield: GUARANTEE the canonical VB registry doc is planned so the VB
@@ -449,6 +456,7 @@ def plan_init(
         wave_config = _ensure_canonical_vb_doc_planned(
             config, wave_config, requirement_documents
         )
+    if assign_behavior_ownership:
         for entries in wave_config.values():
             for entry in entries:
                 if is_behavior_document(entry["output"]):
@@ -457,8 +465,7 @@ def plan_init(
         if not isinstance(generate_config, dict):
             generate_config = {}
             config["generate"] = generate_config
-        if generate_config.get("design_consistency") is not False:
-            generate_config["design_consistency"] = True
+        generate_config["design_consistency"] = True
 
     from codd.config import find_codd_dir
     config["wave_config"] = wave_config
@@ -1215,6 +1222,7 @@ def _build_plan_init_prompt(
 ) -> str:
     if capabilities is None:
         capabilities = generator_module.WEB_FALLBACK_CAPABILITIES
+    assign_behavior_ownership = not design_consistency_disabled(config)
     project = config.get("project") or {}
     scan = config.get("scan") or {}
     doc_dirs = scan.get("doc_dirs") or []
@@ -1235,20 +1243,28 @@ def _build_plan_init_prompt(
         MECE_DOCUMENT_STRUCTURE.rstrip(),
         "",
         "Standard V-model artifact patterns:",
-        _standard_v_model_patterns(capabilities, requirements_derived=True).rstrip(),
+        _standard_v_model_patterns(capabilities, requirements_derived=assign_behavior_ownership).rstrip(),
         "",
         "Instructions:",
         "- Read the requirement documents below and produce a MECE (Mutually Exclusive, Collectively Exhaustive) document set: every requirement section maps to at least one design artifact (no gaps), and each artifact has a distinct responsibility (no overlaps).",
-        "- Give each behavior specification shared across documents one owning design artifact. Put its stable id in that artifact's behavior_owners list. Use an empty list for documents that only apply or verify decisions. Use earlier owner artifacts as dependencies of their consumers, including test documents.",
+        *([
+            "- Give each behavior specification shared across documents one owning design artifact. Put its stable id in that artifact's behavior_owners list. Use an empty list for documents that only apply or verify decisions. Use earlier owner artifacts as dependencies of their consumers, including test documents.",
+        ] if assign_behavior_ownership else []),
         "- Output ONLY YAML for the wave_config mapping. Do not emit prose or Markdown fences.",
         "- Use string wave numbers as the top-level keys.",
         "- Each artifact entry must include node_id, output, title, depends_on, and conventions.",
         "- Each artifact entry must also include a `modules` list naming the source modules the document covers (e.g., ['auth', 'users']). This links design docs to source code for traceability.",
-        "- Add a separate detailed design artifact only when an implementation decision or independently verifiable contract cannot fit in an existing section. Module count alone does not justify another document. Cover all requirements and their necessary verification across the complete plan.",
+        (
+            "- Add a separate detailed design artifact only when an implementation decision or independently verifiable contract cannot fit in an existing section. Module count alone does not justify another document. Cover all requirements and their necessary verification across the complete plan."
+            if assign_behavior_ownership else
+            "- Insert a dedicated detailed design wave between overview design and implementation planning when the project has multiple modules, integrations, workflows, or shared domain concepts."
+        ),
         "- Detailed design artifacts must live under docs/detailed_design/ and stay Markdown + Mermaid (text-first, no binary diagrams).",
         "- Decide which detailed design artifacts are necessary from the project context; do not hardcode a fixed set. Good candidates include shared domain ownership, component dependency maps, ER/CRUD views, key sequence diagrams, and state machines.",
         "- If requirements describe actors, permissions, mutable commands, lifecycle states, cross-actor visibility, or external side effects, assign a design artifact responsibility for an Operational Behavior Model before implementation planning. This may be a standalone docs/design/ artifact or an explicit section in a relevant design/detailed design artifact.",
-        "- Set owns_operation_flow: true only for the design artifact assigned to define that model. The other documents refer to it by dependency and must not recreate it.",
+        *([
+            "- Set owns_operation_flow: true only for the design artifact assigned to define that model. The other documents refer to it by dependency and must not recreate it.",
+        ] if assign_behavior_ownership else []),
         "- The Operational Behavior Model is design-time source of truth, not an E2E test artifact. It must define actor/action/state/outcome obligations so implementation cannot omit them and tests can be generated from them later.",
         "- For actor-facing operations on object-specific or parameterized surfaces, the Operational Behavior Model must also define how the actor reaches the operation surface (entry/list/parent surface, visible navigation affordance, or equivalent trigger). Direct deep links or lower-layer API access are not sufficient design contracts.",
         *(
@@ -1280,8 +1296,10 @@ def _build_plan_init_prompt(
         '      "output": "docs/.../file.md",',
         '      "title": "Document Title",',
         '      "depends_on": [{"id": "node:id", "relation": "derives_from", "semantic": "governance"}],',
-        '      "behavior_owners": ["stable-specification-id"],',
-        '      "owns_operation_flow": false,',
+        *([
+            '      "behavior_owners": ["stable-specification-id"],',
+            '      "owns_operation_flow": false,',
+        ] if assign_behavior_ownership else []),
         '      "conventions": [{"targets": ["node:id"], "reason": "release-blocking constraint"}]',
         '      "modules": ["module_name_1", "module_name_2"]',
         "    }",
@@ -1533,6 +1551,7 @@ def _append_wave_config_retry_feedback(
 
 def _invoke_and_parse_wave_config(
     ai_command: str, base_prompt: str, *, max_retries: int = DEFAULT_PLAN_INIT_MAX_RETRIES,
+    include_behavior_ownership: bool = True,
     validate: Callable[[dict[str, list[dict[str, Any]]]], None] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Invoke the AI for a wave_config with a bounded parse-feedback retry loop.
@@ -1556,7 +1575,7 @@ def _invoke_and_parse_wave_config(
             )
         try:
             raw = generator_module._invoke_ai_command(ai_command, prompt)
-            wave_config = _parse_wave_config_output(raw)
+            wave_config = _parse_wave_config_output(raw, include_behavior_ownership=include_behavior_ownership)
             if validate is not None:
                 validate(wave_config)
             return wave_config
@@ -1569,7 +1588,9 @@ def _invoke_and_parse_wave_config(
     raise last_error
 
 
-def _parse_wave_config_output(raw_output: str) -> dict[str, list[dict[str, Any]]]:
+def _parse_wave_config_output(
+    raw_output: str, *, include_behavior_ownership: bool = True,
+) -> dict[str, list[dict[str, Any]]]:
     """Parse an AI command's stdout into a validated wave_config mapping.
 
     AI backends frequently wrap structured output in noise: markdown code
@@ -1601,7 +1622,9 @@ def _parse_wave_config_output(raw_output: str) -> dict[str, list[dict[str, Any]]
             continue
 
         try:
-            artifacts = _load_wave_artifacts({"wave_config": payload})
+            artifacts = _load_wave_artifacts(
+                {"wave_config": payload}, include_behavior_ownership=include_behavior_ownership,
+            )
         except ValueError as exc:
             last_error = exc
             continue

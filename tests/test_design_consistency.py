@@ -20,7 +20,7 @@ DENY = "The test expects the importer to reject a file with a header and no rows
 EXPECTED = "The test expects the importer to accept a file with a header and no rows."
 
 
-def _project(tmp_path: Path, *, managed: bool = True) -> Path:
+def _project(tmp_path: Path, *, managed: bool | None = True) -> Path:
     config = {
         "project": {"name": "importer"},
         "ai_command": "fake-ai",
@@ -212,7 +212,7 @@ def test_different_conditions_or_exact_input_do_not_conflict(tmp_path, condition
 
 
 def test_legacy_migration_keeps_original_text_and_blocks_implementation(tmp_path, monkeypatch):
-    project = _project(tmp_path, managed=False)
+    project = _project(tmp_path, managed=None)
     owner_text, consumer_text = _document(ALLOW), _document(DENY)
     owner = _write(project, OWNER, owner_text)
     consumer = _write(project, CONSUMER, consumer_text)
@@ -379,7 +379,7 @@ def test_fresh_consumer_must_reach_owner_via_dependency(tmp_path):
 
 
 def test_new_plan_retries_forward_owner_dependency(tmp_path, monkeypatch):
-    project = _project(tmp_path, managed=False)
+    project = _project(tmp_path, managed=None)
     _write(project, "docs/requirements/import.md", "---\ncodd:\n  node_id: req:import\n  type: requirement\n---\n\n# Import requirements\n")
     config = load_project_config(project)
     valid = config["wave_config"]
@@ -553,6 +553,107 @@ def test_unmanaged_implement_bypasses_strict_wave_checks(tmp_path, monkeypatch, 
             GreenfieldPipeline(task_lister=list_tasks)._stage_implement(project, {}, {})
 
 
+@pytest.mark.parametrize(("key", "value"), [("behavior_owners", []), ("owns_operation_flow", False)])
+def test_planned_ownership_alone_activates_implementation_check(tmp_path, monkeypatch, key, value):
+    project = _project(tmp_path, managed=None)
+    config = load_project_config(project)
+    config["wave_config"]["2"][0][key] = value
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+    _write(project, OWNER, _document(ALLOW))
+    _write(project, CONSUMER, _document(EXPECTED))
+    monkeypatch.setattr(
+        "codd.implementer.Implementer.run_implement",
+        lambda *_args, **_kwargs: pytest.fail("implementation started"),
+    )
+
+    result = CliRunner().invoke(main, [
+        "implement", "--design", "design:import", "--output", "src", "--no-contract-gate",
+        "--path", str(project),
+    ])
+
+    assert result.exit_code == 1
+    assert f"{OWNER}: missing codd-behavior declarations" in result.output
+    assert f"{CONSUMER}: missing codd-behavior declarations" in result.output
+
+
+@pytest.fixture
+def opted_out_with_declarations(tmp_path):
+    project = _project(tmp_path)
+    config = load_project_config(project)
+    config["generate"]["design_consistency"] = False
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+    _write(project, OWNER, _document(ALLOW, _block(ALLOW, "accept", owner=True)))
+    _write(project, CONSUMER, _document(DENY, _block(DENY, "reject")))
+    return project
+
+
+@pytest.mark.parametrize("entrypoint", ["generate", "implement", "chunk", "greenfield"])
+def test_explicit_opt_out_bypasses_automatic_design_checks(
+    opted_out_with_declarations, monkeypatch, capsys, entrypoint,
+):
+    project = opted_out_with_declarations
+    if entrypoint == "generate":
+        result = CliRunner().invoke(main, [
+            "generate", "--all-waves", "--no-contract-gate", "--path", str(project),
+        ])
+        assert result.exit_code == 0, result.output
+        assert "0 generated, 2 skipped" in result.output
+        output = result.output
+    elif entrypoint == "implement":
+        def run_implement(*_args, **_kwargs):
+            raise ValueError("AI command failed: exit code 3")
+
+        monkeypatch.setattr("codd.implementer.Implementer.run_implement", run_implement)
+        result = CliRunner().invoke(main, [
+            "implement", "--design", "design:import", "--output", "src", "--no-contract-gate",
+            "--path", str(project),
+        ])
+        assert result.exit_code == 1
+        assert "AI command failed: exit code 3" in result.output
+        output = result.output
+    elif entrypoint == "chunk":
+        from codd.cli import _run_chunked_implementation
+
+        monkeypatch.setattr("codd.cli._chunked_task_and_steps", lambda *_: ("task", ["step"]))
+        monkeypatch.setattr(
+            "codd.implementer.chunked_runner.ChunkedRunner.run_steps", lambda *_: "implementation started",
+        )
+        assert _run_chunked_implementation(
+            project_root=project, task_id="task", ai_cmd=None, chunk_size=1, timeout_per_chunk=1, history=None,
+        ) == "implementation started"
+        output = capsys.readouterr().out
+    else:
+        def list_tasks(_):
+            raise RuntimeError("implementation started")
+
+        messages = []
+        pipeline = GreenfieldPipeline(task_lister=list_tasks, echo=messages.append)
+        with pytest.raises(RuntimeError, match="implementation started"):
+            pipeline._stage_implement(project, {}, {})
+        output = "\n".join(messages)
+
+    assert "case declarations:" not in output
+
+
+def test_explicit_design_commands_still_check_opted_out_project(opted_out_with_declarations, monkeypatch):
+    project = opted_out_with_declarations
+    cli = CliRunner()
+    path_args = ["--path", str(project)]
+    result = cli.invoke(main, ["generate", "--check-design", *path_args])
+    assert result.exit_code == 1
+    assert f"{OWNER}:5 (accept) conflicts with {CONSUMER}:5 (reject)" in result.output
+
+    def extract(_command, prompt):
+        assert f"Planned specification ids owned here: {[SPEC]}" in prompt
+        return _block(ALLOW, "accept", owner=True)
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", extract)
+    result = cli.invoke(main, ["generate", "--reconcile-design", "design:import", "--force", *path_args])
+    assert result.exit_code == 1
+    assert f"Behavior declarations written to {OWNER}" in result.output
+    assert f"{OWNER}:5 (accept) conflicts with {CONSUMER}:5 (reject)" in result.output
+
+
 @pytest.mark.parametrize(
     ("scenario", "counts"),
     [
@@ -605,3 +706,18 @@ def test_full_design_check_reports_comparison_counts(tmp_path, monkeypatch, scen
     assert expected in output
     for label, count in zip(("documents", "owned specifications", "case declarations", "cross-document cases"), counts):
         assert f"{label}: {count}" in output
+
+
+def test_explicit_opt_out_ignores_malformed_leftover_ownership_keys(opted_out_with_declarations):
+    project = opted_out_with_declarations
+    config = load_project_config(project)
+    config["wave_config"]["1"][0]["behavior_owners"] = "not-a-list"
+    config["wave_config"]["2"][0]["owns_operation_flow"] = "yes"
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+
+    result = CliRunner().invoke(main, [
+        "generate", "--all-waves", "--no-contract-gate", "--path", str(project),
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert "0 generated, 2 skipped" in result.output

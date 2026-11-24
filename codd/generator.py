@@ -23,6 +23,7 @@ from codd.design_consistency import (
     CONTRACT_GUIDANCE,
     DesignConsistencyError,
     StrictDesignLoader,
+    design_consistency_disabled,
     enforce_design_consistency,
     has_other_operation_flow_owner,
     is_behavior_document,
@@ -899,7 +900,10 @@ def reconcile_design_artifact(
 ) -> Path:
     """Extract quote-backed declarations from ONE existing document without rewriting it."""
     config = _load_project_config(project_root)
-    artifacts = [item for item in _load_wave_artifacts(config) if is_behavior_document(item.output)]
+    artifacts = [
+        item for item in _load_wave_artifacts(config, include_behavior_ownership=True)
+        if is_behavior_document(item.output)
+    ]
     matches = [item for item in artifacts if item.node_id == node_id]
     if len(matches) != 1:
         raise ValueError(f"expected one planned design or test document for {node_id!r}")
@@ -983,7 +987,7 @@ def reconcile_design_artifact(
     # Retain the evidence even on RED. The command never resolves a conflict by
     # choosing a winner or altering the source passages.
     try:
-        enforce_design_consistency(project_root, config)
+        enforce_design_consistency(project_root, config, required=True)
     except DesignConsistencyError as exc:
         raise ValueError(f"Behavior declarations written to {artifact.output}.\n{exc}") from exc
     return path
@@ -1048,7 +1052,11 @@ def _body_max_retries(config: dict[str, Any]) -> int:
     return DEFAULT_BODY_MAX_RETRIES
 
 
-def _load_wave_artifacts(config: dict[str, Any]) -> list[WaveArtifact]:
+def _load_wave_artifacts(
+    config: dict[str, Any], *, include_behavior_ownership: bool | None = None,
+) -> list[WaveArtifact]:
+    if include_behavior_ownership is None:
+        include_behavior_ownership = not design_consistency_disabled(config)
     wave_config = config.get("wave_config")
     if not isinstance(wave_config, dict) or not wave_config:
         raise ValueError(
@@ -1077,16 +1085,19 @@ def _load_wave_artifacts(config: dict[str, Any]) -> list[WaveArtifact]:
                     f"wave_config[{wave_key!r}] entry is missing required fields: {', '.join(missing)}"
                 )
 
-            owners = entry.get("behavior_owners")
-            if "behavior_owners" in entry and (
-                not isinstance(owners, list)
-                or any(not isinstance(item, str) or not item.strip() for item in owners)
-                or len(set(owners)) != len(owners)
-            ):
-                raise ValueError(f"{entry['output']}: behavior_owners must be a list of unique ids")
-            owns_operation_flow = entry.get("owns_operation_flow")
-            if "owns_operation_flow" in entry and not isinstance(owns_operation_flow, bool):
-                raise ValueError(f"{entry['output']}: owns_operation_flow must be true or false")
+            owners = None
+            owns_operation_flow = None
+            if include_behavior_ownership:
+                owners = entry.get("behavior_owners")
+                if "behavior_owners" in entry and (
+                    not isinstance(owners, list)
+                    or any(not isinstance(item, str) or not item.strip() for item in owners)
+                    or len(set(owners)) != len(owners)
+                ):
+                    raise ValueError(f"{entry['output']}: behavior_owners must be a list of unique ids")
+                owns_operation_flow = entry.get("owns_operation_flow")
+                if "owns_operation_flow" in entry and not isinstance(owns_operation_flow, bool):
+                    raise ValueError(f"{entry['output']}: owns_operation_flow must be true or false")
 
             artifacts.append(
                 WaveArtifact(

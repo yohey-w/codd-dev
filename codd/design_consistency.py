@@ -135,6 +135,11 @@ def consistency_required(config: dict[str, Any]) -> bool:
     return isinstance(generate, dict) and generate.get("design_consistency") is True
 
 
+def design_consistency_disabled(config: dict[str, Any]) -> bool:
+    generate = config.get("generate")
+    return isinstance(generate, dict) and generate.get("design_consistency") is False
+
+
 def is_managed_behavior_document(
     config: dict[str, Any],
     output: str,
@@ -143,7 +148,7 @@ def is_managed_behavior_document(
     project_root: Path | None = None,
     content: str | None = None,
 ) -> bool:
-    if not is_behavior_document(output):
+    if design_consistency_disabled(config) or not is_behavior_document(output):
         return False
     if consistency_required(config) or planned:
         return True
@@ -397,7 +402,7 @@ def enforce_design_consistency(
         return None
     if not config.get("wave_config"):
         return DesignConsistencySummary(0, 0, 0, 0) if complete else None
-    wave_artifacts = _load_wave_artifacts(config)
+    wave_artifacts = _load_wave_artifacts(config, include_behavior_ownership=True)
     artifacts = [artifact for artifact in wave_artifacts if is_behavior_document(artifact.output)]
     documents: list[tuple[WaveArtifact, str | None]] = []
     candidate_path = candidate[0] if candidate else None

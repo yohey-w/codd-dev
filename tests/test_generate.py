@@ -255,6 +255,26 @@ def test_unmanaged_generation_prompts_match_legacy_bytes(tmp_path, mock_ai_cli):
     ]
 
 
+def test_explicitly_disabled_generation_prompts_match_legacy_bytes(tmp_path, mock_ai_cli):
+    project = _setup_project(tmp_path)
+    config = yaml.safe_load(CoDD_YAML)
+    config["generate"] = {"design_consistency": False}
+    # Stale metadata and an existing declaration must not change the design prompt.
+    config["wave_config"]["2"][0].update(behavior_owners=["spec"], owns_operation_flow=True)
+    (project / "codd/codd.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    system_design = project / "docs/design/system_design.md"
+    system_design.parent.mkdir(parents=True)
+    system_design.write_text("# Old design\n\n```codd-behavior\nowns: {}\ncases: []\n```\n", encoding="utf-8")
+
+    generate_wave(project, 1)
+    generate_wave(project, 2, force=True)
+
+    # Captured from d943740 with the same project and mocked AI responses.
+    assert hashlib.sha256(mock_ai_cli[2]["input"].encode("utf-8")).hexdigest() == (
+        "460ff884952052ae7d29c16566970d3e3bde1fd9c031527072bc03466aac816a"
+    )
+
+
 def test_managed_generation_prompt_covers_each_listed_convention(tmp_path, monkeypatch):
     project = _setup_project(tmp_path)
     config_path = project / "codd/codd.yaml"
