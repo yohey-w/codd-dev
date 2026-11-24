@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codd-dev"
-version = "3.45.0"
+version = "3.45.1"
 description = "CoDD: Coherence-Driven Development — cross-artifact change impact analysis"
 readme = "README.md"
 license = "MIT"
@@ -89,3 +89,4 @@ packages = ["codd"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "skills" = "codd/_skills"
+"codd_plugins" = "codd_plugins"
