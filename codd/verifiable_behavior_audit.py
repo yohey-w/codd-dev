@@ -35,6 +35,11 @@ from codd.operational_e2e_audit import (
 from codd.path_safety import require_project_path, resolve_project_path
 
 VB_AUDIT_CONTRACT_VERSION = "verifiable-behavior-audit/v1"
+VB_BLOCKER_SCOPE_GUIDANCE = (
+    "Only add a blocked marker when this task's own outputs are responsible for the behavior "
+    "and it genuinely cannot be tested yet. Do not declare behaviors that belong to other "
+    "modules or other tests blocked."
+)
 
 # First-cell id pattern: `VB-` followed by an alphanumeric id body. Header
 # rows ("#", "ID", "検証可能ビヘイビア", ...) and separator rows never match.
@@ -474,6 +479,7 @@ class VBAuditRow:
     blocker_evidence: list[str] = field(default_factory=list)
     suggested_next_action: str = ""
     declared_scenarios: str = ""
+    marker_conflict: bool = False
 
 
 @dataclass
@@ -907,6 +913,7 @@ def render_vb_contract(
             "genuinely cannot be tested yet) must exist. A declared id left with "
             "no credible covering test is an incomplete test task, not a passing "
             "one.",
+            VB_BLOCKER_SCOPE_GUIDANCE,
         ]
     )
     if extra_guidance and extra_guidance.strip():
@@ -946,6 +953,7 @@ def build_vb_coverage_audit(
         "blocked": blocked,
         "uncovered": uncovered,
         "orphan_vb_markers": len(orphans),
+        "marker_conflicts": sum(row.marker_conflict for row in rows),
     }
     return VBAuditReport(
         version=VB_AUDIT_CONTRACT_VERSION,
@@ -966,8 +974,15 @@ def write_vb_coverage_audit(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_format == "json":
+        payload = asdict(report)
+        for row in payload["rows"]:
+            if row["marker_conflict"]:
+                row["marker_conflict_files"] = {
+                    "covers": row["matched_tests"],
+                    "blocked": row["blocker_evidence"],
+                }
         output_path.write_text(
-            json.dumps(asdict(report), indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
     elif output_format == "md":
         output_path.write_text(render_vb_coverage_audit_markdown(report), encoding="utf-8")
@@ -979,6 +994,7 @@ def write_vb_coverage_audit(
 def render_vb_coverage_audit_markdown(report: VBAuditReport) -> str:
     """Render the VB coverage audit report as Markdown."""
 
+    conflicts = report.summary.get("marker_conflicts", 0)
     lines = [
         "# Verifiable Behavior Coverage Audit",
         "",
@@ -988,33 +1004,37 @@ def render_vb_coverage_audit_markdown(report: VBAuditReport) -> str:
         f"- Blocked by explicit blocker marker: {report.summary['blocked']}",
         f"- Uncovered: {report.summary['uncovered']}",
         f"- Orphan vb markers: {report.summary['orphan_vb_markers']}",
+    ]
+    columns = ["VB", "Description", "Source Doc", "Status", "Evidence", "Next Action"]
+    if conflicts:
+        lines.append(f"- Covers/blocked marker conflicts (included in blocked): {conflicts}")
+        columns.append("Marker Conflict")
+    lines.extend([
         "",
         "## Behavior Matrix",
-        "| VB | Description | Source Doc | Status | Evidence | Next Action |",
-        "| --- | --- | --- | --- | --- | --- |",
-    ]
+        "| " + " | ".join(columns) + " |",
+        "| " + " | ".join(["---"] * len(columns)) + " |",
+    ])
     for row in report.rows:
-        evidence = ", ".join(row.matched_tests) if row.matched_tests else ""
+        covers = ", ".join(row.matched_tests)
+        blocked_files = ", ".join(row.blocker_evidence)
+        evidence = covers
         if row.blocker_evidence:
             blocker_text = f"blocker: {row.blocker_reason}"
             if row.blocker_details:
                 blocker_text += f" ({row.blocker_details})"
-            blocker = ", ".join(row.blocker_evidence)
-            evidence = f"{evidence}; {blocker_text}: {blocker}" if evidence else f"{blocker_text}: {blocker}"
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    _md_cell(row.vb_id),
-                    _md_cell(row.description),
-                    _md_cell(row.source_doc),
-                    _md_cell(row.coverage_status),
-                    _md_cell(evidence or "-"),
-                    _md_cell(row.suggested_next_action),
-                ]
-            )
-            + " |"
-        )
+            evidence = f"{evidence}; {blocker_text}: {blocked_files}" if evidence else f"{blocker_text}: {blocked_files}"
+        cells = [
+            row.vb_id,
+            row.description,
+            row.source_doc,
+            row.coverage_status,
+            evidence or "-",
+            row.suggested_next_action,
+        ]
+        if conflicts:
+            cells.append(f"covers: {covers}; blocked: {blocked_files}" if row.marker_conflict else "-")
+        lines.append("| " + " | ".join(_md_cell(cell) for cell in cells) + " |")
     if report.orphan_vb_markers:
         lines.extend(
             [
@@ -1281,6 +1301,7 @@ def format_gap_feedback(rows: Sequence[VBAuditRow]) -> str:
         "broken. If no such test exists, create or extend a real test FIRST, then mark it.",
         "If a behavior genuinely cannot be tested yet, add an explicit "
         "`codd: blocked vb=<ID> reason=<short_reason>` marker instead — never leave it silently uncovered.",
+        VB_BLOCKER_SCOPE_GUIDANCE,
         "",
         "Uncovered verifiable behaviors:",
     ]
@@ -1358,6 +1379,17 @@ def run_implement_coverage_gate(
 
     for orphan in report.orphan_vb_markers:
         emit_error(orphan.message)
+    if report.summary["marker_conflicts"]:
+        echo(
+            f"Test coverage gate: {report.summary['marker_conflicts']} covers/blocked marker conflict(s) "
+            "(project-wide, counted as blocked)."
+        )
+        for row in report.rows:
+            if row.marker_conflict:
+                echo(
+                    f"  {row.vb_id} — covers: {', '.join(row.matched_tests)}; "
+                    f"blocked: {', '.join(row.blocker_evidence)}. {row.suggested_next_action}"
+                )
     if relevant:
         emit_error(
             f"Test coverage gate FAILED: {len(relevant)} of {report.summary['vb_count']} "
@@ -1369,6 +1401,7 @@ def run_implement_coverage_gate(
         emit_error(
             "Add a covering test with a `codd: covers vb=<ID>` marker, declare an explicit "
             "`codd: blocked vb=<ID> reason=...` marker, or opt out with --no-coverage-gate."
+            f" {VB_BLOCKER_SCOPE_GUIDANCE}"
         )
         return False
 
@@ -1489,6 +1522,14 @@ def _audit_behavior(
         status = "uncovered"
         next_action = "Create or extend a test with a `codd: covers vb=` marker."
 
+    # Keep blocker precedence for consumers that enforce acceptance or execution.
+    marker_conflict = bool(matched and matching_blockers)
+    if marker_conflict:
+        next_action = (
+            "Remove stale blocked markers if the covering tests prove this behavior. "
+            "Otherwise, correct the covers markers to match what the tests prove."
+        )
+
     return VBAuditRow(
         vb_id=behavior.vb_id,
         description=behavior.description,
@@ -1500,6 +1541,7 @@ def _audit_behavior(
         blocker_evidence=sorted({item.path for item in matching_blockers}),
         suggested_next_action=next_action,
         declared_scenarios=behavior.declared_scenarios,
+        marker_conflict=marker_conflict,
     )
 
 

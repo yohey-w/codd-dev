@@ -13,8 +13,13 @@ uncovered (a false-RED) for three independent reasons, each guarded here:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
+from click.testing import CliRunner
+
+from codd.cli import main
 from codd.verifiable_behavior_audit import (
     build_vb_coverage_audit,
     format_gap_feedback,
@@ -302,6 +307,233 @@ def test_blocked_is_distinct_from_covered(tmp_path):
     assert report.summary["uncovered"] == 0
     statuses = {row.vb_id: row.coverage_status for row in report.rows}
     assert statuses == {"VB-01": "covered", "VB-02": "blocked"}
+
+
+@pytest.fixture
+def conflicting_vb_project(tmp_path):
+    _canonical_strategy(
+        tmp_path,
+        "| VB-01 | covered only |\n| VB-02 | blocked only |\n| VB-03 | conflicting markers |\n",
+    )
+    _write(tmp_path / "tests/test_covers.py", "# codd: covers vb=VB-01 vb=03\n")
+    _write(tmp_path / "tests/test_external.py", "# codd: blocked vb=VB-02 reason=external_dependency\n")
+    _write(tmp_path / "tests/test_blocked.py", "# codd: blocked vb=VB-3 reason=stale\n")
+    return tmp_path
+
+
+def test_audit_reports_marker_conflict_in_rows_and_files(conflicting_vb_project):
+    project = conflicting_vb_project
+    with (project / "docs/test/test_strategy.md").open("a", encoding="utf-8") as doc:
+        doc.write("| VB-04 | no marker |\n")
+
+    report = build_vb_coverage_audit(project)
+    assert [row.coverage_status for row in report.rows] == ["covered", "blocked", "blocked", "uncovered"]
+    assert [report.summary[key] for key in ("covered", "blocked", "uncovered")] == [1, 2, 1]
+    assert report.summary["marker_conflicts"] == 1
+    assert [row.marker_conflict for row in report.rows] == [False, False, True, False]
+    conflict = report.rows[2]
+    assert conflict.matched_tests == ["tests/test_covers.py"]
+    assert conflict.blocker_evidence == ["tests/test_blocked.py"]
+    assert conflict.suggested_next_action == (
+        "Remove stale blocked markers if the covering tests prove this behavior. "
+        "Otherwise, correct the covers markers to match what the tests prove."
+    )
+
+    for output_format in ("md", "json"):
+        result = CliRunner().invoke(main, ["test", "audit", "--path", str(project), "--format", output_format])
+        assert result.exit_code == 0, result.output
+        assert not result.stderr_bytes
+        assert result.stdout_bytes == (
+            "Verifiable behavior audit: 4 behavior(s), 1 covered, 2 blocked, 1 uncovered, "
+            f"0 orphan vb marker(s): docs/test/vb-coverage-audit.{output_format}\n"
+            "1 covers/blocked marker conflict(s) included in blocked.\n"
+        ).encode("utf-8")
+
+    markdown = (project / "docs/test/vb-coverage-audit.md").read_text(encoding="utf-8")
+    assert "Covers/blocked marker conflicts (included in blocked): 1" in markdown
+    assert "| VB | Description | Source Doc | Status | Evidence | Next Action | Marker Conflict |" in markdown
+    row_text = next(line for line in markdown.splitlines() if line.startswith("| VB-03 |"))
+    assert row_text == (
+        "| VB-03 | conflicting markers | docs/test/test_strategy.md | blocked | "
+        "tests/test_covers.py; blocker: stale: tests/test_blocked.py | "
+        f"{conflict.suggested_next_action} | covers: tests/test_covers.py; blocked: tests/test_blocked.py |"
+    )
+    # Rows without a conflict keep the extra column empty in the same table.
+    other_rows = [
+        line for line in markdown.splitlines()
+        if line.startswith("| VB-") and not line.startswith("| VB-03 |")
+    ]
+    assert len(other_rows) == 3
+    assert all(line.endswith(" | - |") for line in other_rows)
+
+    payload = json.loads((project / "docs/test/vb-coverage-audit.json").read_text(encoding="utf-8"))
+    assert payload["summary"] == {
+        "vb_count": 4,
+        "covered": 1,
+        "blocked": 2,
+        "uncovered": 1,
+        "orphan_vb_markers": 0,
+        "marker_conflicts": 1,
+    }
+    conflict_payload = payload["rows"][2]
+    assert conflict_payload["marker_conflict"] is True
+    assert conflict_payload == {
+        "vb_id": "VB-03",
+        "description": "conflicting markers",
+        "source_doc": "docs/test/test_strategy.md",
+        "coverage_status": "blocked",
+        "matched_tests": ["tests/test_covers.py"],
+        "blocker_reason": "stale",
+        "blocker_details": "",
+        "blocker_evidence": ["tests/test_blocked.py"],
+        "suggested_next_action": conflict.suggested_next_action,
+        "declared_scenarios": "",
+        "marker_conflict": True,
+        "marker_conflict_files": {"covers": ["tests/test_covers.py"], "blocked": ["tests/test_blocked.py"]},
+    }
+    for row in (payload["rows"][0], payload["rows"][1], payload["rows"][3]):
+        assert row["marker_conflict"] is False
+        assert "marker_conflict_files" not in row
+
+
+def test_audit_without_marker_conflicts_preserves_legacy_output(tmp_path):
+    _canonical_strategy(tmp_path, "| VB-01 | covered only |\n| VB-02 | blocked only |\n| VB-03 | no marker |\n")
+    _write(tmp_path / "tests/test_covers.py", "# codd: covers vb=VB-01\n")
+    _write(tmp_path / "tests/test_external.py", "# codd: blocked vb=VB-02 reason=external_dependency\n")
+    _write(tmp_path / "tests/test_orphan.py", "# codd: covers vb=VB-99\n")
+
+    # Capture from the same fixture under 126f427. The expectations are static so
+    # the regression still runs in a source installation without a Git checkout.
+    for output_format in ("md", "json"):
+        result = CliRunner().invoke(main, ["test", "audit", "--path", str(tmp_path), "--format", output_format])
+        assert result.exit_code == 0, result.output
+        assert not result.stderr_bytes
+        assert result.stdout_bytes == (
+            "Verifiable behavior audit: 3 behavior(s), 1 covered, 1 blocked, 1 uncovered, "
+            f"1 orphan vb marker(s): docs/test/vb-coverage-audit.{output_format}\n"
+        ).encode("utf-8")
+
+    assert (tmp_path / "docs/test/vb-coverage-audit.md").read_bytes() == (
+        b"# Verifiable Behavior Coverage Audit\n\n"
+        b"- Contract: verifiable-behavior-audit/v1\n"
+        b"- Verifiable behaviors: 3\n"
+        b"- Covered by `codd: covers vb=` marker: 1\n"
+        b"- Blocked by explicit blocker marker: 1\n"
+        b"- Uncovered: 1\n"
+        b"- Orphan vb markers: 1\n\n"
+        b"## Behavior Matrix\n"
+        b"| VB | Description | Source Doc | Status | Evidence | Next Action |\n"
+        b"| --- | --- | --- | --- | --- | --- |\n"
+        b"| VB-01 | covered only | docs/test/test_strategy.md | covered | tests/test_covers.py | "
+        b"Run the covering test(s) and keep the marker in sync on refactor. |\n"
+        b"| VB-02 | blocked only | docs/test/test_strategy.md | blocked | "
+        b"blocker: external_dependency: tests/test_external.py | "
+        b"Resolve the explicit blocker, then replace the blocker marker with a covers marker. |\n"
+        b"| VB-03 | no marker | docs/test/test_strategy.md | uncovered | - | "
+        b"Create or extend a test with a `codd: covers vb=` marker. |\n\n"
+        b"## Orphan VB Markers\n"
+        b"These markers reference a VB id that no test document declares; declare the behavior or fix the marker.\n\n"
+        b"| Test | VB | Marker |\n"
+        b"| --- | --- | --- |\n"
+        b"| tests/test_orphan.py | VB-99 | covers |\n"
+    )
+
+    payload = (tmp_path / "docs/test/vb-coverage-audit.json").read_bytes()
+    summary_field = b',\n    "marker_conflicts": 0\n'
+    row_field = b',\n      "marker_conflict": false\n'
+    assert payload.count(summary_field) == 1
+    assert payload.count(row_field) == 3
+    legacy_payload = payload.replace(summary_field, b"\n").replace(row_field, b"\n")
+    expected_payload = {
+        "version": "verifiable-behavior-audit/v1",
+        "summary": {"vb_count": 3, "covered": 1, "blocked": 1, "uncovered": 1, "orphan_vb_markers": 1},
+        "rows": [
+            {
+                "vb_id": "VB-01",
+                "description": "covered only",
+                "source_doc": "docs/test/test_strategy.md",
+                "coverage_status": "covered",
+                "matched_tests": ["tests/test_covers.py"],
+                "blocker_reason": "",
+                "blocker_details": "",
+                "blocker_evidence": [],
+                "suggested_next_action": "Run the covering test(s) and keep the marker in sync on refactor.",
+                "declared_scenarios": "",
+            },
+            {
+                "vb_id": "VB-02",
+                "description": "blocked only",
+                "source_doc": "docs/test/test_strategy.md",
+                "coverage_status": "blocked",
+                "matched_tests": [],
+                "blocker_reason": "external_dependency",
+                "blocker_details": "",
+                "blocker_evidence": ["tests/test_external.py"],
+                "suggested_next_action": (
+                    "Resolve the explicit blocker, then replace the blocker marker with a covers marker."
+                ),
+                "declared_scenarios": "",
+            },
+            {
+                "vb_id": "VB-03",
+                "description": "no marker",
+                "source_doc": "docs/test/test_strategy.md",
+                "coverage_status": "uncovered",
+                "matched_tests": [],
+                "blocker_reason": "",
+                "blocker_details": "",
+                "blocker_evidence": [],
+                "suggested_next_action": "Create or extend a test with a `codd: covers vb=` marker.",
+                "declared_scenarios": "",
+            },
+        ],
+        "orphan_vb_markers": [{"path": "tests/test_orphan.py", "vb_id": "VB-99", "marker_kind": "covers"}],
+    }
+    assert legacy_payload == (json.dumps(expected_payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+
+
+@pytest.mark.parametrize("uncovered", [False, True])
+def test_gate_reports_marker_conflict_without_changing_verdict(conflicting_vb_project, uncovered):
+    project = conflicting_vb_project
+    if uncovered:
+        with (project / "docs/test/test_strategy.md").open("a", encoding="utf-8") as doc:
+            doc.write("| VB-04 | no marker |\n")
+    _write(project / "tests/test_orphan.py", "# codd: covers vb=VB-99\n")
+    output, errors, retries = [], [], []
+
+    passed = run_implement_coverage_gate(
+        project,
+        design_node=None,
+        output_paths=["tests/"],
+        config={"test_coverage": {"max_retries": 1}},
+        rerun=retries.append,
+        echo=output.append,
+        echo_error=errors.append,
+    )
+
+    assert passed is (not uncovered)
+    assert len(retries) == int(uncovered)
+    assert any("[orphan_vb_marker]" in error and "VB-99" in error for error in errors)
+    assert any("coverage gate FAILED" in error for error in errors) is uncovered
+    assert any("1 covers/blocked marker conflict(s)" in line for line in output)
+    detail = next(line for line in output if "VB-03" in line)
+    assert "covers: tests/test_covers.py" in detail
+    assert "blocked: tests/test_blocked.py" in detail
+    assert "Remove stale blocked markers" in detail and "correct the covers markers" in detail
+
+
+def test_gate_failure_and_gap_feedback_limit_blocked_marker_scope(tmp_path):
+    _canonical_strategy(tmp_path, "| VB-01 | no marker |\n")
+    errors = []
+    assert not run_implement_coverage_gate(
+        tmp_path, design_node=None, output_paths=["tests/"], echo_error=errors.append
+    )
+    gate_guidance = next(error for error in errors if "reason=..." in error)
+    gap_feedback = format_gap_feedback(build_vb_coverage_audit(tmp_path).uncovered_rows)
+
+    for guidance in (gate_guidance, gap_feedback):
+        assert "this task's own outputs are responsible for the behavior" in guidance
+        assert "Do not declare behaviors that belong to other modules or other tests blocked." in guidance
 
 
 def test_existing_bounded_retry_still_drives_real_coverage(tmp_path):

@@ -132,6 +132,7 @@ from codd.operational_e2e_audit import (
 from codd.path_safety import resolve_project_path
 from codd.verifiable_behavior_audit import (
     VBAuditReport,
+    VB_BLOCKER_SCOPE_GUIDANCE,
     _VB_TOKEN_RE,
     _normalize_vb_id,
     load_verifiable_behaviors,
@@ -710,6 +711,7 @@ def build_authenticity_report(
                                 "claim is unobservable (a generated marker with no parseable test "
                                 "proves nothing). Generate a real test case the runner executes, or "
                                 "use `codd: blocked vb=… reason=…` if it genuinely cannot run yet."
+                                f" {VB_BLOCKER_SCOPE_GUIDANCE}"
                             ),
                         )
                     )
@@ -758,6 +760,7 @@ def build_authenticity_report(
                             f"SKIPPED/TODO/disabled test{label} — a skipped test proves nothing. "
                             "Enable the test (or use `codd: blocked vb=… reason=…` if it genuinely "
                             "cannot run yet)."
+                            f" {VB_BLOCKER_SCOPE_GUIDANCE}"
                         ),
                     )
                 )
