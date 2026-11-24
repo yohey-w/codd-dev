@@ -14,9 +14,10 @@ import shutil
 import sys
 import time
 import warnings
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import codd.generator as generator_module
+from codd.ai_usage import note_implement_routing, usage_session
 from codd.generator import DependencyDocument, _load_project_config, _normalize_conventions
 from codd.languages import resolve_assertion_guidance, resolve_test_framework_guidance
 from codd.project_types import ProjectCapabilities
@@ -822,6 +823,43 @@ def _confusable_check_enabled(config: dict[str, Any]) -> bool:
     return True
 
 
+@dataclass
+class _DependencyArtifactCoverage:
+    unmatched_plan_task: bool = False
+    incomplete_near_dependencies: bool = False
+    incomplete_distant_artifacts: int = 0
+
+
+_IMPLEMENT_ROUTE_REASONS = {
+    "explicit_override": "An explicit implementation command takes precedence.",
+    "incomplete_existing_output": "An existing output file is not shown in full.",
+    "existing_output_over_budget": "Existing outputs exceed the prompt limit even though their full content is shown.",
+    "unmatched_plan_task": "The task could not be matched to an approved task in the derived plan.",
+    "incomplete_dependency_artifact": "An immediate dependency is unresolved or a near dependency artifact is not shown in full.",
+    "non_concrete_output": "The task does not name concrete output files.",
+    "complete_context": "The prompt shows existing outputs and near dependency artifacts in full for the declared files.",
+    "incomplete_output_rejected": "The existing-file replacement guard exhausted its retries.",
+    "no_usable_output": "The command exhausted its retries without usable output.",
+    "syntax_gate": "Syntax or confusable-character validation exhausted its retries.",
+}
+
+
+def _log_implement_route(
+    spec: ImplementSpec, route: str, reason: str, *, incomplete_distant_artifacts: int, fallback: bool = False,
+) -> None:
+    detail = _IMPLEMENT_ROUTE_REASONS[reason]
+    print(
+        f"[codd] implement route={route} reason={reason} fallback={str(fallback).lower()} "
+        f"design={spec.design_node!r} incomplete_distant_artifacts={incomplete_distant_artifacts} {detail}",
+        file=sys.stderr,
+    )
+    note_implement_routing(
+        route=route, reason=reason, detail=detail, fallback=fallback,
+        design_node=spec.design_node, outputs=spec.expected_outputs or spec.output_paths,
+        incomplete_distant_artifacts=incomplete_distant_artifacts,
+    )
+
+
 class Implementer:
     def __init__(
         self,
@@ -910,6 +948,7 @@ class Implementer:
             self.ai_command,
             command_name="implement",
         )
+        one_shot_command = (_ai_command_from_config(self.config, "implement_one_shot") or "").strip()
         language = _normalize_implementation_language((self.config.get("project") or {}).get("language"))
         syntax_gate = _syntax_gate_enabled(self.config)
         confusable_check = _confusable_check_enabled(self.config)
@@ -926,6 +965,123 @@ class Implementer:
         syntax_gate_max_attempts = _syntax_gate_max_attempts(self.config) if gate_active else 1
         no_usable_file_retries = _no_usable_file_retries(self.config)
 
+        command = resolved_ai_command
+        route: str | None = None
+        incomplete_distant_artifacts = 0
+
+        def select_command(
+            coverage: _ExistingOutputCoverage, dependency_coverage: _DependencyArtifactCoverage,
+        ) -> tuple[str, bool]:
+            nonlocal command, route, incomplete_distant_artifacts
+            if route is None:
+                from codd.greenfield.pipeline import _declared_output_is_file_path
+
+                route = "standard"
+                if self.ai_command is not None:
+                    reason = "explicit_override"
+                elif coverage.incomplete_paths or (
+                    impl_steps_context is not None and impl_steps_context.existing_files.has_unreadable_files
+                ):
+                    reason = "incomplete_existing_output"
+                elif coverage.total_characters > coverage.limit:
+                    reason = "existing_output_over_budget"
+                elif dependency_coverage.unmatched_plan_task:
+                    reason = "unmatched_plan_task"
+                elif dependency_coverage.incomplete_near_dependencies:
+                    reason = "incomplete_dependency_artifact"
+                elif not all(map(_declared_output_is_file_path, spec.expected_outputs or spec.output_paths)):
+                    reason = "non_concrete_output"
+                else:
+                    command = one_shot_command
+                    route, reason = "one_shot", "complete_context"
+                incomplete_distant_artifacts = dependency_coverage.incomplete_distant_artifacts
+                _log_implement_route(spec, route, reason, incomplete_distant_artifacts=incomplete_distant_artifacts)
+            return command, route == "one_shot"
+
+        def generate(current_feedback: str | None, coverage: _ExistingOutputCoverage) -> list[Path]:
+            return self._run_implementation_generation_attempt(
+                spec=spec,
+                design_context=design_context,
+                dependency_documents=dependency_documents,
+                combined_conventions=combined_conventions,
+                coding_principles=coding_principles,
+                design_md_content=design_md_content,
+                screen_flow_content=screen_flow_content,
+                screen_flow_routes=screen_flow_routes,
+                impl_steps_context=impl_steps_context,
+                capabilities=capabilities,
+                resolved_ai_command=resolved_ai_command,
+                language=language,
+                syntax_gate=syntax_gate,
+                confusable_check=confusable_check,
+                current_feedback=current_feedback,
+                existing_output_coverage=coverage,
+                select_command=select_command if one_shot_command else None,
+            )
+
+        def run_attempts() -> tuple[list[Path], _ExistingOutputCoverage]:
+            return self._run_implementation_attempts(
+                generate, spec, feedback, syntax_gate_max_attempts, no_usable_file_retries,
+            )
+
+        if not one_shot_command:
+            generated_files, existing_output_coverage = run_attempts()
+        else:
+            from codd.cli import CoddCLIError
+
+            fallback_reason = None
+            with usage_session(self.config, self.project_root):
+                try:
+                    generated_files, existing_output_coverage = run_attempts()
+                except CoddCLIError as exc:
+                    # The retry loop chains its terminal errors from these
+                    # existing output rejections.
+                    fallback_reason = {
+                        _IncompleteExistingOutputError: "incomplete_output_rejected",
+                        NoUsableGeneratedFiles: "no_usable_output",
+                        ImplementSyntaxGateError: "syntax_gate",
+                    }.get(type(exc.__cause__))
+                    if route != "one_shot" or fallback_reason is None:
+                        raise
+                    route, command = "standard", resolved_ai_command
+                    _log_implement_route(
+                        spec, route, fallback_reason,
+                        incomplete_distant_artifacts=incomplete_distant_artifacts, fallback=True,
+                    )
+                if fallback_reason is not None:
+                    # Start the standard route with the caller's feedback and its
+                    # original retry budgets. A failure here is the task's error.
+                    generated_files, existing_output_coverage = run_attempts()
+
+        if existing_output_coverage.incomplete_files:
+            generated_destinations = {path.resolve() for path in generated_files}
+            generated_file_ids = {_existing_output_file_id(path) for path in generated_files}
+            omitted = [
+                entry for entry, (path, file_id) in existing_output_coverage.incomplete_files.items()
+                if path not in generated_destinations
+                and (file_id is None or file_id not in generated_file_ids)
+            ]
+            if omitted:
+                print(
+                    f"[codd] Warning: no accepted output for incompletely shown existing files: {', '.join(omitted)}",
+                    file=sys.stderr,
+                )
+
+        return ImplementationResult(
+            design_node=spec.design_node,
+            output_paths=[_resolve_output_path(self.project_root, item) for item in spec.output_paths],
+            generated_files=generated_files,
+        )
+
+    def _run_implementation_attempts(
+        self,
+        generate: Callable[[str | None, _ExistingOutputCoverage], list[Path]],
+        spec: ImplementSpec,
+        feedback: str | None,
+        syntax_gate_max_attempts: int,
+        no_usable_file_retries: int,
+    ) -> tuple[list[Path], _ExistingOutputCoverage]:
+        """Run one command through the existing output-correction budgets."""
         current_feedback = feedback
         # Keep caller feedback plus the latest finding from each gate. Replacing
         # each gate's entry avoids accumulating an entire failed-attempt history.
@@ -941,24 +1097,7 @@ class Implementer:
         while True:
             existing_output_coverage = _ExistingOutputCoverage()
             try:
-                generated_files = self._run_implementation_generation_attempt(
-                    spec=spec,
-                    design_context=design_context,
-                    dependency_documents=dependency_documents,
-                    combined_conventions=combined_conventions,
-                    coding_principles=coding_principles,
-                    design_md_content=design_md_content,
-                    screen_flow_content=screen_flow_content,
-                    screen_flow_routes=screen_flow_routes,
-                    impl_steps_context=impl_steps_context,
-                    capabilities=capabilities,
-                    resolved_ai_command=resolved_ai_command,
-                    language=language,
-                    syntax_gate=syntax_gate,
-                    confusable_check=confusable_check,
-                    current_feedback=current_feedback,
-                    existing_output_coverage=existing_output_coverage,
-                )
+                return generate(current_feedback, existing_output_coverage), existing_output_coverage
             except _IncompleteExistingOutputError as exc:
                 # Allow one correction for an unnecessary replacement without
                 # spending the general retry budget. Honor explicit retry opt-out.
@@ -1009,27 +1148,6 @@ class Implementer:
                 retry_feedback["syntax"] = exc.feedback_message()
                 current_feedback = _combine_feedback(feedback, "\n\n".join(retry_feedback.values()))
                 continue
-            break
-
-        if existing_output_coverage.incomplete_files:
-            generated_destinations = {path.resolve() for path in generated_files}
-            generated_file_ids = {_existing_output_file_id(path) for path in generated_files}
-            omitted = [
-                entry for entry, (path, file_id) in existing_output_coverage.incomplete_files.items()
-                if path not in generated_destinations
-                and (file_id is None or file_id not in generated_file_ids)
-            ]
-            if omitted:
-                print(
-                    f"[codd] Warning: no accepted output for incompletely shown existing files: {', '.join(omitted)}",
-                    file=sys.stderr,
-                )
-
-        return ImplementationResult(
-            design_node=spec.design_node,
-            output_paths=[_resolve_output_path(self.project_root, item) for item in spec.output_paths],
-            generated_files=generated_files,
-        )
 
     def _run_implementation_generation_attempt(
         self,
@@ -1050,6 +1168,7 @@ class Implementer:
         confusable_check: bool,
         current_feedback: str | None,
         existing_output_coverage: _ExistingOutputCoverage,
+        select_command: Callable[[_ExistingOutputCoverage, _DependencyArtifactCoverage], tuple[str, bool]] | None = None,
     ) -> list[Path]:
         """One prompt -> invoke -> write pass; the file-output contract boundary.
 
@@ -1072,6 +1191,7 @@ class Implementer:
         through.
         """
         skip_generation = _skip_generation_enabled(design_context.content)
+        dependency_coverage = _DependencyArtifactCoverage() if select_command is not None else None
         # Snapshot coverage while building the prompt, before an agent can
         # change disk state (file-writing capture restores its baseline later).
         prompt = _build_implementation_prompt(
@@ -1089,8 +1209,12 @@ class Implementer:
             capabilities=capabilities,
             project_root=self.project_root,
             existing_output_coverage=existing_output_coverage,
+            dependency_coverage=dependency_coverage,
         )
         prompt = generator_module._inject_lexicon(prompt, self.project_root)
+        one_shot = False
+        if select_command is not None and dependency_coverage is not None:
+            resolved_ai_command, one_shot = select_command(existing_output_coverage, dependency_coverage)
         try:
             raw_output = generator_module._invoke_ai_command(
                 resolved_ai_command,
@@ -1098,6 +1222,10 @@ class Implementer:
                 project_root=self.project_root,
             )
         except ValueError as exc:
+            # The invocation layer prefixes execution errors before including
+            # CLI diagnostics, which can themselves contain "empty output".
+            if one_shot and str(exc).startswith(("AI command failed:", "AI command not found:")):
+                raise
             # skip_generation is the ONLY 0-file success: check it BEFORE
             # treating empty output as no-usable, so a skip doc never triggers a
             # retry. Empty output AND file-writing-agent "no (readable) file
@@ -1784,6 +1912,7 @@ class _ExistingStepFile:
 class _ExistingStepFiles:
     by_path: dict[Path, _ExistingStepFile] = field(default_factory=dict)
     by_file_id: dict[tuple[int, int], _ExistingStepFile] = field(default_factory=dict)
+    has_unreadable_files: bool = False
 
     def add(
         self, path: Path, resolved: Path, file_id: tuple[int, int] | None, snapshot: _ExistingStepFile,
@@ -1892,6 +2021,7 @@ def _render_existing_expected_output_content(
                 file_stat = os.fstat(source.fileno())
             content = raw_content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
         except (OSError, UnicodeDecodeError):
+            existing_files.has_unreadable_files = True
             continue
         blocks.append(f"=== EXISTING FILE: {relative_path} ===\n{content.rstrip()}\n=== END EXISTING FILE ===")
         file_id = file_stat.st_dev, file_stat.st_ino
@@ -2676,7 +2806,8 @@ def _tier1_signature_entry(project_root: Path, path_text: str) -> str:
 
 
 def _render_tier1_dependency_artifacts(
-    project_root: Path, tier1_paths: list[str], budget: int
+    project_root: Path, tier1_paths: list[str], budget: int,
+    *, incomplete: set[str] | None = None,
 ) -> tuple[list[str], int]:
     """Render Tier-1 (distance-1) producer files under the SIGNATURE-FLOOR invariant.
 
@@ -2688,23 +2819,7 @@ def _render_tier1_dependency_artifacts(
     than silently capped (Root B was precisely the silent distance-1 truncation).
     Returns ``(sections, bytes_used)``.
     """
-    files: list[tuple[str, str]] = []
-    for raw in tier1_paths:
-        text = str(raw).strip()
-        if not text:
-            continue
-        candidate = project_root / text
-        try:
-            _ensure_inside_project(project_root, candidate, "dependency artifact")
-        except ValueError:
-            continue
-        if not candidate.is_file():
-            continue
-        try:
-            content = candidate.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        files.append((text, content))
+    files = list(_read_dependency_artifacts(project_root, tier1_paths, incomplete))
     if not files:
         return [], 0
 
@@ -2716,6 +2831,8 @@ def _render_tier1_dependency_artifacts(
         ]
         return sections, full_total
 
+    if incomplete is not None:
+        incomplete.update(text for text, _ in files)
     sections = [_tier1_signature_entry(project_root, text) for text, _content in files]
     used = sum(len(section) for section in sections)
     LOGGER.info(
@@ -2730,10 +2847,37 @@ def _render_tier1_dependency_artifacts(
     return sections, used
 
 
+def _read_dependency_artifacts(
+    project_root: Path, output_paths: list[str], incomplete: set[str] | None,
+) -> Iterator[tuple[str, str]]:
+    """Yield readable producer files and record omitted paths when requested."""
+    for raw in output_paths:
+        text = str(raw).strip()
+        if not text:
+            continue
+        candidate = project_root / text
+        try:
+            _ensure_inside_project(project_root, candidate, "dependency artifact")
+        except ValueError:
+            pass
+        else:
+            if candidate.is_file():
+                try:
+                    content = candidate.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    pass
+                else:
+                    yield text, content
+                    continue
+        if incomplete is not None:
+            incomplete.add(text)
+
+
 def _render_dependency_artifact_files(
     project_root: Path,
     output_paths: list[str],
     budget: int = DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT,
+    *, incomplete: set[str] | None = None,
 ) -> str | None:
     """Render producer files' on-disk content as budget-capped prompt blocks.
 
@@ -2747,21 +2891,7 @@ def _render_dependency_artifact_files(
     renderer (remaining producers beyond distance-1) run on the budget Tier-1 left.
     """
     sections: list[str] = []
-    for raw in output_paths:
-        text = str(raw).strip()
-        if not text:
-            continue
-        candidate = project_root / text
-        try:
-            _ensure_inside_project(project_root, candidate, "dependency artifact")
-        except ValueError:
-            continue
-        if not candidate.is_file():
-            continue
-        try:
-            content = candidate.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
+    for text, content in _read_dependency_artifacts(project_root, output_paths, incomplete):
         if budget <= 0 or len(content) > budget:
             # This file (and, once the budget is spent, every later file)
             # overflows the full-content budget: degrade rather than truncate a
@@ -2769,6 +2899,8 @@ def _render_dependency_artifact_files(
             # name list). Spend the remaining budget so subsequent files degrade
             # too.
             sections.append(_dependency_artifact_degraded_entry(project_root, text))
+            if incomplete is not None:
+                incomplete.add(text)
             budget = 0
             continue
         budget -= len(content)
@@ -2785,6 +2917,7 @@ def _dependency_artifact_files_context(
     config: dict[str, Any],
     dependency_documents: list[DependencyDocument],
     spec: "ImplementSpec | None" = None,
+    *, coverage: _DependencyArtifactCoverage | None = None,
 ) -> str | None:
     """On-disk content of the files this task's producers wrote — the binding
     import contract (PART 2).
@@ -2858,8 +2991,17 @@ def _dependency_artifact_files_context(
 
     spec_design = _canonical(spec.design_node) if spec is not None else ""
     spec_outputs = {str(o).strip() for o in (spec.expected_outputs if spec else []) if str(o).strip()}
+    # Direct invocations can name concrete outputs without a derived spec. Keep
+    # the existing prompt's design-wide union in that case, but require an
+    # output match before routing to a command that relies on prompt coverage.
+    matching_outputs = (
+        {project_root / path for path in (spec.expected_outputs or spec.output_paths)}
+        if coverage is not None and spec is not None else set()
+    )
+    matched_task = False
 
-    for _cache_path, record in iter_derived_task_records(project_root):
+    plan_records = iter_derived_task_records(project_root)
+    for _cache_path, record in plan_records:
         for task in record.tasks:
             if not task.approved:
                 continue
@@ -2876,6 +3018,10 @@ def _dependency_artifact_files_context(
             if spec is not None and _canonical(task.source_design_doc) == spec_design:
                 if not spec_outputs or spec_outputs.intersection(normalized_outputs):
                     current_task_deps.extend(task.dependencies)
+                    if matching_outputs and matching_outputs.intersection(
+                        project_root / path for path in normalized_outputs
+                    ):
+                        matched_task = True
             # Legacy design-elaboration closure (byte-identical to the shipped path).
             if _owns_dependency(task.source_design_doc):
                 for output in normalized_outputs:
@@ -2887,7 +3033,8 @@ def _dependency_artifact_files_context(
     task_graph_outputs: list[str] = []
     tg_seen: set[str] = set()
     visited: set[str] = set()
-    frontier = [d for d in dict.fromkeys(current_task_deps) if d]
+    direct_dependencies = [d for d in dict.fromkeys(current_task_deps) if d]
+    frontier = direct_dependencies
     while frontier:
         nxt: list[str] = []
         for dep_id in frontier:
@@ -2934,7 +3081,7 @@ def _dependency_artifact_files_context(
     # (the first BFS level), NOT the transitive closure.
     tier1_declared: list[str] = []
     t1_seen: set[str] = set()
-    for dep_id in dict.fromkeys(dep for dep in current_task_deps if dep):
+    for dep_id in direct_dependencies:
         for output in outputs_by_id.get(dep_id, ()):
             if output not in t1_seen:
                 t1_seen.add(output)
@@ -2958,18 +3105,30 @@ def _dependency_artifact_files_context(
             tier2_set.add(output)
             tier2.append(output)
 
-    if not tier1 and not tier2:
-        return None
-
     # Two-tier budget: Tier-1 (distance-1) full content, degrading to signatures on
     # overflow but NEVER below (with telemetry); Tier-2 gets the remaining budget
     # under the existing full→names→paths ladder. Byte-identical to the shipped
     # single-ladder path when Tier-1 is empty (edge-less/no-observed shape).
+    incomplete_tier1 = set() if coverage is not None else None
+    incomplete_tier2 = set() if coverage is not None else None
     tier1_sections, tier1_used = _render_tier1_dependency_artifacts(
-        project_root, tier1, DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT
+        project_root, tier1, DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT, incomplete=incomplete_tier1,
     )
     remaining = max(0, DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT - tier1_used)
-    tier2_block = _render_dependency_artifact_files(project_root, tier2, remaining)
+    tier2_block = _render_dependency_artifact_files(project_root, tier2, remaining, incomplete=incomplete_tier2)
+
+    if coverage is not None and spec is not None:
+        # Existing-output coverage handles files this task owns. Leave the
+        # rendered prompt and its budget accounting intact for all commands.
+        own_outputs = {project_root / path for path in (*spec.expected_outputs, *spec.output_paths)}
+        coverage.unmatched_plan_task = bool(plan_records) and not matched_task
+        coverage.incomplete_near_dependencies = (
+            any(dep_id not in outputs_by_id for dep_id in direct_dependencies)
+            or any(project_root / path not in own_outputs for path in incomplete_tier1 or ())
+        )
+        coverage.incomplete_distant_artifacts = len(
+            {project_root / path for path in incomplete_tier2 or ()} - own_outputs
+        )
 
     parts = list(tier1_sections)
     if tier2_block:
@@ -3079,6 +3238,7 @@ def _build_implementation_prompt(
     capabilities: ProjectCapabilities | None = None,
     project_root: Path | None = None,
     existing_output_coverage: _ExistingOutputCoverage | None = None,
+    dependency_coverage: _DependencyArtifactCoverage | None = None,
 ) -> str:
     # Default to UI-capable so untyped/legacy (web-ish) projects keep emitting the
     # UI wrapper guidance exactly as before; only an explicit no-UI capability set
@@ -3427,7 +3587,9 @@ def _build_implementation_prompt(
         )
 
     dependency_artifact_context = (
-        _dependency_artifact_files_context(project_root, config, dependency_documents, spec)
+        _dependency_artifact_files_context(
+            project_root, config, dependency_documents, spec, coverage=dependency_coverage,
+        )
         if project_root is not None
         else None
     )

@@ -9,6 +9,9 @@ project:
 # a narrow, closed problem; do not make it the standing default.
 ai_command: "claude --print --permission-mode bypassPermissions --dangerously-skip-permissions --model claude-opus-4-8 --effort xhigh --tools \"\" --strict-mcp-config"
 ai_commands:
+  # Optional command for tasks with concrete outputs and full prompt coverage
+  # of existing outputs and Tier 1 dependencies. Explicit --ai-cmd takes precedence.
+  implement_one_shot: null
   plan_derive: null
   design_doc_extract: null
   criteria_expand: null
