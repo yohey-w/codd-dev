@@ -218,18 +218,19 @@ def test_generate_uses_dependency_documents_as_ai_context(tmp_path, mock_ai_cli)
     assert "CRITICAL ERROR" in prompt
     assert "release-blocking constraint" in prompt
     assert "Start directly with the document content." in prompt
-    assert "Treat requirement documents as the source of truth" in prompt
-    assert "Before finalizing, self-check that every capability and constraint mentioned in the depends_on documents is represented" in prompt
+    assert "Treat requirements as the source of truth" in prompt
+    assert "Cite the relevant owning section" in prompt
     assert "Use concrete tool names, framework names, services, table names, endpoints, thresholds, counts, and timelines" in prompt
     assert "Never use vague placeholders such as '推奨なし', '要検討', or 'TBD'." in prompt
     assert "Non-negotiable conventions:" in prompt
     assert "These are release-blocking constraints." in prompt
-    assert "Explicitly state how the document complies with each convention and invariant listed below." in prompt
+    assert "Where an applicable constraint is defined elsewhere, cite its owning section" in prompt
+    assert "For a control assigned here, give its concrete design and verification measure." in prompt
+    assert "tenant isolation in security/data model sections" in prompt
     assert "Targets: db:rls_policies" in prompt
     assert "Targets: db_table:audit_logs" in prompt
     assert "Global invariant" in prompt
     assert "Artifact invariant" in prompt
-    assert "tenant isolation in security/data model sections" in prompt
     assert "--- BEGIN DEPENDENCY docs/requirements/lms_requirements_v2.0.md (req:lms-requirements-v2.0) ---" in prompt
     assert "Tenant isolation and audit logging are mandatory." in prompt
     assert "Prefer a structure that covers: Overview, Acceptance Criteria, Failure Criteria, E2E Test Generation Meta-Prompt." in prompt

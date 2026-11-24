@@ -75,7 +75,7 @@ class ParsedFrontmatter:
     exception: BaseException | None = None
 
 
-def parse_frontmatter(text: str) -> ParsedFrontmatter:
+def parse_frontmatter(text: str, *, yaml_loader: type[yaml.SafeLoader] = yaml.SafeLoader) -> ParsedFrontmatter:
     """Parse a ``---``-delimited YAML frontmatter block. Never raises."""
     stripped = text.lstrip(_BOM)
     lines = stripped.splitlines(keepends=True)
@@ -88,7 +88,7 @@ def parse_frontmatter(text: str) -> ParsedFrontmatter:
         raw = "".join(lines[1:index])
         body = "".join(lines[index + 1 :])
         try:
-            loaded = yaml.safe_load(raw)
+            loaded = yaml.load(raw, Loader=yaml_loader)
         except yaml.YAMLError as exc:
             return ParsedFrontmatter(
                 mapping={},

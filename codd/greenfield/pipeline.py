@@ -1224,7 +1224,24 @@ class GreenfieldPipeline:
         # repair so a coherent registry exists before implement — or fail
         # honestly at generate. Runs BEFORE implement by construction.
         self._enforce_generate_vb_registry_gate(project_root, options)
+        self._check_design_consistency(project_root)
         record["detail"] = f"{len(waves)} wave(s) generated"
+
+    def _check_design_consistency(self, project_root: Path) -> None:
+        from codd.config import load_project_config
+        from codd.design_consistency import enforce_design_consistency
+
+        try:
+            config = load_project_config(project_root)
+            enforce_design_consistency(
+                project_root,
+                config,
+                complete=True,
+            )
+        except FileNotFoundError:
+            return
+        except ValueError as exc:
+            raise StageError(str(exc)) from exc
 
     def _enforce_generate_vb_registry_gate(
         self, project_root: Path, options: dict[str, Any]
@@ -1393,6 +1410,9 @@ class GreenfieldPipeline:
     # ── stage: implement ────────────────────────────────────
 
     def _stage_implement(self, project_root: Path, record: dict[str, Any], options: dict[str, Any]) -> None:
+        # A resumed session can skip generation altogether. Always re-read
+        # design evidence before starting (or resuming) implementation tasks.
+        self._check_design_consistency(project_root)
         lister = self.task_lister or _default_task_lister
         tasks = list(lister(project_root))
         if not tasks:

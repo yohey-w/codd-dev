@@ -204,7 +204,7 @@ def test_plan_marks_only_first_wave_ready_when_no_outputs_exist(tmp_path):
     }
 
 
-def test_plan_init_prompt_mentions_detailed_design_wave(tmp_path, mock_plan_init_ai):
+def test_plan_init_prompt_assigns_owners_and_limits_extra_design_docs(tmp_path, mock_plan_init_ai):
     project = _setup_project(tmp_path, include_wave_config=False)
     _write_requirement(project)
 
@@ -212,7 +212,9 @@ def test_plan_init_prompt_mentions_detailed_design_wave(tmp_path, mock_plan_init
 
     prompt = mock_plan_init_ai[0]["input"]
     assert "docs/detailed_design/" in prompt
-    assert "Insert a dedicated detailed design wave" in prompt
+    assert "Module count alone does not justify another document" in prompt
+    assert "one owning design artifact" in prompt
+    assert "Set owns_operation_flow: true only" in prompt
     assert "Markdown + Mermaid" in prompt
     assert "shared domain ownership" in prompt
     assert "Operational Behavior Model before implementation planning" in prompt

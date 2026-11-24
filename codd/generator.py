@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 import re
 import subprocess  # noqa: F401 — kept: tests monkeypatch ``generator.subprocess.run``
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -19,8 +19,22 @@ from codd.ai_invoke import (
     resolve_ai_command,
 )
 from codd.config import load_project_config
+from codd.design_consistency import (
+    CONTRACT_GUIDANCE,
+    DesignConsistencyError,
+    StrictDesignLoader,
+    consistency_required,
+    enforce_design_consistency,
+    has_behavior_contract,
+    is_behavior_document,
+    is_behavior_owner_document,
+    parse_behavior_contract,
+    validate_document_role,
+    without_behavior_contract,
+)
 from codd.e2e_harness import resolve_e2e_harness
 from codd.languages import resolve_test_framework_guidance
+from codd.path_safety import resolve_project_path
 from codd.project_types import (
     ProjectCapabilities,
     effective_e2e_modality,
@@ -654,6 +668,8 @@ class WaveArtifact:
     depends_on: list[dict[str, Any]]
     conventions: list[dict[str, Any]]
     modules: list[str] = ()
+    behavior_owners: tuple[str, ...] | None = None
+    owns_operation_flow: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -709,6 +725,7 @@ def generate_wave(
             _generate_one_artifact(
                 artifact=artifact,
                 project_root=project_root,
+                config=config,
                 global_conventions=global_conventions,
                 depended_by_map=depended_by_map,
                 document_node_paths=document_node_paths,
@@ -729,6 +746,7 @@ def _generate_one_artifact(
     *,
     artifact: WaveArtifact,
     project_root: Path,
+    config: dict[str, Any],
     global_conventions: list[dict[str, Any]],
     depended_by_map: dict[str, list[dict[str, Any]]],
     document_node_paths: dict[str, Path],
@@ -747,30 +765,52 @@ def _generate_one_artifact(
     this helper's, so a scoped repair can overwrite exactly one doc.
     """
 
-    output_path = project_root / artifact.output
+    output_path = resolve_project_path(project_root, artifact.output)
+    if output_path is None:
+        raise ValueError(f"{artifact.output}: design output escapes the project")
+    managed = is_behavior_document(artifact.output) and (
+        consistency_required(config)
+        or artifact.behavior_owners is not None
+        or artifact.owns_operation_flow is not None
+        or (
+            output_path.is_file()
+            and has_behavior_contract(output_path.read_text(encoding="utf-8"))
+        )
+    )
     dependency_documents = _load_dependency_documents(
         project_root, artifact.depends_on, document_node_paths
     )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
     combined_conventions = deepcopy(global_conventions) + deepcopy(artifact.conventions)
-    content = _render_document(
-        artifact=artifact,
-        global_conventions=global_conventions,
-        depended_by=depended_by_map.get(artifact.node_id, []),
-        body=_generate_document_body(
+
+    def render(body: str) -> str:
+        return _render_document(
             artifact=artifact,
-            dependency_documents=dependency_documents,
-            conventions=combined_conventions,
-            ai_command=resolved_ai_command,
-            project_root=project_root,
-            feedback=feedback,
-            max_retries=body_max_retries,
-            capabilities=capabilities,
-            project_language=project_language,
-            layout_placement=layout_placement,
-        ),
+            global_conventions=global_conventions,
+            depended_by=depended_by_map.get(artifact.node_id, []),
+            body=body,
+        )
+
+    def check_candidate(body: str) -> None:
+        content = render(body)
+        validate_document_role(artifact, content, required=True)
+        enforce_design_consistency(project_root, config, candidate=(artifact.output, content))
+
+    body = _generate_document_body(
+        artifact=artifact,
+        dependency_documents=dependency_documents,
+        conventions=combined_conventions,
+        ai_command=resolved_ai_command,
+        project_root=project_root,
+        feedback=feedback,
+        max_retries=body_max_retries,
+        capabilities=capabilities,
+        project_language=project_language,
+        layout_placement=layout_placement,
+        behavior_contract=managed,
+        validate_body=check_candidate if managed else None,
     )
-    output_path.write_text(content, encoding="utf-8")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(render(body), encoding="utf-8")
     return GenerationResult(node_id=artifact.node_id, path=output_path, status="generated")
 
 
@@ -836,6 +876,7 @@ def regenerate_artifact(
     return _generate_one_artifact(
         artifact=artifact,
         project_root=project_root,
+        config=config,
         global_conventions=global_conventions,
         depended_by_map=depended_by_map,
         document_node_paths=document_node_paths,
@@ -846,6 +887,98 @@ def regenerate_artifact(
         layout_placement=layout_placement,
         feedback=feedback,
     )
+
+
+def reconcile_design_artifact(
+    project_root: Path, node_id: str, *, ai_command: str | None = None, force: bool = False,
+    feedback: str | None = None,
+) -> Path:
+    """Extract quote-backed declarations from ONE existing document without rewriting it."""
+    config = _load_project_config(project_root)
+    artifacts = [item for item in _load_wave_artifacts(config) if is_behavior_document(item.output)]
+    matches = [item for item in artifacts if item.node_id == node_id]
+    if len(matches) != 1:
+        raise ValueError(f"expected one planned design or test document for {node_id!r}")
+    artifact = matches[0]
+    path = resolve_project_path(project_root, artifact.output)
+    if path is None:
+        raise ValueError(f"{artifact.output}: design output escapes the project")
+    original = path.read_bytes().decode("utf-8")
+    source = without_behavior_contract(original)
+    if source != original and not force:
+        raise ValueError(f"{artifact.output}: declarations already exist. Use --force to refresh just the block.")
+
+    # Read the neighbor declarations, not their full prose. They let the model
+    # map different spellings to the same owner/surface and align concrete cases.
+    neighbors = {entry["id"] for entry in artifact.depends_on}
+    catalog: list[dict[str, Any]] = []
+    for item in artifacts:
+        if item.node_id == node_id or (
+            item.node_id not in neighbors and not set(item.modules).intersection(artifact.modules)
+        ):
+            continue
+        peer = resolve_project_path(project_root, item.output)
+        if peer is None or not peer.is_file():
+            continue
+        try:
+            contract = parse_behavior_contract(peer.read_text(encoding="utf-8"), item.output)
+        except ValueError:
+            continue  # Stale peer evidence is reported by the project check.
+        if contract is not None:
+            catalog.append({
+                "document": item.output,
+                "owns": list(contract.owns),
+                "cases": [
+                    {"spec": case.spec, "surface": case.key[0], "input_json": case.key[1],
+                     "conditions_json": case.key[2], "outcome": case.outcome}
+                    for case in contract.cases
+                ],
+            })
+
+    if not is_behavior_owner_document(artifact.output):
+        ownership = "Emit owns: {}. This document applies or tests upstream specifications. VB ids are separate."
+    elif artifact.behavior_owners is not None:
+        ownership = f"Planned specification ids owned here: {list(artifact.behavior_owners)}."
+    else:
+        ownership = "Use the document's assigned responsibilities and existing decisions to identify ownership."
+    base_prompt = (
+        f"Extract design behavior declarations from {artifact.output} ({artifact.node_id}).\n"
+        f"{CONTRACT_GUIDANCE}\n"
+        f"{ownership}\n"
+        "Keep the existing text as evidence. An opposing assertion in this document "
+        "must be preserved even if a neighboring document says otherwise. "
+        "Return only one codd-behavior fenced block, without editing the document.\n\n"
+        f"Prioritize these review questions before selecting other boundary cases:\n{feedback or '(none)'}\n\n"
+        f"Existing neighbor declarations:\n{yaml.safe_dump(catalog, allow_unicode=True)}\n"
+        f"--- BEGIN SOURCE {artifact.output} ---\n{source}\n--- END SOURCE ---\n"
+    )
+    command = _resolve_ai_command(config, ai_command, command_name="generate")
+    newline = "\r\n" if "\r\n" in source else "\n"
+    separator = newline * (0 if source.endswith(newline * 2) else 1 if source.endswith(newline) else 2)
+    prompt = base_prompt
+    retries = _body_max_retries(config)
+    for attempt in range(retries + 1):
+        block = _invoke_ai_command(command, prompt).strip()
+        try:
+            if not re.fullmatch(r"```codd-behavior[ \t]*\n(?:(?!^```)[\s\S])*\n```", block, flags=re.MULTILINE):
+                raise ValueError(f"{artifact.output}: expected one fenced codd-behavior block from AI")
+            updated = f"{source}{separator}{block.replace(chr(10), newline)}{newline}"
+            validate_document_role(artifact, updated, required=True)
+            break
+        except ValueError as exc:
+            if attempt == retries:
+                raise
+            prompt = f"{base_prompt}\nPrevious extraction rejected: {exc}\nReturn only the corrected codd-behavior block.\n"
+    if path.read_bytes().decode("utf-8") != original:
+        raise ValueError(f"{artifact.output}: document changed during extraction; run again")
+    path.write_bytes(updated.encode("utf-8"))
+    # Retain the evidence even on RED. The command never resolves a conflict by
+    # choosing a winner or altering the source passages.
+    try:
+        enforce_design_consistency(project_root, config)
+    except DesignConsistencyError as exc:
+        raise ValueError(f"Behavior declarations written to {artifact.output}.\n{exc}") from exc
+    return path
 
 
 def _enforce_vb_declaration_coherence(
@@ -936,6 +1069,17 @@ def _load_wave_artifacts(config: dict[str, Any]) -> list[WaveArtifact]:
                     f"wave_config[{wave_key!r}] entry is missing required fields: {', '.join(missing)}"
                 )
 
+            owners = entry.get("behavior_owners")
+            if "behavior_owners" in entry and (
+                not isinstance(owners, list)
+                or any(not isinstance(item, str) or not item.strip() for item in owners)
+                or len(set(owners)) != len(owners)
+            ):
+                raise ValueError(f"{entry['output']}: behavior_owners must be a list of unique ids")
+            owns_operation_flow = entry.get("owns_operation_flow")
+            if "owns_operation_flow" in entry and not isinstance(owns_operation_flow, bool):
+                raise ValueError(f"{entry['output']}: owns_operation_flow must be true or false")
+
             artifacts.append(
                 WaveArtifact(
                     wave=wave,
@@ -945,6 +1089,8 @@ def _load_wave_artifacts(config: dict[str, Any]) -> list[WaveArtifact]:
                     depends_on=_normalize_dependencies(entry.get("depends_on", [])),
                     conventions=_normalize_conventions(entry.get("conventions", [])),
                     modules=_normalize_modules(entry.get("modules", [])),
+                    behavior_owners=tuple(owners) if owners is not None else None,
+                    owns_operation_flow=owns_operation_flow,
                 )
             )
 
@@ -1088,23 +1234,36 @@ def _render_document(
     return f"---\n{frontmatter}---\n\n{body.rstrip()}\n"
 
 
-def _extract_operation_flow_contract(body: str) -> dict[str, Any] | None:
+def _extract_operation_flow_contract(body: str, *, strict: bool = False) -> dict[str, Any] | None:
     """Find a design-time operation_flow YAML block in a generated document body."""
+    found = None
     for match in re.finditer(r"```(?:yaml|yml)\s*\n(?P<body>.*?)\n```", body, flags=re.IGNORECASE | re.DOTALL):
+        yaml_body = match.group("body")
         try:
-            payload = yaml.safe_load(match.group("body")) or {}
-        except yaml.YAMLError:
+            loader = StrictDesignLoader if strict else yaml.SafeLoader
+            payload = yaml.load(yaml_body, Loader=loader) or {}
+        except (TypeError, yaml.YAMLError) as exc:
+            if strict and re.search(r"(?m)^\s*operation_flow\s*:", yaml_body):
+                raise ValueError(f"Invalid operation_flow YAML: {exc}") from exc
             continue
         if not isinstance(payload, dict):
             continue
-        flow = payload.get("operation_flow")
         codd_meta = payload.get("codd")
-        if flow is None and isinstance(codd_meta, dict):
-            flow = codd_meta.get("operation_flow")
-        normalized = normalize_operation_flow(flow, source="generated_document.operation_flow")
+        entries = [mapping["operation_flow"] for mapping in (payload, codd_meta)
+                   if isinstance(mapping, dict) and "operation_flow" in mapping]
+        if not entries:
+            continue
+        if strict and (found is not None or len(entries) > 1):
+            raise ValueError("Only one operation_flow body declaration is allowed")
+        flow = next((entry for entry in entries if entry is not None), None)
+        normalized = normalize_operation_flow(flow, source="generated_document.operation_flow", strict=strict)
         if normalized is not None:
-            return normalized
-    return None
+            if not strict:
+                return normalized
+            found = normalized
+        elif strict:
+            raise ValueError("operation_flow must be a mapping")
+    return found
 
 
 def extract_restoration_meta(body: str) -> dict[str, Any] | None:
@@ -1224,6 +1383,8 @@ def _generate_document_body(
     capabilities: ProjectCapabilities | None = None,
     project_language: str | None = None,
     layout_placement: str = "",
+    behavior_contract: bool = False,
+    validate_body: Callable[[str], None] | None = None,
 ) -> str:
     """Generate one document body with a bounded validation-feedback retry loop.
 
@@ -1242,17 +1403,23 @@ def _generate_document_body(
             feedback=current_feedback, capabilities=capabilities,
             project_language=project_language,
             layout_placement=layout_placement,
+            behavior_contract=behavior_contract,
         )
         prompt = _inject_lexicon(prompt, project_root)
         try:
-            return _sanitize_generated_body(
+            body = _sanitize_generated_body(
                 artifact.title,
                 _invoke_ai_command(ai_command, prompt),
                 output_path=artifact.output,
             )
+            if validate_body:
+                validate_body(body)
+            return body
         except ValueError as exc:
             if str(exc).startswith("AI command failed"):
                 raise  # infra failure: retrying the same broken command cannot help
+            if isinstance(exc, DesignConsistencyError) and not exc.retry_candidate:
+                raise
             last_error = exc
             current_feedback = _combine_retry_feedback(feedback, exc)
     assert last_error is not None
@@ -1297,6 +1464,7 @@ def _build_generation_prompt(
     capabilities: ProjectCapabilities | None = None,
     project_language: str | None = None,
     layout_placement: str = "",
+    behavior_contract: bool = False,
 ) -> str:
     if capabilities is None:
         capabilities = WEB_FALLBACK_CAPABILITIES
@@ -1367,8 +1535,8 @@ def _build_generation_prompt(
             "'Let me...', 'Now I have enough context...'). **Start directly with the document content.** "
             "Violating this instruction is a **CRITICAL ERROR** and breaks a release-blocking constraint."
         ),
-        "Treat requirement documents as the source of truth and reflect every feature, screen, workflow, API, integration, and operational rule they describe.",
-        "Before finalizing, self-check that every capability and constraint mentioned in the depends_on documents is represented in the document body.",
+        "Treat requirements as the source of truth. Cover the requirements assigned to this document.",
+        "Use dependencies for facts and existing decisions. Cite the relevant owning section and explain only how this document applies it. Omit unrelated capabilities and constraints.",
         "Use concrete tool names, framework names, services, table names, endpoints, thresholds, counts, and timelines wherever applicable.",
         "Never use vague placeholders such as '推奨なし', '要検討', or 'TBD'.",
         f"Prefer a structure that covers: {preferred_sections}.",
@@ -1388,8 +1556,19 @@ def _build_generation_prompt(
             ]
         )
 
-    if doc_type == "design":
+    if behavior_contract:
+        lines.extend(["", CONTRACT_GUIDANCE])
+        if not is_behavior_owner_document(artifact.output):
+            lines.append("Emit owns: {}. This document applies or tests upstream specifications. VB ids are separate.")
+        elif artifact.behavior_owners is not None:
+            lines.append(f"Specification ids owned here (exact list): {list(artifact.behavior_owners)}")
+    if doc_type == "design" and (not behavior_contract or artifact.owns_operation_flow):
         lines.extend(build_operational_behavior_model_block(capabilities))
+    if behavior_contract:
+        if artifact.owns_operation_flow:
+            lines.append("You own the assigned operational model. Emit operation_flow for the operations assigned here.")
+        else:
+            lines.append("Apply the operation_flow in its owning document. Cite its operation ids. Do not emit operation_flow here.")
 
     lines.extend(
         [
@@ -1427,11 +1606,9 @@ def _build_generation_prompt(
             [
                 "",
                 "Non-negotiable conventions:",
-                "- These are release-blocking constraints. Reflect them explicitly in the document body.",
-                "- Explicitly state how the document complies with each convention and invariant listed below.",
-                "- For security or access-control constraints, state the concrete controls in architecture, security, data, or workflow sections.",
-                "- For legal/privacy constraints, add explicit compliance or data-handling requirements.",
-                "- For SLA/performance constraints, include measurable thresholds in non-functional sections.",
+                "- These are release-blocking constraints. Describe the controls or measures this document owns.",
+                "- Where an applicable constraint is defined elsewhere, cite its owning section and explain the local consequence.",
+                "- For a control assigned here, give its concrete design and verification measure. Examples include tenant isolation in security/data model sections, authentication and audit events in access control, data handling for privacy, and measurable performance or SLA thresholds.",
             ]
         )
         for index, convention in enumerate(conventions, start=1):
@@ -1439,12 +1616,6 @@ def _build_generation_prompt(
             reason = str(convention.get("reason") or "").strip() or "(no reason provided)"
             lines.append(f"{index}. Targets: {targets or '(no explicit targets)'}")
             lines.append(f"   Reason: {reason}")
-
-        lines.extend(
-            [
-                "- Example reflections: tenant isolation in security/data model sections, auth requirements in access control, privacy rules in compliance, performance thresholds in non-functional requirements.",
-            ]
-        )
 
     lines.extend(
         [

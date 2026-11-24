@@ -19,6 +19,7 @@ from typing import Any, Callable, Iterator
 import codd.generator as generator_module
 from codd.ai_usage import note_implement_routing, usage_session
 from codd.generator import DependencyDocument, _load_project_config, _normalize_conventions
+from codd.design_consistency import enforce_design_consistency
 from codd.languages import resolve_assertion_guidance, resolve_test_framework_guidance
 from codd.project_types import ProjectCapabilities
 from codd.scanner import _extract_frontmatter, build_document_node_path_map
@@ -1290,6 +1291,7 @@ def implement_tasks(
 ) -> list[ImplementationResult]:
     project_root = Path(project_root).resolve()
     config = _load_project_config(project_root)
+    enforce_design_consistency(project_root, config, complete=True)
     if language:
         # Per-invocation language override (Issue #20, v-kato): mismatched
         # codd init --language doesn't force a full re-init; spec authors can

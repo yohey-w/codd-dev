@@ -3950,6 +3950,8 @@ def watch_cmd(project_path: str, debounce: int, background: bool, status: bool) 
     help="Override AI CLI command (defaults to codd.yaml ai_command or 'claude --print')",
 )
 @click.option("--feedback", default=None, help="Review feedback to address in this generation (from codd review)")
+@click.option("--reconcile-design", metavar="NODE", help="Extract behavior declarations from one existing wave document")
+@click.option("--check-design", is_flag=True, help="Check declarations in the complete existing wave document set")
 @click.option(
     "--no-contract-gate",
     is_flag=True,
@@ -3964,10 +3966,33 @@ def generate(
     ai_cmd: str | None,
     feedback: str | None,
     no_contract_gate: bool,
+    reconcile_design: str | None = None,
+    check_design: bool = False,
 ):
     """Generate CoDD documents for a specific wave (or all waves)."""
-    from codd.generator import generate_wave, _load_project_config
+    from codd.design_consistency import enforce_design_consistency
+    from codd.generator import generate_wave, _load_project_config, reconcile_design_artifact
 
+    if reconcile_design or check_design:
+        if all_waves or wave is not None or (reconcile_design and check_design):
+            raise click.UsageError("Choose one of --reconcile-design NODE, --check-design, --wave N or --all-waves.")
+        project_root = Path(path).resolve()
+        _require_codd_dir(project_root)
+        try:
+            if reconcile_design:
+                reviewed = reconcile_design_artifact(
+                    project_root, reconcile_design, ai_command=ai_cmd, force=force, feedback=feedback,
+                )
+                click.echo(f"Behavior declarations written to {reviewed.relative_to(project_root)}")
+            else:
+                config = _load_project_config(project_root)
+                if not config.get("wave_config"):
+                    raise ValueError("wave_config is missing")
+                enforce_design_consistency(project_root, config, complete=True, required=True)
+                click.echo("Declared design behaviors are consistent")
+        except (FileNotFoundError, ValueError) as exc:
+            raise click.ClickException(str(exc)) from exc
+        return
     if all_waves and wave is not None:
         raise click.BadOptionUsage("all_waves", "--all-waves cannot be used with --wave")
     if not all_waves and wave is None:
@@ -4028,6 +4053,10 @@ def generate(
             completed.append(wave_number)
             total_generated += generated
             total_skipped += skipped
+        try:
+            enforce_design_consistency(project_root, _load_project_config(project_root), complete=True)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
         click.echo(
             f"All waves complete ({len(completed)} wave(s)): "
             f"{total_generated} generated, {total_skipped} skipped"
@@ -5933,9 +5962,11 @@ def _run_chunked_implementation(
         raise ValueError("--task is required when chunked execution is enabled")
 
     import codd.generator as generator_module
+    from codd.design_consistency import enforce_design_consistency
     from codd.implementer.chunked_runner import ChunkedRunner
 
     config = _load_optional_project_config(project_root)
+    enforce_design_consistency(project_root, config, complete=True)
     if language:
         # Per-invocation language override (Issue #20, v-kato): align with
         # implement_tasks() so both code paths honour the CLI flag without
