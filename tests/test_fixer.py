@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -262,6 +263,14 @@ class TestPrepareFixAiCommand:
         result = _prepare_fix_ai_command(cmd)
         assert "document generator" not in result
         assert "code repair" in result
+
+    def test_replaces_inline_system_prompt_without_adding_a_duplicate(self):
+        cmd = "claude --print --system-prompt='You are a technical document generator.' --model opus"
+
+        argv = shlex.split(_prepare_fix_ai_command(cmd))
+
+        assert sum(arg.partition("=")[0] == "--system-prompt" for arg in argv) == 1
+        assert "code repair" in argv[argv.index("--system-prompt") + 1]
 
     def test_adds_system_prompt_for_print_mode(self):
         cmd = "claude --print --model opus"

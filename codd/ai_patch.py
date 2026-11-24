@@ -152,8 +152,9 @@ def prepare_fix_ai_command(
         if skip_next:
             skip_next = False
             continue
-        if tok == "--system-prompt":
-            skip_next = True
+        option, separator, _ = tok.partition("=")
+        if option == "--system-prompt":
+            skip_next = not separator
             has_system_prompt = True
             continue
         cleaned.append(tok)

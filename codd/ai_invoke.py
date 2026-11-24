@@ -263,6 +263,7 @@ def prepare_read_only_codex(command: str, safe_root: Path) -> str:
 
     cleaned: list[str] = []
     skip_next = False
+    default_flags = ("--skip-git-repo-check", "--ephemeral")
     flags_with_value = {"--sandbox", "-s", "--cd", "-C", "--add-dir"}
     banned_flags = {
         "--full-auto",
@@ -280,6 +281,8 @@ def prepare_read_only_codex(command: str, safe_root: Path) -> str:
             continue
         if part.startswith("--sandbox=") or part.startswith("--cd=") or part.startswith("--add-dir="):
             continue
+        if part in default_flags and part in cleaned:
+            continue
         cleaned.append(part)
 
     cleaned.extend([
@@ -287,9 +290,10 @@ def prepare_read_only_codex(command: str, safe_root: Path) -> str:
         "read-only",
         "--cd",
         safe_root.as_posix(),
-        "--skip-git-repo-check",
-        "--ephemeral",
     ])
+    for flag in default_flags:
+        if flag not in cleaned:
+            cleaned.append(flag)
     if prompt_arg is not None:
         cleaned.append(prompt_arg)
     return shlex.join(cleaned)

@@ -40,6 +40,8 @@ class PhenomenonAnalysis:
     surfaces: list[str] = field(default_factory=list)
     obligations: list[dict[str, Any]] = field(default_factory=list)
 
+    invocation_error: Exception | None = field(default=None, repr=False, compare=False)
+
     def is_ambiguous(self, threshold: float = 0.6) -> bool:
         return self.ambiguity_score >= threshold
 
@@ -72,7 +74,8 @@ def parse_phenomenon(
     """Parse a phenomenon string into a structured analysis via LLM.
 
     Falls back to ambiguity_score=1.0 + intent="unknown" when the LLM
-    is unavailable or returns malformed output.
+    is unavailable or returns malformed output. Callers can inspect
+    invocation_error to distinguish execution failures from analysis results.
     """
     if not phenomenon_text or not phenomenon_text.strip():
         return PhenomenonAnalysis()
@@ -88,8 +91,8 @@ def parse_phenomenon(
 
     try:
         raw = ai_invoke(prompt)
-    except Exception:  # noqa: BLE001 — LLM failures must not crash CLI
-        return PhenomenonAnalysis(raw_response="<ai_invoke_failed>")
+    except Exception as exc:  # noqa: BLE001 — LLM failures must not crash CLI
+        return PhenomenonAnalysis(raw_response="<ai_invoke_failed>", invocation_error=exc)
 
     return _coerce_analysis(raw)
 
