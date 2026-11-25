@@ -43,7 +43,7 @@ from codd.design_consistency import (
     without_behavior_contract,
 )
 from codd.e2e_harness import resolve_e2e_harness
-from codd.frontmatter import parse_frontmatter
+from codd.frontmatter import codd_block, parse_frontmatter
 from codd.languages import resolve_test_framework_guidance
 from codd.path_safety import resolve_project_path
 from codd.project_types import (
@@ -748,6 +748,16 @@ class _ReconciliationScopeError(ValueError):
         }
 
 
+_RECONCILIATION_GUIDANCE = (
+    "Earlier designs are authoritative, including what they leave undefined.\n"
+    "Replace behavior that needs missing support with the simplest behavior using only what earlier designs provide.\n"
+    "State provisional decisions in the body when requirements leave a choice open, and align boundary cases.\n"
+    "Clear resolved disagreements and do not report the same missing support again.\n"
+    "Keep missing support in unresolved only when an explicit requirement needs it.\n"
+    "Preserve that requirement and cite its source and relevant text in the unresolved quote from the body."
+)
+
+
 @dataclass
 class _DesignRewrite:
     before: str
@@ -756,6 +766,7 @@ class _DesignRewrite:
     selecting_scope: bool = False
     scope_response: dict[str, Any] | None = None
     proposal: dict[str, Any] | None = None
+    requirements: tuple[DependencyDocument, ...] = ()
 
     def audit_details(self) -> dict[str, Any]:
         scope = None
@@ -768,7 +779,8 @@ class _DesignRewrite:
         self, artifact: WaveArtifact, dependencies: list[DependencyDocument],
         ai_command: str, feedback: str | None, project_root: Path,
     ) -> str:
-        body = parse_frontmatter(self.before).body
+        original = parse_frontmatter(self.before, yaml_loader=StrictDesignLoader)
+        body = original.body
         start = len(body) - len(body.lstrip("\r\n"))
         end = max(start, len(body.rstrip("\r\n")))
         prefix = self.before.removesuffix(body) + body[:start]
@@ -781,6 +793,12 @@ class _DesignRewrite:
             source = body[start:end]
         numbered = "\n".join(f"{number}: {line}" for number, line in enumerate(lines, 1))
         context = "\n\n".join(f"{doc.path}:\n{doc.content}" for doc in dependencies)
+        dependency_paths = {doc.path for doc in dependencies}
+        requirements = "\n\n".join(
+            f"{doc.path}:\n{doc.content}" for doc in self.requirements if doc.path not in dependency_paths
+        )
+        if requirements:
+            context += f"\n\nRequirement documents:\n{requirements}"
         if self.scope is None:
             self.selecting_scope = True
             self.scope = self._select_scope(artifact, lines, len(prefix.splitlines()), numbered, context, ai_command)
@@ -789,13 +807,11 @@ class _DesignRewrite:
         prompt = _inject_lexicon(
             f"Reconcile the Markdown document at {artifact.output}.\nNode ID: {artifact.node_id}\n"
             f"Reported disagreements:\n{self.reasons}\n\nFixed dependency documents:\n{context}\n\n"
-            f"{feedback or ''}\n\n{CONTRACT_GUIDANCE}\n\n"
+            f"{feedback or ''}\n\n{CONTRACT_GUIDANCE}\n\n{_RECONCILIATION_GUIDANCE}\n\n"
             "Return the full Markdown body, preserving every line outside the approved edit scope verbatim. "
             "Within the approved lines, retain clauses unrelated to the disagreement. "
             "Keep the existing ownership and any declaration unrelated to these disagreements. "
-            "Keep explicit requirements. When requirements leave a choice open, state the provisional "
-            "decision in the body and record applicable boundary cases. No frontmatter, line numbers, "
-            "outer code fence, or commentary.\n"
+            "No frontmatter, line numbers, outer code fence, or commentary.\n"
             f"Lines allowed to be replaced or removed: {sorted(replace_lines)}\n"
             f"New lines may be inserted after these lines only (0 means before line 1): {sorted(insert_after)}\n\n"
             f"Original body (numbered for reference):\n{numbered}",
@@ -814,6 +830,13 @@ class _DesignRewrite:
                 self.proposal["violation"] = exc.audit_excerpt(lines, proposal)
             raise
         _validate_generated_body(artifact.title, updated, output_path=artifact.output)
+        if not original.error:
+            metadata = original.mapping if original.has_block else {"codd": {}}
+            codd_meta = codd_block(metadata, fallback_top_level=True)
+            assert codd_meta is not None
+            if _lift_operation_flow(codd_meta, updated, previous_body=body):
+                frontmatter = yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False)
+                prefix = f"---\n{frontmatter}---\n" + body[:start]
         return prefix + updated
 
     def _select_scope(
@@ -836,6 +859,7 @@ class _DesignRewrite:
         response = _invoke_ai_command(ai_command, (
             f"Select reconciliation edit locations in {artifact.output}.\n"
             f"Reported disagreements:\n{self.reasons}\n\nFixed dependency documents:\n{context}\n\n"
+            f"{_RECONCILIATION_GUIDANCE}\n\n"
             "Select only the individual lines that must change or be removed to resolve these disagreements, "
             "including affected table rows and codd-behavior declarations. Also select positions for any "
             "necessary new lines, such as the provisional decision and boundary declarations. Preserve all "
@@ -1002,11 +1026,12 @@ def generate_wave(
         if output_path.exists() and not force:
             results.append(GenerationResult(node_id=artifact.node_id, path=output_path, status="skipped"))
             continue
+        rejected: dict[str, str] = {}
         try:
-            result = generate_artifact(artifact=artifact, feedback=feedback)
+            result = generate_artifact(artifact=artifact, feedback=feedback, rejected=rejected)
         except DesignConsistencyError as exc:
             result = _reconcile_upstream_design(
-                project_root, config, artifacts, generate_artifact, exc, feedback=feedback,
+                project_root, config, artifacts, generate_artifact, exc, feedback=feedback, rejected=rejected,
             )
             if result is None:
                 raise
@@ -1054,6 +1079,7 @@ def _generate_one_artifact(
     drafts: dict[str, str | None] | None = None,
     context: tuple[WaveArtifact, ...] = (),
     rewrite: _DesignRewrite | None = None,
+    rejected: dict[str, str] | None = None,
 ) -> GenerationResult:
     """Render ONE artifact's document and write it (overwriting any prior file).
 
@@ -1111,7 +1137,15 @@ def _generate_one_artifact(
         nonlocal validate_contract
         validate_contract = validate_contract or has_behavior_contract(body)
         if validate_contract:
-            enforce_design_consistency(project_root, config, candidate=(artifact.output, render(body)), drafts=drafts)
+            text = render(body)
+            try:
+                enforce_design_consistency(project_root, config, candidate=(artifact.output, text), drafts=drafts)
+            except DesignConsistencyError as exc:
+                if rejected is not None and any(
+                    artifact.output == issue.reporter or artifact.output in issue.documents for issue in exc.disagreements
+                ):
+                    rejected[artifact.output] = text
+                raise
 
     body = _generate_document_body(
         artifact=artifact,
@@ -1282,8 +1316,11 @@ def _reconcile_upstream_design(
     *,
     feedback: str | None = None,
     complete: bool = False,
+    rejected: dict[str, str] | None = None,
 ) -> GenerationResult | None:
-    """Rewrite later accepted peers and regenerate reporters before saving any draft."""
+    """Rewrite later parties and recheck reporters before saving any draft."""
+    from codd.planner import _load_requirement_documents
+
     budget = _body_max_retries(config)
     if not original.disagreements:
         return None
@@ -1306,20 +1343,28 @@ def _reconcile_upstream_design(
 
     reporters = sorted({issue.reporter for issue in original.disagreements}, key=rank.__getitem__)
     rewrites: dict[str, list[DesignDisagreement]] = {}
-    context_by_reporter: dict[str, set[str]] = {reporter: set() for reporter in reporters}
+    reports_by_output: dict[str, list[DesignDisagreement]] = {reporter: [] for reporter in reporters}
     for issue in original.disagreements:
-        for path in issue.documents:
-            if rank[path] >= rank[issue.reporter]:
+        peers = [path for path in issue.documents if path != issue.reporter]
+        for path in peers:
+            if issue.reporter in issue.documents:
+                if by_output[path].wave >= by_output[issue.reporter].wave:
+                    return skip(f"{path} is not in an earlier wave than reporter {issue.reporter}.")
+            elif rank[path] >= rank[issue.reporter]:
                 return skip(f"{path} is not earlier than reporter {issue.reporter}.")
             if path in reporters:
                 return skip(f"{path} reports its own unresolved disagreement.")
         target = max(issue.documents, key=rank.__getitem__)
+        for path in peers:
+            if path != target and by_output[path].wave == by_output[target].wave:
+                return skip(f"{target} and {path} are in the same wave.")
         rewrites.setdefault(target, []).append(issue)
-        context_by_reporter[issue.reporter].update(issue.documents)
+        reports_by_output[issue.reporter].append(issue)
 
     targets = sorted(rewrites, key=rank.__getitem__)
     affected = set(reporters) | set(targets)
-    cited = set().union(*context_by_reporter.values())
+    cited = {path for issue in original.disagreements for path in issue.documents}
+    rejected = rejected or {}
     paths: dict[str, Path] = {}
     snapshots: dict[str, bytes | None] = {}
     contents: dict[str, str | None] = {}
@@ -1333,7 +1378,12 @@ def _reconcile_upstream_design(
         try:
             source = path.read_bytes() if path.is_file() else None
             snapshots[output] = source
-            contents[output] = text = source.decode("utf-8") if source is not None else None
+            # A rejected draft can be newer than the published file, or have
+            # no file yet. Validate that draft while retaining the disk snapshot.
+            text = rejected.get(output)
+            if text is None and source is not None:
+                text = source.decode("utf-8")
+            contents[output] = text
             if output in cited:
                 if text is None:
                     return skip(f"Cited document {output} is missing.")
@@ -1343,10 +1393,22 @@ def _reconcile_upstream_design(
                 )
                 if contract is None:
                     return skip(f"Cited document {output} has no behavior declaration.")
-                if contract.unresolved:
+                if output in reports_by_output:
+                    current_reports = {(documents, quote) for _, documents, quote in contract.unresolved}
+                    if any((issue.documents, issue.quote) not in current_reports for issue in reports_by_output[output]):
+                        return skip(f"{output} changed after reporting its unresolved disagreements.")
+                elif contract.unresolved:
                     return skip(f"{output} reports its own unresolved disagreement.")
         except (OSError, ValueError) as exc:
             return skip(f"Could not read or validate {output}: {exc}")
+
+    try:
+        requirements = tuple({
+            doc.path: DependencyDocument(doc.node_id, Path(doc.path), doc.content)
+            for doc in _load_requirement_documents(project_root, config)
+        }.values())
+    except (OSError, ValueError) as exc:
+        return skip(f"Could not read requirement documents: {exc}")
 
     def body(text: str) -> str:
         return without_behavior_contract(parse_frontmatter(text).body).strip()
@@ -1362,21 +1424,26 @@ def _reconcile_upstream_design(
         drafts = contents | dict.fromkeys(reporters)
         attempt_rewrites: dict[str, _DesignRewrite] = {}
         try:
-            changes = {}
+            results = {}
             for output in targets:
                 stage, document = "rewrite", output
                 before = contents[output]
                 assert before is not None
                 issues = rewrites[output]
+                follow = {path for issue in issues for path in issue.documents if path != output}
+                attempted_rewrites[output] = [peer.output for peer in context(follow)]
+                # A reporter being rewritten also needs to reassess any of its
+                # third-party reports using the documents already updated.
+                issues = reports_by_output.get(output, issues)
                 peers = context({path for issue in issues for path in issue.documents if path != output})
-                attempted_rewrites[output] = [peer.output for peer in peers]
                 reasons = "\n".join(f"- {' and '.join(issue.documents)}: {issue.quote}" for issue in issues)
-                rewrite = scoped_rewrites.setdefault(output, _DesignRewrite(before, reasons))
+                reasons += f"\n\nEarlier design documents to follow: {', '.join(attempted_rewrites[output])}"
+                rewrite = scoped_rewrites.setdefault(output, _DesignRewrite(before, reasons, requirements=requirements))
                 attempt_rewrites[output] = rewrite
                 rewrite.selecting_scope = False
                 rewrite.scope_response = None
                 rewrite.proposal = None
-                generate_artifact(
+                results[output] = generate_artifact(
                     artifact=by_output[output], drafts=drafts, context=peers, body_max_retries=0,
                     rewrite=rewrite,
                     feedback=f"Latest validation:\n{last_error}",
@@ -1384,24 +1451,24 @@ def _reconcile_upstream_design(
                 after = drafts[output]
                 if after is None or body(before) == body(after):
                     raise ValueError(f"{output}: reconciliation did not change the document body")
-                changes[output] = "\n".join(unified_diff(
-                    before.splitlines(), after.splitlines(),
-                    fromfile=output + " (previous)", tofile=output + " (provisional)", n=1, lineterm="",
-                ))
 
-            # The old reporters are still rejected. Check all other available
-            # documents, then require regenerated reporters to pass the same gate.
+            # Check rewritten documents first. Only third-party reporters still
+            # need regeneration, with the same gate applied to every draft.
             stage, document = "check rewritten documents", None
             enforce_design_consistency(project_root, config, complete=True, drafts=drafts, allow_missing=True)
             for reporter in reporters:
+                if reporter in rewrites:
+                    continue
                 stage, document = "regenerate reporter", reporter
-                result = generate_artifact(
+                peers = {path for issue in reports_by_output[reporter] for path in issue.documents}
+                results[reporter] = generate_artifact(
                     artifact=by_output[reporter], drafts=drafts,
-                    context=context(context_by_reporter[reporter]), body_max_retries=0,
+                    context=context(peers), body_max_retries=0,
                     feedback="\n\n".join(filter(None, [
                         feedback,
                         "The cited upstream documents have been rewritten. Check them again. "
-                        "Report any remaining disagreements.\n" + str(last_error),
+                        "Report any remaining disagreements. Clear reports resolved by the provisional decisions.\n"
+                        + str(last_error),
                     ])),
                 )
             stage, document = "check regenerated documents", None
@@ -1422,14 +1489,31 @@ def _reconcile_upstream_design(
             and any(_depends_on(artifact.node_id, by_output[path].node_id, dependencies) for path in affected)
             and (project_root / artifact.output).is_file()
         ]
+        updates = {output: drafts[output] for output in [*targets, *reporters]}
+        diff = []
+        for output, after in updates.items():
+            assert after is not None
+            before = (contents[output] or "").splitlines()
+            after_lines = after.splitlines()
+            sources = [("rejected draft" if output in rejected else "previous", before)]
+            snapshot = snapshots[output]
+            if output in rejected and snapshot is not None:
+                saved = snapshot.decode("utf-8").splitlines()
+                if saved != before:
+                    sources.append(("previous", saved))
+            for label, source in sources:
+                diff.extend(unified_diff(
+                    source, after_lines,
+                    fromfile=f"{output} ({label})", tofile=f"{output} (provisional)", n=1, lineterm="",
+                ))
+        change = "\n".join(diff)
         entries = [
             {"reporter": issue.reporter, "documents": issue.documents, "quote": issue.quote,
-             "rewritten": output, "change": changes[output], "review_dependents": review}
+             "rewritten": output, "change": change, "review_dependents": review}
             for output in targets for issue in rewrites[output]
         ]
-        updates = {output: drafts[output] for output in [*targets, *reporters]}
         _publish_reconciled_design(project_root, paths, snapshots, updates, entries)
-        return result
+        return results[reporters[0]]
     _report_reconciliation_failure(
         project_root, artifacts, original, rewrites=attempted_rewrites, attempts=tuple(attempts),
     )
@@ -1848,9 +1932,7 @@ def _render_document(
     }
     if artifact.modules:
         codd_block["modules"] = list(artifact.modules)
-    operation_flow = _extract_operation_flow_contract(body)
-    if operation_flow is not None:
-        codd_block["operation_flow"] = operation_flow
+    _lift_operation_flow(codd_block, body)
     # Restoration-only, additive provenance / confidence / open-questions blocks.
     # Greenfield generation passes restoration_meta=None, so generated docs are
     # byte-for-byte unchanged. The DAG scanner reads only known codd: keys and
@@ -1865,6 +1947,20 @@ def _render_document(
         sort_keys=False,
     )
     return f"---\n{frontmatter}---\n\n{body.rstrip()}\n"
+
+
+def _lift_operation_flow(metadata: dict[str, Any], body: str, *, previous_body: str | None = None) -> bool:
+    """Mirror the body declaration and report whether the metadata changed."""
+    flow = _extract_operation_flow_contract(body)
+    if flow is not None and metadata.get("operation_flow") != flow:
+        metadata["operation_flow"] = flow
+        return True
+    # Older documents may declare the flow only in frontmatter.
+    if (flow is None and "operation_flow" in metadata and previous_body is not None
+            and _extract_operation_flow_contract(previous_body) is not None):
+        del metadata["operation_flow"]
+        return True
+    return False
 
 
 def _extract_operation_flow_contract(body: str, *, strict: bool = False) -> dict[str, Any] | None:

@@ -7,7 +7,7 @@ from click.testing import CliRunner
 
 from codd.cli import main
 from codd.config import load_project_config
-from codd.design_consistency import enforce_design_consistency, without_behavior_contract
+from codd.design_consistency import DesignConsistencyError, enforce_design_consistency, without_behavior_contract
 from codd.generator import WaveArtifact, _apply_reconciliation_scope, _DesignRewrite, generate_wave, regenerate_artifact
 from codd.greenfield.pipeline import GreenfieldPipeline, StageError
 from codd.planner import plan_init
@@ -1533,3 +1533,342 @@ def test_reconciliation_audits_each_proposal_and_frozen_scope_after_multi_target
     assert all((project / output).read_text(encoding="utf-8") == old for output, old in originals.items())
     assert not (project / CONSUMER).exists()
     assert not (project / RECONCILIATIONS).exists()
+
+
+@pytest.mark.parametrize("saved", ["missing", "open", "prior", "prior-rejected"])
+def test_reporter_follows_earlier_wave(tmp_path, monkeypatch, saved):
+    project = _upstream_disagreement_project(tmp_path)
+    owner = (project / OWNER).read_bytes()
+    note = "The acceptance report preserves the original file name."
+    open_report = _declaration(DISPUTE, documents=(CONSUMER, OWNER)).replace(
+        "```codd-behavior", f"{note}\n\n```codd-behavior",
+    )
+    fixed_report = _document(ALIGNED, _block(ALIGNED, "reject", sample=["x" * 101])).replace(
+        "```codd-behavior", f"{note}\n\n```codd-behavior",
+    )
+    if saved == "open":
+        _write(project, CONSUMER, open_report)
+    prior = _declaration("Previous acceptance criteria.")
+    if saved.startswith("prior"):
+        _write(project, CONSUMER, prior)
+    _write(project, FOLLOW_UP, _declaration("The plan follows the acceptance criteria."))
+    calls = []
+
+    def fake(_command, prompt):
+        if prompt.startswith(f"Select reconciliation edit locations in {CONSUMER}."):
+            calls.append("scope")
+            assert all(value in prompt for value in (OWNER, LIMIT, DISPUTE, note))
+            assert f"Earlier design documents to follow: {OWNER}" in prompt.splitlines()
+            assert "Previous acceptance criteria." not in prompt
+            lines = open_report.splitlines()
+            return json.dumps({"replace_lines": [5, *range(10, len(lines))], "insert_after": [9]})
+        if prompt.startswith(f"Reconcile the Markdown document at {CONSUMER}."):
+            calls.append("rewrite")
+            assert "Lines allowed to be replaced or removed: [5, 10," in prompt
+            return fixed_report.replace(note, "Drop the original file name.") if saved == "prior-rejected" else fixed_report
+        assert "Node ID: test:acceptance" in prompt
+        calls.append("reporter")
+        return open_report
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake)
+    options = ["--force"] if saved.startswith("prior") else []
+    result = CliRunner().invoke(main, ["generate", "--wave", "4", *options, "--path", str(project)])
+
+    assert calls == (["reporter"] if saved != "open" else []) + ["scope", "rewrite"]
+    assert (project / OWNER).read_bytes() == owner
+    assert (project / PEER).read_text(encoding="utf-8") == _declaration(UNBOUNDED, spec="input-validation")
+    if saved == "prior-rejected":
+        assert result.exit_code == 1, result.output
+        assert (project / CONSUMER).read_text(encoding="utf-8") == prior
+        assert "outside the approved edit scope" in result.output
+        assert not (project / RECONCILIATIONS).exists()
+        return
+    assert result.exit_code == 0, result.output
+    assert note in (project / CONSUMER).read_text(encoding="utf-8")
+    enforce_design_consistency(project, load_project_config(project), complete=True)
+    assert f"Provisional design decisions: {RECONCILIATIONS}" in result.output
+    assert f"Review existing dependent documents: {FOLLOW_UP}" in result.output
+    entry = json.loads((project / RECONCILIATIONS).read_text(encoding="utf-8"))
+    assert entry["rewritten"] == entry["reporter"] == CONSUMER
+    assert entry["documents"] == [CONSUMER, OWNER]
+    assert f"+{ALIGNED}" in entry["change"]
+
+
+@pytest.mark.parametrize("peer_wave", [4, 5])
+def test_reporter_skips_nonpreceding_wave(tmp_path, monkeypatch, peer_wave):
+    project = _upstream_disagreement_project(tmp_path)
+    config = load_project_config(project)
+    config["wave_config"][str(peer_wave)][:0] = config["wave_config"].pop("2")
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+    calls = []
+
+    def fake(_command, prompt):
+        calls.append(prompt)
+        return _declaration(DISPUTE, documents=(CONSUMER, PEER))
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake)
+    result = CliRunner().invoke(main, ["generate", "--wave", "4", "--path", str(project)])
+
+    assert result.exit_code == 1
+    assert len(calls) == 1
+    reason = f"{PEER} is not in an earlier wave than reporter {CONSUMER}."
+    assert f"Automatic design reconciliation skipped: {reason}" in result.output
+    assert json.loads((project / RECONCILIATION_FAILURES).read_text(encoding="utf-8"))["reason"] == reason
+    assert not (project / CONSUMER).exists()
+
+
+def test_reconciliation_reports_missing_snapshot(tmp_path, monkeypatch):
+    project = _upstream_disagreement_project(tmp_path)
+    reporter = _write(project, CONSUMER, _declaration(DISPUTE, documents=(CONSUMER, OWNER)))
+
+    def check_and_remove_reporter(*args, **kwargs):
+        try:
+            return enforce_design_consistency(*args, **kwargs)
+        except DesignConsistencyError:
+            reporter.unlink()
+            raise
+
+    def fake(*_args):
+        pytest.fail("reconciliation attempted to rewrite a missing reporter")
+
+    monkeypatch.setattr("codd.generator.enforce_design_consistency", check_and_remove_reporter)
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake)
+    result = CliRunner().invoke(main, ["generate", "--wave", "4", "--path", str(project)])
+
+    assert result.exit_code == 1, result.output
+    reason = f"Cited document {CONSUMER} is missing."
+    assert f"Automatic design reconciliation skipped: {reason}" in result.output
+    assert json.loads((project / RECONCILIATION_FAILURES).read_text(encoding="utf-8"))["reason"] == reason
+    assert not (project / RECONCILIATIONS).exists()
+
+
+@pytest.mark.parametrize("mandatory", [False, True])
+def test_rewrite_handles_missing_support(tmp_path, monkeypatch, mandatory):
+    project = _upstream_disagreement_project(tmp_path)
+    config = load_project_config(project)
+    config["generate"]["body_retry"]["max_retries"] = 2
+    config["scan"] = {"doc_dirs": ["docs"]}
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+    requirement = "The importer must return a detailed reason for a rejected file."
+    requirements = "docs/requirements/import.md"
+    if mandatory:
+        _write(project, requirements, "---\ncodd:\n  type: requirement\n  node_id: req:import\n---\n" + _document(requirement))
+    owner_text = _declaration("The importer returns only whether it accepted the file.", spec=SPEC)
+    peer_text = _declaration("Validation shows the detailed rejection reason from the importer.",
+                             spec="input-validation")
+    _write(project, OWNER, owner_text)
+    _write(project, PEER, peer_text)
+    dispute = "The importer does not provide the rejection reason that validation expects."
+    default = "Provisional decision. Validation shows a generic rejection when the importer rejects a file."
+    cases = _block(default, "reject", owner=True).replace(SPEC, "input-validation")
+    cited_requirement = f"{dispute} {requirements} requires this behavior: {requirement}"
+    unresolved = _declaration(cited_requirement, spec="input-validation", documents=(OWNER, PEER))
+    calls = []
+
+    def fake(_command, prompt):
+        if prompt.startswith(f"Reconcile the Markdown document at {PEER}."):
+            calls.append("rewrite")
+            lines = prompt.splitlines()
+            assert f"Earlier design documents to follow: {OWNER}" in lines
+            start = lines.index("Earlier designs are authoritative, including what they leave undefined.")
+            assert lines[start + 1:start + 6] == [
+                "Replace behavior that needs missing support with the simplest behavior using only what earlier designs provide.",
+                "State provisional decisions in the body when requirements leave a choice open, and align boundary cases.",
+                "Clear resolved disagreements and do not report the same missing support again.",
+                "Keep missing support in unresolved only when an explicit requirement needs it.",
+                "Preserve that requirement and cite its source and relevant text in the unresolved quote from the body.",
+            ]
+            if mandatory:
+                assert prompt.count(f"Requirement documents:\n{requirements}:") == 1
+                assert requirement in prompt.split("Requirement documents:\n", 1)[1].split("Latest validation:", 1)[0]
+            return unresolved if mandatory else _document(default, cases)
+        assert "Node ID: test:acceptance" in prompt
+        calls.append("reporter")
+        return _declaration("The test checks for generic rejection.") if default in prompt else _declaration(
+            dispute, documents=(OWNER, PEER),
+        )
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake)
+    result = CliRunner().invoke(main, ["generate", "--wave", "4", "--path", str(project)])
+
+    assert (project / OWNER).read_text(encoding="utf-8") == owner_text
+    if mandatory:
+        assert result.exit_code == 1, result.output
+        assert calls == ["reporter", "rewrite", "rewrite"]
+        assert cited_requirement in result.output
+        assert "Automatic design reconciliation failed after 2 attempts." in result.output
+        failure = json.loads((project / RECONCILIATION_FAILURES).read_text(encoding="utf-8"))
+        assert all(cited_requirement in attempt["reason"] for attempt in failure["attempts"])
+        assert (project / PEER).read_text(encoding="utf-8") == peer_text
+        assert not (project / RECONCILIATIONS).exists()
+    else:
+        assert result.exit_code == 0, result.output
+        assert calls == ["reporter", "rewrite", "reporter"]
+        assert default in (project / PEER).read_text(encoding="utf-8")
+        assert f"Provisional design decisions: {RECONCILIATIONS}" in result.output
+        entry = json.loads((project / RECONCILIATIONS).read_text(encoding="utf-8"))
+        assert entry["rewritten"] == PEER and entry["documents"] == [OWNER, PEER]
+        assert f"+{default}" in entry["change"]
+
+
+def test_mixed_reports_rewrite_in_wave_order(tmp_path, monkeypatch):
+    project = _upstream_disagreement_project(tmp_path)
+    config = load_project_config(project)
+    config["wave_config"]["4"][0]["depends_on"] = ["design:import"]
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+    self_dispute = "The acceptance criteria expect a different file size limit."
+    body = _document(DISPUTE + "\n\n" + self_dispute)
+    declarations = {
+        "owns": {}, "cases": [], "unresolved": [
+            {"documents": [OWNER, PEER], "quote": DISPUTE},
+            {"documents": [OWNER, CONSUMER], "quote": self_dispute},
+        ],
+    }
+    report = body + f"```codd-behavior\n{yaml.safe_dump(declarations)}```\n"
+    decision = "Acceptance checks that files over 100 bytes are rejected."
+    calls = []
+
+    def fake(_command, prompt):
+        if prompt.startswith(f"Reconcile the Markdown document at {PEER}."):
+            calls.append("rewrite peer")
+            return _declaration(ALIGNED, spec="input-validation")
+        if prompt.startswith(f"Select reconciliation edit locations in {CONSUMER}."):
+            calls.append("scope reporter")
+            assert all(value in prompt for value in (OWNER, LIMIT, PEER, ALIGNED, DISPUTE, self_dispute))
+            assert UNBOUNDED not in prompt
+            return json.dumps({"replace_lines": [5, 7, *range(12, len(report.splitlines()))], "insert_after": []})
+        if prompt.startswith(f"Reconcile the Markdown document at {CONSUMER}."):
+            calls.append("rewrite reporter")
+            assert f"{PEER}:\n" in prompt and ALIGNED in prompt
+            return _declaration(decision).replace("\n\n```codd-behavior", "\n\n\n\n```codd-behavior")
+        assert "Node ID: test:acceptance" in prompt
+        calls.append("reporter")
+        return report
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake)
+    results = generate_wave(project, 4)
+
+    assert [result.path for result in results] == [project / CONSUMER]
+    assert calls == ["reporter", "rewrite peer", "scope reporter", "rewrite reporter"]
+    assert decision in (project / CONSUMER).read_text(encoding="utf-8")
+    assert ALIGNED in (project / PEER).read_text(encoding="utf-8")
+    entries = [json.loads(line) for line in (project / RECONCILIATIONS).read_text(encoding="utf-8").splitlines()]
+    assert [(entry["rewritten"], entry["quote"]) for entry in entries] == [(PEER, DISPUTE), (CONSUMER, self_dispute)]
+
+
+def test_reconciliation_updates_the_operation_flow_mirror(tmp_path, monkeypatch):
+    from codd.frontmatter import parse_frontmatter
+
+    project = _project(tmp_path)
+    output = "docs/design/operations.md"
+    config = load_project_config(project)
+    config["generate"]["body_retry"]["max_retries"] = 2
+    config["wave_config"]["2"] = [{
+        "node_id": "design:operations", "output": output, "title": "Operations",
+        "behavior_owners": ["result-handling"], "owns_operation_flow": True, "depends_on": ["design:import"],
+    }]
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+    _write(project, OWNER, _declaration("The importer returns only a success flag.", spec=SPEC))
+    dispute = "The operation needs a rejection reason, but the importer returns only a flag."
+    prior = "The operation displays the detailed rejection reason."
+    decision = "Provisional decision. The operation displays a generic rejection."
+
+    def operation_document(text, outcome, unresolved):
+        flow = ("```yaml\noperation_flow:\n  operations:\n    - id: show-result\n"
+                f"      expected_outcomes: [{outcome}]\n```\n\n")
+        behavior = {"owns": {"result-handling": text}, "cases": [], "unresolved": unresolved}
+        claims = f"{text}\n\n{dispute}" if unresolved else text
+        return _document(claims, f"{flow}```codd-behavior\n{yaml.safe_dump(behavior)}```\n")
+
+    before = operation_document(prior, "specific reason", [{"documents": [output, OWNER], "quote": dispute}])
+    after = operation_document(decision, "generic rejection", [])
+    calls = []
+
+    def fake(_command, prompt):
+        if prompt.startswith(f"Select reconciliation edit locations in {output}."):
+            calls.append("scope")
+            return json.dumps({"replace_lines": [5, 7, 8, 13, 19, *range(20, 25)], "insert_after": []})
+        if prompt.startswith(f"Reconcile the Markdown document at {output}."):
+            calls.append("rewrite")
+            return after
+        assert "Node ID: design:operations" in prompt
+        calls.append("generate")
+        return before
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake)
+    result = CliRunner().invoke(main, ["generate", "--wave", "2", "--path", str(project)])
+
+    assert result.exit_code == 0, result.output
+    assert calls == ["generate", "scope", "rewrite"]
+    enforce_design_consistency(project, config, complete=True)
+    document = parse_frontmatter((project / output).read_text(encoding="utf-8"))
+    assert document.mapping["codd"]["operation_flow"]["operations"][0]["expected_outcomes"] == ["generic rejection"]
+    assert decision in document.body
+    assert not (project / RECONCILIATION_FAILURES).exists()
+
+
+@pytest.mark.parametrize("saved", [False, True], ids=["rejected-draft", "saved-and-rejected"])
+@pytest.mark.parametrize("self_report", [False, True], ids=["third-party", "self-report"])
+def test_reconciliation_audits_every_changed_document(tmp_path, monkeypatch, saved, self_report):
+    project = _upstream_disagreement_project(tmp_path)
+    saved_note = "Acceptance retries automatically when validation gives no reason."
+    rejected_note = "Acceptance retries once when validation gives no reason."
+    decision = "Acceptance displays a generic rejection immediately."
+    if saved:
+        _write(project, CONSUMER, _declaration(saved_note))
+    service_before = "The service accepts files above the import limit."
+    service_after = "The service rejects files above the import limit."
+    service_dispute = "The service does not apply the import limit."
+    if self_report:
+        initial = _declaration(DISPUTE, documents=(OWNER, CONSUMER)).replace(
+            "```codd-behavior", f"{rejected_note}\n\n```codd-behavior",
+        )
+    else:
+        _write(project, DEPENDENT, _declaration(service_before, spec="service-limit"))
+        unresolved = [
+            {"documents": [OWNER, PEER], "quote": DISPUTE},
+            {"documents": [OWNER, DEPENDENT], "quote": service_dispute},
+        ]
+        data = {"owns": {}, "cases": [], "unresolved": unresolved}
+        initial = _document(f"{DISPUTE}\n\n{service_dispute}\n\n{rejected_note}",
+                            f"```codd-behavior\n{yaml.safe_dump(data)}```\n")
+    reporter = _declaration(decision)
+
+    def fake(_command, prompt):
+        if prompt.startswith(f"Reconcile the Markdown document at {PEER}."):
+            assert not self_report
+            return _declaration(ALIGNED, spec="input-validation")
+        if prompt.startswith(f"Reconcile the Markdown document at {DEPENDENT}."):
+            assert not self_report
+            return _declaration(service_after, spec="service-limit")
+        if prompt.startswith(f"Select reconciliation edit locations in {CONSUMER}."):
+            assert self_report
+            return json.dumps({"replace_lines": [5, 7, 8, *range(12, 17)], "insert_after": []})
+        if prompt.startswith(f"Reconcile the Markdown document at {CONSUMER}."):
+            assert self_report
+            return reporter
+        assert "Node ID: test:acceptance" in prompt
+        if ALIGNED in prompt:
+            assert service_after in prompt
+            return reporter
+        return initial
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake)
+    result = CliRunner().invoke(main, ["generate", "--wave", "4", "--force", "--path", str(project)])
+
+    assert result.exit_code == 0, result.output
+    assert decision in (project / CONSUMER).read_text(encoding="utf-8")
+    entries = [json.loads(line) for line in (project / RECONCILIATIONS).read_text(encoding="utf-8").splitlines()]
+    assert [entry["rewritten"] for entry in entries] == ([CONSUMER] if self_report else [PEER, DEPENDENT])
+    for entry in entries:
+        change = entry["change"]
+        if saved:
+            assert f"--- {CONSUMER} (previous)" in change
+            assert f"-{saved_note}" in change
+        assert f"--- {CONSUMER} (rejected draft)" in change
+        assert f"-{rejected_note}" in change and f"+{decision}" in change
+        if not self_report:
+            assert f"--- {PEER} (previous)" in change
+            assert f"-{UNBOUNDED}" in change and f"+{ALIGNED}" in change
+            assert f"--- {DEPENDENT} (previous)" in change
+            assert f"-{service_before}" in change and f"+{service_after}" in change
