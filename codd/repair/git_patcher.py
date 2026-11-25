@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import subprocess
-from typing import Callable
+from typing import Any, Callable
 
 from codd.repair.schema import ApplyResult, FilePatch
 
 
-RunCommand = Callable[..., subprocess.CompletedProcess[str]]
+RunCommand = Callable[..., subprocess.CompletedProcess[Any]]
 
 
 @dataclass
@@ -62,10 +63,10 @@ class GitPatcher:
         if dry_run:
             return ApplyResult(True, [], [], None)
 
-        # ``--3way`` needs the git object database for a 3-way merge, so it is
-        # only valid inside a git worktree. Greenfield workspaces are not git
-        # repositories; there a plain ``git apply`` applies a clean patch fine.
-        apply_args = ("--3way",) if self._is_git_worktree(root) else ()
+        # --3way implies --index. Bypass it only for a matching untracked diff.
+        apply_args = ()
+        if self._is_git_worktree(root) and not self._all_paths_untracked(root, patch):
+            apply_args = ("--3way",)
 
         first = self._git_apply(root, patch.content, *apply_args)
         if first.returncode == 0:
@@ -112,6 +113,114 @@ class GitPatcher:
             return False
         return result.returncode == 0 and (result.stdout or "").strip() == "true"
 
+    def _all_paths_untracked(self, root: Path, patch: FilePatch) -> bool:
+        try:
+            content = patch.content
+            paths = self._numstat_paths(root, content, "--check")
+            if not paths:
+                return False
+
+            # Git can silently skip patches outside the current directory.
+            # Count every record at the repository root before trusting this list.
+            repository_root = self._repository_root(root)
+            if repository_root is None:
+                return False
+            # Use Git's repository-relative name, including for symlink entries.
+            declared = root.relative_to(repository_root) / patch.file_path
+            if repository_root != root and len(self._numstat_paths(repository_root, content)) != len(paths):
+                return False
+
+            # Numstat reports the destination of renames and copies. Reverse
+            # the diff to get its source paths as well.
+            reverse_paths = self._numstat_paths(root, content, "--reverse")
+            if len(reverse_paths) != len(paths):
+                return False
+            touched = set(paths) | set(reverse_paths)
+
+            if os.fsencode(declared.as_posix()) not in touched:
+                return False
+
+            ancestors = set()
+            for path in touched:
+                parts = path.split(b"/")
+                ancestors.update(b"/".join(parts[:i]) for i in range(1, len(parts)))
+            related = touched | ancestors
+
+            # A tracked ancestor can be a gitlink. Literal pathspecs also
+            # return descendants, so distinguish them from tracked siblings.
+            pathspecs = [b":(top,literal)" + path for path in sorted(related)]
+            indexed = self.runner(
+                ["git", "--no-literal-pathspecs", "ls-files", "--full-name", "-z", "--", *pathspecs],
+                cwd=str(root),
+                capture_output=True,
+                check=False,
+            )
+            tracked = indexed.stdout
+            if indexed.returncode != 0 or not isinstance(tracked, bytes):
+                return False
+            if not tracked:
+                return True
+            if not tracked.endswith(b"\0"):
+                return False
+            ancestor_prefixes = tuple(path + b"/" for path in ancestors)
+            touched_prefixes = tuple(path + b"/" for path in touched)
+            # Only paths found through one of the ancestor pathspecs can be unrelated.
+            return all(
+                _is_git_relative_path(path)
+                and path.startswith(ancestor_prefixes)
+                and path not in related
+                and not path.startswith(touched_prefixes)
+                for path in tracked[:-1].split(b"\0")
+            )
+        except Exception:
+            # Match the original indexed apply when a probe cannot be trusted.
+            return False
+
+    def _repository_root(self, root: Path) -> Path | None:
+        result = self.runner(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(root),
+            capture_output=True,
+            check=False,
+        )
+        output = result.stdout
+        if (
+            result.returncode != 0
+            or not isinstance(output, bytes)
+            or not output.endswith(b"\n")
+            or b"\0" in output
+        ):
+            return None
+        path = Path(os.fsdecode(output[:-1]))
+        return path if path.is_absolute() else None
+
+    def _numstat_paths(self, root: Path, content: str, *args: str) -> list[bytes]:
+        # --numstat without --apply is read-only. Keep its NUL-delimited paths
+        # as bytes so a filename's literal whitespace survives subprocess I/O.
+        result = self.runner(
+            ["git", "apply", "--numstat", "-z", *args],
+            cwd=str(root),
+            input=content.encode("utf-8"),
+            capture_output=True,
+            check=False,
+        )
+        output = result.stdout
+        if result.returncode != 0 or not isinstance(output, bytes) or not output.endswith(b"\0"):
+            return []
+
+        paths = []
+        for record in output[:-1].split(b"\0"):
+            fields = record.split(b"\t", 2)
+            if len(fields) != 3:
+                return []
+            added, removed, path = fields
+            if not (added == removed == b"-" or (added.isdigit() and removed.isdigit())):
+                return []
+            if not _is_git_relative_path(path):
+                return []
+            paths.append(path)
+        return paths
+
     def _git_apply(self, root: Path, content: str, *args: str) -> subprocess.CompletedProcess[str]:
         return self.runner(
             ["git", "apply", *args],
@@ -122,6 +231,10 @@ class GitPatcher:
             encoding="utf-8",
             check=False,
         )
+
+
+def _is_git_relative_path(path: bytes) -> bool:
+    return all(part not in (b"", b".", b"..") for part in path.split(b"/"))
 
 
 def _resolve_target(root: Path, file_path: str) -> Path:
