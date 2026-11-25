@@ -14,6 +14,7 @@ import yaml
 
 from codd.cli import main
 from codd.lexicon import AskItem, AskOption, load_lexicon
+from codd.required_artifact_requirements import number_requirements
 import codd.required_artifacts_deriver as deriver_module
 from codd.required_artifacts_deriver import DEFAULTS_DIR, RequiredArtifactsDeriver
 
@@ -574,3 +575,44 @@ def test_accounting_still_rejects_prose_around_the_json_object(tmp_path, fake_ai
     assert report["required_artifacts"] == _legacy_artifacts(valid)
     assert len(prompts) == 2
     assert "valid json" in prompts[1].lower()
+
+
+_FRONT_MATTER = (
+    "---\n"
+    "codd:\n"
+    '  node_id: "req:sample"\n'
+    "  depends_on:\n"
+    '    - id: "req:other"\n'
+    "      relation: derives_from\n"
+    "\n"
+    "  modules:\n"
+    "    - core\n"
+    "{closing}\n"
+)
+
+
+@pytest.mark.parametrize("closing", ["---", "..."])
+def test_leading_front_matter_is_context_and_never_a_requirement_item(closing):
+    text = _FRONT_MATTER.format(closing=closing) + "# Sample\n\nKeep a local log.\n\n- Export the log as CSV.\n"
+
+    items, prompt = number_requirements([("docs/requirements/sample.md", text)])
+
+    assert [(item["id"], item["start_line"], item["text"]) for item in items] == [
+        ("R1", 13, "Keep a local log."),
+        ("R2", 15, "- Export the log as CSV."),
+    ]
+    assert 'node_id: "req:sample"' in prompt
+    assert not re.search(r"R\d+ \|[^\n]*(codd:|node_id|req:other|modules:|- core)", prompt)
+
+
+@pytest.mark.parametrize(
+    "opening",
+    ["---\n\nKeep a local log.\n\n---\n", "---\n- Keep a local log.\n---\n", "---\n\ncodd: [unclosed\n\n---\n", "---\ncodd:\n  node_id: x\n"],
+    ids=["paragraph", "list", "invalid-yaml", "unclosed"],
+)
+def test_a_leading_rule_that_is_not_front_matter_keeps_its_lines_as_items(opening):
+    items, _prompt = number_requirements([("requirements.md", opening + "\nExport the log as CSV.\n")])
+
+    texts = [item["text"] for item in items]
+    assert texts[-1] == "Export the log as CSV."
+    assert len(texts) >= 2

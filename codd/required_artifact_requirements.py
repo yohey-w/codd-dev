@@ -5,6 +5,8 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
+import yaml
+
 
 _QUOTE = re.compile(r"^(?:[ \t]*>[ \t]?)+")
 _HEADING = re.compile(r"^#{1,6}(?:\s|$)")
@@ -124,14 +126,36 @@ def _list_end(lines: list[_Line], start: int, marker_end: int) -> int:
     return index
 
 
+def _front_matter_end(lines: list[_Line]) -> int:
+    """Return the line after a leading YAML front matter mapping, or 0.
+
+    Document metadata is context, not a requirement. Only a fenced block at the
+    very start that parses as a YAML mapping qualifies, so a document that merely
+    opens with a thematic break keeps every line it contains.
+    """
+    if not lines or lines[0].text != "---" or lines[0].indent or lines[0].quote_depth:
+        return 0
+    for end in range(1, len(lines)):
+        closing = lines[end]
+        if closing.text in {"---", "..."} and not closing.indent and not closing.quote_depth:
+            block = "\n".join(" " * line.indent + line.text for line in lines[1:end])
+            try:
+                metadata = yaml.safe_load(block)
+            except yaml.YAMLError:
+                return 0
+            return end + 1 if isinstance(metadata, dict) else 0
+    return 0
+
+
 def _requirement_ranges(source: list[str]) -> Iterator[tuple[int, int]]:
     """Yield half-open spans for rows, list items, paragraphs, and fenced blocks.
 
-    Headings, table headers and separators stay in the prompt as context. Other
-    nonblank text falls back to paragraphs, without interpreting its wording.
+    Front matter, headings, table headers and separators stay in the prompt as
+    context. Other nonblank text falls back to paragraphs, without interpreting
+    its wording.
     """
     lines = [_markdown_line(line) for line in source]
-    index = 0
+    index = _front_matter_end(lines)
     while index < len(lines):
         line = lines[index]
         if not line.text:
