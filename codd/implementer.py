@@ -29,6 +29,12 @@ import unicodedata
 LOGGER = logging.getLogger(__name__)
 
 FILE_BLOCK_RE = re.compile(r"^=== FILE: (?P<path>.+?) ===\s*$", re.MULTILINE)
+_PROMPT_FILE_BLOCK_RE = re.compile(
+    r"^(?:--- BEGIN (?P<label>(?:EXISTING FILE|DEPENDENCY ARTIFACT) [^\n]+) ---"
+    r"|=== EXISTING FILE: [^\n]+ ===)\n"
+    r"(?P<body>.*?)\n(?(label)--- END (?P=label) ---|=== END EXISTING FILE ===)$",
+    re.MULTILINE | re.DOTALL,
+)
 # Repo-root infrastructure artifacts (implement.root_artifact_patterns):
 # AI-emitted paths matching these are written at the PROJECT ROOT instead of
 # being confined under (or dropped for being outside) the task output paths.
@@ -456,6 +462,10 @@ class _IncompleteExistingOutputError(ValueError):
     """A text replacement targeted an existing file without complete context."""
 
 
+class _UnseenExistingOutputError(RuntimeError):
+    """A one-shot response targets a file whose current content was not shown in full."""
+
+
 class NoUsableGeneratedFiles(RuntimeError):
     """One implement attempt yielded NO usable generated files (transiently).
 
@@ -840,6 +850,7 @@ _IMPLEMENT_ROUTE_REASONS = {
     "non_concrete_output": "The task does not name concrete output files.",
     "complete_context": "The prompt shows existing outputs and near dependency artifacts in full for the declared files.",
     "incomplete_output_rejected": "The existing-file replacement guard exhausted its retries.",
+    "unseen_existing_output": "The one-shot response would overwrite an existing file without its full current content in the prompt.",
     "no_usable_output": "The command exhausted its retries without usable output.",
     "syntax_gate": "Syntax or confusable-character validation exhausted its retries.",
 }
@@ -870,11 +881,13 @@ class Implementer:
         ai_command: str | None = None,
         use_derived_steps: bool | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        _from_verification: bool = False,
     ) -> None:
         self.project_root = Path(project_root).resolve()
         self.config = config if config is not None else _load_project_config(self.project_root)
         self.ai_command = ai_command
         self.use_derived_steps = _use_derived_steps_enabled(self.config, use_derived_steps)
+        self._from_verification = _from_verification
         # Injectable backoff between no-usable-output retries (tests stub it to
         # avoid real sleeps); mirrors ai_invoke._invoke_with_recovery's ``sleep``.
         self._sleep = sleep
@@ -1035,10 +1048,10 @@ class Implementer:
                 try:
                     generated_files, existing_output_coverage = run_attempts()
                 except CoddCLIError as exc:
-                    # The retry loop chains its terminal errors from these
-                    # existing output rejections.
+                    # Terminal attempt errors are chained from output rejections.
                     fallback_reason = {
                         _IncompleteExistingOutputError: "incomplete_output_rejected",
+                        _UnseenExistingOutputError: "unseen_existing_output",
                         NoUsableGeneratedFiles: "no_usable_output",
                         ImplementSyntaxGateError: "syntax_gate",
                     }.get(type(exc.__cause__))
@@ -1099,6 +1112,10 @@ class Implementer:
             existing_output_coverage = _ExistingOutputCoverage()
             try:
                 return generate(current_feedback, existing_output_coverage), existing_output_coverage
+            except _UnseenExistingOutputError as exc:
+                from codd.cli import CoddCLIError
+
+                raise CoddCLIError(str(exc)) from exc
             except _IncompleteExistingOutputError as exc:
                 # Allow one correction for an unnecessary replacement without
                 # spending the general retry budget. Honor explicit retry opt-out.
@@ -1253,6 +1270,7 @@ class Implementer:
                 root_artifact_patterns=_root_artifact_patterns_from_config(self.config),
                 test_root=_test_root_from_config(self.config),
                 existing_output_coverage=existing_output_coverage,
+                one_shot_prompt=prompt if one_shot and not self._from_verification else None,
             )
         except (ImplementSyntaxGateError, _IncompleteExistingOutputError):
             # These write-time rejections have their own retry limits.
@@ -1286,6 +1304,7 @@ def implement_tasks(
     task: str | None = None,
     language: str | None = None,
     feedback: str | None = None,
+    _from_verification: bool = False,
     **_ignored: Any,
 ) -> list[ImplementationResult]:
     project_root = Path(project_root).resolve()
@@ -1318,6 +1337,7 @@ def implement_tasks(
         config=config,
         ai_command=ai_command,
         use_derived_steps=use_derived_steps,
+        _from_verification=_from_verification,
     ).run_implement(spec, feedback=feedback)
     return [result]
 
@@ -3710,6 +3730,7 @@ def _write_generated_files(
     root_artifact_patterns: list[str] | tuple[str, ...] | None = None,
     test_root: str | None = None,
     existing_output_coverage: _ExistingOutputCoverage | None = None,
+    one_shot_prompt: str | None = None,
 ) -> list[Path]:
     file_payloads = _parse_file_payloads(
         raw_output,
@@ -3746,6 +3767,31 @@ def _write_generated_files(
                 "Increase implement.existing_output_files_prompt_limit or use an AI command "
                 "that can read and edit files directly on disk."
             )
+    output_prefixes = [PurePosixPath(item) for item in spec.output_paths]
+    if one_shot_prompt is not None:
+        # Check the destinations after parsing and rerooting, before any write.
+        rendered_bodies: set[str] | None = None
+        for relative_path, _ in file_payloads:
+            destination = project_root / relative_path
+            _ensure_inside_project(project_root, destination, "generated file")
+            if not destination.is_file():
+                continue
+            is_root_artifact = not any(
+                _path_starts_with(PurePosixPath(relative_path), prefix) for prefix in output_prefixes
+            )
+            if is_root_artifact and _root_artifact_overwrite_blocked(destination, relative_path):
+                continue
+            try:
+                current = destination.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise _UnseenExistingOutputError(repr(relative_path)) from exc
+            if current in one_shot_prompt:
+                continue
+            # Only file context blocks can supply the renderer's trimmed form.
+            if rendered_bodies is None:
+                rendered_bodies = {match["body"] for match in _PROMPT_FILE_BLOCK_RE.finditer(one_shot_prompt)}
+            if current.rstrip() not in rendered_bodies:
+                raise _UnseenExistingOutputError(repr(relative_path))
     if syntax_gate or confusable_check:
         # Validate EVERY payload before writing ANY file: a gate failure leaves
         # the working tree untouched (no partial half-broken task output).
@@ -3776,7 +3822,6 @@ def _write_generated_files(
         for relative_path, _ in file_payloads:
             _verify_existing_step_output(project_root, relative_path, step_snapshots, captured_paths)
     traceability_comment = _build_traceability_comment(design_context, spec, dependency_documents)
-    output_prefixes = [PurePosixPath(item) for item in spec.output_paths]
     generated_paths: list[Path] = []
     # ``StageError`` is lazy-imported (as in ``_create_output_paths``) to avoid the
     # greenfield<->implementer module-load cycle.
