@@ -159,6 +159,14 @@ class StageError(RuntimeError):
     """A pipeline stage (or one of its units) failed."""
 
 
+class EnvironmentProvisionError(StageError):
+    """A provisioning failure that requires an operator action."""
+
+    def __init__(self, detail: str, next_step: str) -> None:
+        super().__init__(detail)
+        self.next_step = f"{next_step} After correcting the issue, use the resume command to retry provisioning."
+
+
 @dataclass
 class StageOutcome:
     name: str
@@ -182,9 +190,12 @@ class GreenfieldResult:
     failed_stage: str | None = None
     failed_unit: str | None = None
     error: str | None = None
+    next_step: str | None = None
 
     @property
     def inspect_command(self) -> str | None:
+        if self.next_step is not None:
+            return self.next_step
         if self.failed_stage is None:
             return None
         template = _INSPECT_COMMANDS.get(self.failed_stage, "codd check")
@@ -604,6 +615,11 @@ class GreenfieldPipeline:
             save_session(project_root, session)
             try:
                 runners[stage_name](project_root, record, options)
+            except EnvironmentProvisionError as exc:
+                return self._fail(
+                    project_root, session, options, stage_name, record, str(exc),
+                    next_step=exc.next_step,
+                )
             except StageError as exc:
                 return self._fail(project_root, session, options, stage_name, record, str(exc))
             except Exception as exc:  # noqa: BLE001 — autopilot must always checkpoint + report.
@@ -638,6 +654,8 @@ class GreenfieldPipeline:
         stage_name: str,
         record: dict[str, Any],
         error: str,
+        *,
+        next_step: str | None = None,
     ) -> GreenfieldResult:
         record["status"] = STATUS_FAILED
         record["detail"] = error
@@ -658,6 +676,7 @@ class GreenfieldPipeline:
             failed_stage=stage_name,
             failed_unit=failed_unit,
             error=error,
+            next_step=next_step,
         )
         self.echo(f"[greenfield] stage {stage_name} FAILED: {error}")
         self.echo(f"[greenfield] inspect: {result.inspect_command}")
@@ -2187,35 +2206,46 @@ class GreenfieldPipeline:
             )
 
     def _provision_env(self, project_root: Path) -> None:
-        """Run the verify-time test-environment barrier (see the call in _stage_verify).
-
-        Dispatches through the profile realizer registry
-        (:func:`codd.project_types.provision_project_env`) — a strict NO-OP for a
-        stack that declares no env provisioner (returns ``ok=True,
-        action="unsupported"``, no side effects). For a stack that does, the
-        provisioner realizes the isolated, materialized execution environment its
-        layout declares and records a harness-owned state artifact the verify spawn
-        consumes. A build failure is an honest environment/toolchain error (NOT a
-        code defect) raised as a :class:`StageError`, symmetric with the lock-freshness
-        barrier. Language-agnostic: this method knows only "provision the stack's env".
-        """
+        """Provision and, where supported, repair the stack's test environment."""
         from codd.project_types import provision_project_env
 
         config, language, source_dirs, test_dirs = self._layout_inputs(project_root)
         project_name = self._layout_project_name(project_root, config)
-        result = provision_project_env(
-            project_root,
-            language=language,
-            project_name=project_name,
-            source_dirs=source_dirs,
-            test_dirs=test_dirs,
-            config=config,
-        )
+
+        def propose_dependencies(prompt: str) -> str:
+            from codd.ai_invoke import invoke_read_only, resolve_ai_command
+            from codd.elicit.engine import _collect_requirements
+
+            self.echo("[greenfield] verify: attempting to repair missing dependency declarations")
+            requirements = _collect_requirements(project_root, max_chars=40000)
+            return invoke_read_only(
+                resolve_ai_command(config, self.ai_command, command_name="implement"),
+                f"{prompt}\n\nProject requirements:\n{requirements}",
+                project_root=project_root,
+                config=config,
+                stage="greenfield verify",
+            )
+
+        try:
+            result = provision_project_env(
+                project_root,
+                language=language,
+                project_name=project_name,
+                source_dirs=source_dirs,
+                test_dirs=test_dirs,
+                config=config,
+                propose_dependencies=propose_dependencies,
+            )
+        except OSError as exc:
+            raise EnvironmentProvisionError(
+                f"test-execution environment provisioning failed before verify: {exc}",
+                "Check read and write access to the project and its test-environment state.",
+            ) from exc
         if not result.ok:
-            raise StageError(
+            raise EnvironmentProvisionError(
                 "test-execution environment provisioning failed before verify: "
-                f"{result.detail}. This is an environment/toolchain failure (the "
-                "isolated execution environment could not be built), not a code defect."
+                f"{result.detail}",
+                result.next_step or "Inspect the provisioning diagnostic and correct its cause.",
             )
         if result.action == "provisioned":
             self.echo(f"[greenfield] verify: provisioned test environment — {result.detail}")
@@ -3004,10 +3034,9 @@ class GreenfieldPipeline:
         # (its topology needs an isolated, materialized execution environment before
         # its tests can honestly run) gets that environment realized here, and a
         # harness-owned state artifact recorded so the verify spawn can find it. This
-        # is a hard barrier (a build failure is an environment/toolchain error raised
-        # as a StageError — never a code-repair target), mirroring the lock-freshness
-        # barrier above. GREENFIELD-ONLY (a plain ``codd verify`` on a brownfield repo
-        # never reaches here, so no environment is grown outside the autopilot). A
+        # is a hard barrier with its own bounded manifest repair, mirroring the
+        # lock-freshness barrier above. GREENFIELD-ONLY (a plain ``codd verify`` on a
+        # brownfield repo never grows an environment). A
         # strict NO-OP for a stack that declares no provisioner (dispatched through the
         # profile realizer registry — never a language-name branch).
         self._provision_env(project_root)
