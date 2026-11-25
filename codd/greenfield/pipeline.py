@@ -5250,6 +5250,7 @@ def _drive_test_rederivation(
             ai_command=ai_command,
             use_derived_steps=True,
             feedback=feedback,
+            _from_verification=True,
         )
 
     def _oracle_check() -> Any:
