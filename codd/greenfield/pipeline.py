@@ -99,12 +99,15 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path, PurePosixPath
 import shlex
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 # Leaf module (stdlib-only imports): safe to import at module load, no cycle.
 from codd.path_safety import has_plausible_file_extension, is_glob_decl
+
+if TYPE_CHECKING:
+    from codd.planner import PlanInitResult
 
 
 SESSION_FILENAME = "greenfield_session.yaml"
@@ -141,6 +144,8 @@ DEFAULT_OPTIONS: dict[str, Any] = {
 }
 
 RESUME_COMMAND = "codd greenfield --resume"
+_SELECT_ARTIFACTS_COMMAND = "codd plan --derive --account-decisions"
+_PLAN_ARTIFACTS_COMMAND = "codd plan --init --force --use-required-artifacts"
 
 _INSPECT_COMMANDS: dict[str, str] = {
     "init": "codd init <name> --language <language>",
@@ -157,6 +162,10 @@ _INSPECT_COMMANDS: dict[str, str] = {
 
 class StageError(RuntimeError):
     """A pipeline stage (or one of its units) failed."""
+
+
+class _RequiredArtifactSelectionError(StageError):
+    """Artifact selection failed before wave planning started."""
 
 
 class _DesignConsistencyStageError(StageError):
@@ -192,6 +201,7 @@ class GreenfieldResult:
     inspect_command_override: str | None = None
     can_resume: bool = True
     design_reconciliation: str | None = None
+    required_artifact_report: str | None = None
 
     @property
     def inspect_command(self) -> str | None:
@@ -223,6 +233,8 @@ class GreenfieldResult:
             }
         if self.design_reconciliation is not None:
             payload["design_reconciliation"] = self.design_reconciliation
+        if self.required_artifact_report is not None:
+            payload["required_artifact_report"] = self.required_artifact_report
         return payload
 
 
@@ -249,6 +261,8 @@ def format_greenfield_result(result: GreenfieldResult, format_name: str) -> str:
         lines.append(f"Session: {result.session_path.as_posix()}")
     if result.design_reconciliation is not None:
         lines.append(result.design_reconciliation)
+    if result.required_artifact_report is not None:
+        lines.append(result.required_artifact_report.rstrip())
     return "\n".join(lines) + "\n"
 
 
@@ -341,7 +355,7 @@ class ImplementTaskRef:
 # DI seam signatures (all keyword-overridable on the pipeline constructor).
 InitRunner = Callable[..., Any]
 ElicitRunner = Callable[..., str]
-PlanRunner = Callable[..., int]
+PlanRunner = Callable[..., "int | PlanInitResult"]
 WaveLister = Callable[[Path], list[int]]
 GenerateWaveRunner = Callable[..., str]
 TaskLister = Callable[[Path], list[ImplementTaskRef]]
@@ -381,6 +395,7 @@ class GreenfieldPipeline:
         requirements: str | Path | None = None,
         project_type: str | None = None,
         ai_command: str | None = None,
+        use_required_artifacts: bool = False,
         elicit: bool | None = None,
         max_repair_attempts: int | None = None,
         coverage_gate: bool | None = None,
@@ -410,6 +425,7 @@ class GreenfieldPipeline:
         self.requirements = str(requirements) if requirements is not None else None
         self.project_type = project_type
         self.ai_command = ai_command
+        self.use_required_artifacts = use_required_artifacts
         self._option_overrides = {
             "elicit": elicit,
             "max_repair_attempts": max_repair_attempts,
@@ -466,10 +482,31 @@ class GreenfieldPipeline:
     ) -> GreenfieldResult:
         project_root = _resolve_project_root(target_path)
         if dry_run:
+            if self.use_required_artifacts:
+                return self._dry_run(project_root, use_required_artifacts=True)
             return self._dry_run(project_root)
 
         session = load_session(project_root) if resume else None
+        stored_options = (session or {}).get("options", {})
+        if not isinstance(stored_options, dict):
+            stored_options = {}
+        stored_lineup_choice = stored_options.get("use_required_artifacts") is True
+        use_required_artifacts = self.use_required_artifacts or stored_lineup_choice
         if session is not None:
+            if self.use_required_artifacts and not stored_lineup_choice:
+                plan_record = session["stages"].get("plan", {})
+                if plan_record.get("status") in _COMPLETE_STATUSES:
+                    error = (
+                        "The saved plan already completed in legacy mode. Run "
+                        "'codd greenfield --use-required-artifacts' without --resume to start a new plan."
+                    )
+                    plan_record.update(status=STATUS_FAILED, detail=error)
+                    return GreenfieldResult(
+                        project_root=project_root, status="failed", stages=_stage_outcomes(session),
+                        session_path=session_path(project_root), failed_stage="plan", error=error,
+                        inspect_command_override="codd greenfield --use-required-artifacts", can_resume=False,
+                    )
+                session["options"] = {**stored_options, "use_required_artifacts": True}
             # A resumed run must continue with the SAME options the original
             # run recorded — most critically ai_command: silently falling back
             # to the project-config default mid-pipeline switches the AI model
@@ -478,6 +515,8 @@ class GreenfieldPipeline:
             # Explicit CLI overrides on the resume invocation still win.
             self._restore_session_options(session)
         options = self._resolve_options(project_root)
+        if use_required_artifacts:
+            options["use_required_artifacts"] = True
         if session is None:
             session = new_session(
                 {
@@ -632,6 +671,11 @@ class GreenfieldPipeline:
                     project_root, session, options, stage_name, record, error,
                     inspect_command="codd generate --check-design", can_resume=exc.can_resume,
                 )
+            except _RequiredArtifactSelectionError as exc:
+                return self._fail(
+                    project_root, session, options, stage_name, record, str(exc),
+                    inspect_command=_SELECT_ARTIFACTS_COMMAND,
+                )
             except StageError as exc:
                 return self._fail(project_root, session, options, stage_name, record, str(exc))
             except Exception as exc:  # noqa: BLE001 — autopilot must always checkpoint + report.
@@ -657,6 +701,7 @@ class GreenfieldPipeline:
             stages=_stage_outcomes(session),
             session_path=path,
             design_reconciliation=design_reconciliation_notice(project_root),
+            required_artifact_report=(session["stages"].get("plan") or {}).get("required_artifact_report"),
         )
 
     # ── failure handling ────────────────────────────────────
@@ -675,6 +720,8 @@ class GreenfieldPipeline:
     ) -> GreenfieldResult:
         from codd.generator import design_reconciliation_notice
 
+        if inspect_command is None and stage_name == "plan" and options.get("use_required_artifacts"):
+            inspect_command = _PLAN_ARTIFACTS_COMMAND
         record["status"] = STATUS_FAILED
         record["detail"] = error
         record["finished_at"] = _utc_now()
@@ -697,6 +744,7 @@ class GreenfieldPipeline:
             inspect_command_override=inspect_command,
             can_resume=can_resume,
             design_reconciliation=design_reconciliation_notice(project_root),
+            required_artifact_report=(session["stages"].get("plan") or {}).get("required_artifact_report"),
         )
         self.echo(f"[greenfield] stage {stage_name} FAILED: {error}")
         self.echo(f"[greenfield] inspect: {result.inspect_command}")
@@ -995,13 +1043,31 @@ class GreenfieldPipeline:
     # ── stage: plan ─────────────────────────────────────────
 
     def _stage_plan(self, project_root: Path, record: dict[str, Any], options: dict[str, Any]) -> None:
+        use_required_artifacts = options.get("use_required_artifacts", False)
+        if use_required_artifacts:
+            from codd.required_artifacts_deriver import plan_accounted_artifacts
+
+            record.pop("required_artifact_report", None)
+            try:
+                plan_accounted_artifacts(
+                    project_root, self.ai_command, select_if_unaccounted_empty=True, warn=self.echo,
+                )
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                raise _RequiredArtifactSelectionError(f"{_SELECT_ARTIFACTS_COMMAND} failed: {exc}") from exc
+
         # Deterministic, default-permissive, fail-safe requirements intake: iff the
         # resolved profile declares >=1 optional deliverable surface, classify which
         # (if any) the requirements exclude and persist them BEFORE the plan runs.
         self._classify_deliverable_surfaces(project_root)
         runner = self.plan_runner or _default_plan_runner
+        lineup_options = {"use_required_artifacts": True} if use_required_artifacts else {}
         try:
-            wave_count = int(runner(project_root, ai_command=self.ai_command, force=True))
+            result = runner(project_root, ai_command=self.ai_command, force=True, **lineup_options)
+            if use_required_artifacts and not isinstance(result, int):
+                wave_count = len(result.wave_config)
+                record["required_artifact_report"] = result.required_artifact_report
+            else:
+                wave_count = int(result)
         except (FileNotFoundError, ValueError) as exc:
             raise StageError(f"plan --init failed: {exc}") from exc
         record["detail"] = f"{wave_count} wave(s)"
@@ -1241,6 +1307,11 @@ class GreenfieldPipeline:
         lister = self.wave_lister or _default_wave_lister
         waves = list(lister(project_root))
         if not waves:
+            if options.get("use_required_artifacts"):
+                plan_record = self._session_ref["stages"].get("plan", {})
+                if plan_record.get("waves") == 0:
+                    record["detail"] = "0 waves generated"
+                    return
             raise StageError("wave_config is empty; run codd plan --init")
         units: dict[str, str] = record.get("units") or {}
         record["units"] = {str(wave): units.get(str(wave), STATUS_PENDING) for wave in waves}
@@ -3404,7 +3475,7 @@ class GreenfieldPipeline:
 
     # ── dry run ─────────────────────────────────────────────
 
-    def _dry_run(self, project_root: Path) -> GreenfieldResult:
+    def _dry_run(self, project_root: Path, *, use_required_artifacts: bool = False) -> GreenfieldResult:
         options = self._resolve_options(project_root)
         from codd.config import find_codd_dir
 
@@ -3426,7 +3497,11 @@ class GreenfieldPipeline:
             else "skip — disabled"
         )
         outcomes.append(StageOutcome("elicit", STATUS_PENDING, elicit_detail))
-        outcomes.append(StageOutcome("plan", STATUS_PENDING, "codd plan --init --force"))
+        plan_detail = (
+            f"{_SELECT_ARTIFACTS_COMMAND} (if selection is needed), then {_PLAN_ARTIFACTS_COMMAND}"
+            if use_required_artifacts else _INSPECT_COMMANDS["plan"]
+        )
+        outcomes.append(StageOutcome("plan", STATUS_PENDING, plan_detail))
 
         waves: list[int] = []
         if codd_dir is not None:
@@ -3500,9 +3575,13 @@ def _default_elicit_runner(project_root: Path, *, ai_command: str | None) -> str
     return f"findings={len(result.findings)}, applied={applied.applied_count}, skipped={applied.skipped_count}"
 
 
-def _default_plan_runner(project_root: Path, *, ai_command: str | None, force: bool) -> int:
+def _default_plan_runner(
+    project_root: Path, *, ai_command: str | None, force: bool, use_required_artifacts: bool = False,
+) -> int | PlanInitResult:
     from codd.planner import plan_init
 
+    if use_required_artifacts:
+        return plan_init(project_root, force=force, ai_command=ai_command, use_required_artifacts=True)
     result = plan_init(project_root, force=force, ai_command=ai_command)
     return len(result.wave_config)
 

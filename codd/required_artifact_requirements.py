@@ -2,6 +2,8 @@
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from hashlib import sha256
+from pathlib import Path
 import re
 from typing import Any
 
@@ -16,6 +18,13 @@ _LIST_ITEM = re.compile(r"^(?:[-+*]|[0-9]{1,9}[.)])(?: {1,4}(?! )| |$)")
 _FENCE = re.compile(r"^(?:`{3,}(?!`)[^`]*|~{3,}.*)$")
 _TABLE_PIPE = re.compile(r"(?<!\\)(?:\\\\)*\|")
 _TABLE_DIVIDER = re.compile(r":?-+:?")
+
+
+def read_requirement_snapshot(path: Path) -> tuple[str, str]:
+    """Read the prompt text and fingerprint the same source bytes."""
+    content = path.read_bytes()
+    text = content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    return text, sha256(content).hexdigest()
 
 
 def number_requirements(documents: list[tuple[str, str]]) -> tuple[list[dict[str, Any]], str]:

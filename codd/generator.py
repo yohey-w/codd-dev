@@ -155,6 +155,8 @@ def _operation_flow_field_list(capabilities: ProjectCapabilities) -> str:
 
 def build_operational_behavior_model_block(
     capabilities: ProjectCapabilities | None = None,
+    *,
+    include_actor_facing: bool = True,
 ) -> list[str]:
     """Build the design-time Operational Behavior Model guidance for a capability set.
 
@@ -188,20 +190,21 @@ def build_operational_behavior_model_block(
         "- This is not an E2E scenario list. E2E tests are only evidence generated later from the design-time operation model.",
     ]
 
-    if capabilities.user_interface:
-        block.extend(
-            [
-                "",
-                "Actor-Facing Surface/Copy Obligations (DESIGN-TIME, CRITICAL):",
-                "- If dependency documents describe user-facing surfaces, roles/actors, navigation, onboarding/authentication, or visible user copy, define the actor-facing surface/copy obligations before implementation planning.",
-                "- For each relevant surface, state its purpose, primary audience/actor, allowed actions/navigation, forbidden actions/navigation, required visible copy intent, and forbidden copy patterns.",
-                "- User-visible copy must use the audience's job-to-be-done language. Do not expose implementation rationale, internal process notes, demo/test/sample labels, environment assumptions, or hidden authority-boundary explanations unless the audience's explicit task is to administer those boundaries.",
-                "- Entry or pre-authentication surfaces must not expose ambiguous role-resolved or protected navigation; navigation must match the surface purpose and current access state.",
-                "- When requirements use internal role identifiers and business/user-facing role names, prefer the business/user-facing labels in visible copy and document the mapping.",
-            ]
-        )
+    if capabilities.user_interface and include_actor_facing:
+        block.extend(_ACTOR_FACING_SURFACE_COPY_BLOCK)
 
     return block
+
+
+_ACTOR_FACING_SURFACE_COPY_BLOCK = [
+    "",
+    "Actor-Facing Surface/Copy Obligations (DESIGN-TIME, CRITICAL):",
+    "- If dependency documents describe user-facing surfaces, roles/actors, navigation, onboarding/authentication, or visible user copy, define the actor-facing surface/copy obligations before implementation planning.",
+    "- For each relevant surface, state its purpose, primary audience/actor, allowed actions/navigation, forbidden actions/navigation, required visible copy intent, and forbidden copy patterns.",
+    "- User-visible copy must use the audience's job-to-be-done language. Do not expose implementation rationale, internal process notes, demo/test/sample labels, environment assumptions, or hidden authority-boundary explanations unless the audience's explicit task is to administer those boundaries.",
+    "- Entry or pre-authentication surfaces must not expose ambiguous role-resolved or protected navigation; navigation must match the surface purpose and current access state.",
+    "- When requirements use internal role identifiers and business/user-facing role names, prefer the business/user-facing labels in visible copy and document the mapping.",
+]
 
 
 def _resolve_generation_capabilities(
@@ -682,6 +685,9 @@ class WaveArtifact:
     modules: list[str] = ()
     behavior_owners: tuple[str, ...] | None = None
     owns_operation_flow: bool | None = None
+    required_artifact_id: str | None = None
+    required_artifact_scope: dict[str, str] | None = None
+    owns_actor_facing: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -723,6 +729,9 @@ class _DesignRewrite:
         if self.scope is None:
             self.scope = self._select_scope(artifact, lines, len(prefix.splitlines()), numbered, context, ai_command)
         replace_lines, insert_after = self.scope
+        ownership_scope = "\n".join(_required_artifact_scope_guidance(artifact))
+        if ownership_scope:
+            ownership_scope += "\n\n"
         prompt = _inject_lexicon(
             f"Reconcile the Markdown document at {artifact.output}.\nNode ID: {artifact.node_id}\n"
             f"Reported disagreements:\n{self.reasons}\n\nFixed dependency documents:\n{context}\n\n"
@@ -735,6 +744,7 @@ class _DesignRewrite:
             "outer code fence, or commentary.\n"
             f"Lines allowed to be replaced or removed: {sorted(replace_lines)}\n"
             f"New lines may be inserted after these lines only (0 means before line 1): {sorted(insert_after)}\n\n"
+            f"{ownership_scope}"
             f"Original body (numbered for reference):\n{numbered}",
             project_root,
         )
@@ -1405,6 +1415,7 @@ def _body_max_retries(config: dict[str, Any]) -> int:
 
 def _load_wave_artifacts(
     config: dict[str, Any], *, include_behavior_ownership: bool | None = None,
+    include_required_artifact_mapping: bool = True,
 ) -> list[WaveArtifact]:
     if include_behavior_ownership is None:
         include_behavior_ownership = not design_consistency_disabled(config)
@@ -1450,6 +1461,20 @@ def _load_wave_artifacts(
                 if "owns_operation_flow" in entry and not isinstance(owns_operation_flow, bool):
                     raise ValueError(f"{entry['output']}: owns_operation_flow must be true or false")
 
+            artifact_id = scope = actor_facing = None
+            if include_required_artifact_mapping:
+                artifact_id = entry.get("required_artifact_id")
+                scope = entry.get("required_artifact_scope")
+                actor_facing = entry.get("owns_actor_facing")
+                if artifact_id is not None and (not isinstance(artifact_id, str) or not artifact_id.strip()):
+                    raise ValueError(f"{entry['output']}: required_artifact_id must be a non-empty string")
+                if actor_facing is not None and not isinstance(actor_facing, bool):
+                    raise ValueError(f"{entry['output']}: owns_actor_facing must be true or false")
+                if scope is not None and (
+                    not isinstance(scope, dict) or any(not isinstance(value, str) for value in scope.values())
+                ):
+                    raise ValueError(f"{entry['output']}: required_artifact_scope must map fields to text")
+
             artifacts.append(
                 WaveArtifact(
                     wave=wave,
@@ -1461,6 +1486,9 @@ def _load_wave_artifacts(
                     modules=_normalize_modules(entry.get("modules", [])),
                     behavior_owners=tuple(owners) if owners is not None else None,
                     owns_operation_flow=owns_operation_flow,
+                    required_artifact_id=artifact_id,
+                    required_artifact_scope=scope,
+                    owns_actor_facing=actor_facing,
                 )
             )
 
@@ -1834,6 +1862,20 @@ def _is_e2e_output(output_path: str) -> bool:
     return len(parts) >= 2 and parts[0] == "tests" and parts[1] == "e2e"
 
 
+def _required_artifact_scope_guidance(artifact: WaveArtifact) -> list[str]:
+    if not artifact.required_artifact_scope:
+        return []
+    return [
+        f"Saved scope for {artifact.required_artifact_id}:",
+        yaml.safe_dump(
+            artifact.required_artifact_scope, sort_keys=False, allow_unicode=True, width=float("inf"),
+        ).rstrip(),
+        "- Write only what this document holds within the catalog and project scopes, plus any explicitly assigned design responsibility.",
+        "- Where an excluded topic matters, cite the owning document and specification id or section. Do not repeat its rules, tables, thresholds or wording.",
+        "- Apply the required document structure and existing CoDD contracts within these ownership boundaries.",
+    ]
+
+
 def _build_generation_prompt(
     artifact: WaveArtifact,
     dependency_documents: list[DependencyDocument],
@@ -1915,7 +1957,9 @@ def _build_generation_prompt(
             "Violating this instruction is a **CRITICAL ERROR** and breaks a release-blocking constraint."
         ),
     ]
-    if behavior_contract:
+    if artifact.required_artifact_scope:
+        lines.append("Treat requirements as the source of truth for the document scope and assigned responsibilities below.")
+    elif behavior_contract:
         lines.extend([
             "Treat requirements as the source of truth. Cover the requirements assigned to this document.",
             "Use dependencies for facts and existing decisions. Cite the relevant owning section and explain only how this document applies it.",
@@ -1954,7 +1998,12 @@ def _build_generation_prompt(
     reference_operation_flow = (
         behavior_contract and artifact.owns_operation_flow is False and operation_flow_owner_elsewhere
     )
-    if doc_type == "design" and not reference_operation_flow:
+    if artifact.required_artifact_scope:
+        if artifact.owns_operation_flow:
+            lines.extend(build_operational_behavior_model_block(capabilities, include_actor_facing=False))
+        if artifact.owns_actor_facing:
+            lines.extend(_ACTOR_FACING_SURFACE_COPY_BLOCK)
+    elif doc_type == "design" and not reference_operation_flow:
         lines.extend(build_operational_behavior_model_block(capabilities))
     if behavior_contract and artifact.owns_operation_flow is True:
         lines.append("You own the assigned operational model. Emit operation_flow for the operations assigned here.")
@@ -2015,6 +2064,9 @@ def _build_generation_prompt(
         lines.append(
             "- Example reflections: tenant isolation in security/data model sections, auth requirements in access control, privacy rules in compliance, performance thresholds in non-functional requirements."
         )
+
+    if artifact.required_artifact_scope:
+        lines.extend(["", *_required_artifact_scope_guidance(artifact)])
 
     lines.extend(
         [

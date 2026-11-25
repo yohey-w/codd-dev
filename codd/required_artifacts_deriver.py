@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from copy import deepcopy
 from graphlib import CycleError, TopologicalSorter
+from hashlib import sha256
 import json
 from pathlib import Path
 import re
@@ -14,11 +15,12 @@ from typing import Any
 
 import yaml
 
+from codd.ai_invoke import resolve_ai_command
 from codd.claude_cli import with_default_claude_permission_bypass
 from codd.config import load_project_config
 from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
 from codd.knowledge_fetcher import KnowledgeFetcher
-from codd.lexicon import AskItem
+from codd.lexicon import LEXICON_FILENAME, AskItem, ProjectLexicon, validate_lexicon
 from codd.path_safety import resolve_project_path
 from codd.project_types import (
     CUSTOM_PROJECT_TYPE,
@@ -26,7 +28,7 @@ from codd.project_types import (
     resolve_project_type,
     supported_project_types,
 )
-from codd.required_artifact_requirements import number_requirements
+from codd.required_artifact_requirements import number_requirements, read_requirement_snapshot
 
 
 DEFAULTS_DIR = Path(__file__).parent / "required_artifacts" / "defaults"
@@ -35,6 +37,109 @@ _ARTIFACT_TEXT_FIELDS = ("id", "title", "scope", "rationale", "source")
 _ACCOUNTED_ATTEMPTS = 3
 # Sourced from codd.defaults; see feedback_codd_default_values_policy.
 AI_TIMEOUT_SECONDS = int(_DEFAULT_AI_TIMEOUT_SECONDS)
+
+
+def artifact_fingerprint(artifacts: list[dict[str, Any]]) -> str:
+    return sha256(yaml.safe_dump(artifacts, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def lexicon_data_from_yaml(text: str) -> dict[str, Any]:
+    data = yaml.safe_load(text) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{LEXICON_FILENAME} must contain a YAML mapping")
+    for field in ("node_vocabulary", "naming_conventions", "design_principles", "coverage_decisions"):
+        data.setdefault(field, [])
+    return data
+
+
+def requirement_docs_from_lexicon(data: dict[str, Any]) -> list[str]:
+    value = data.get("requirement_docs_path") or data.get("requirement_doc_paths") or data.get("requirement_docs")
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item).strip()]
+    return []
+
+
+def accounted_lexicon_path(project_root: Path) -> Path:
+    path = resolve_project_path(project_root, LEXICON_FILENAME)
+    if path is None:
+        raise ValueError(f"{LEXICON_FILENAME} resolves outside the project")
+    return path
+
+
+def plan_accounted_artifacts(
+    project_root: Path, ai_cmd: str | None, rederive: bool = False, *,
+    warn: Callable[[str], None] = print, select_if_unaccounted_empty: bool = False,
+) -> dict[str, Any]:
+    """Reuse a saved selection or atomically persist the accounted derivation."""
+    path = accounted_lexicon_path(project_root)
+    original = _optional_file_bytes(path)
+    data = lexicon_data_from_yaml((original or b"").decode("utf-8"))
+    lexicon = ProjectLexicon(data)
+    if "required_artifacts" in data and not rederive:
+        validate_lexicon(data)
+        artifacts = lexicon.required_artifacts
+        report = {"required_artifacts": artifacts, "saved": True}
+        decisions = data.get("required_artifact_decisions")
+        if isinstance(decisions, dict) and decisions.get("artifacts_sha256") == artifact_fingerprint(artifacts):
+            report = {**decisions, **report}
+            del report["artifacts_sha256"]
+            return report
+        if artifacts or not select_if_unaccounted_empty:
+            return report
+
+    command = resolve_ai_command(load_project_config(project_root), ai_cmd, command_name="plan_derive")
+    deriver = RequiredArtifactsDeriver(project_root, ai_command=command, warn=warn)
+    report, snapshot = deriver._derive_accounted(
+        requirement_docs_from_lexicon(data), lexicon.coverage_decisions,
+    )
+    artifacts = report["required_artifacts"]
+    fingerprint = artifact_fingerprint(artifacts)
+    lexicon.set_required_artifacts(artifacts)
+    output = lexicon.as_dict()
+    output["required_artifact_decisions"] = {
+        "artifacts_sha256": fingerprint,
+        **{key: value for key, value in report.items() if key != "required_artifacts"},
+    }
+    output["required_artifact_snapshot"] = {"artifacts_sha256": fingerprint, **snapshot}
+    validate_lexicon(output)
+    _write_accounted_lexicon(path, original, yaml.safe_dump(output, sort_keys=False, allow_unicode=True))
+    return {**report, "saved": False}
+
+
+def _optional_file_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _write_accounted_lexicon(path: Path, original: bytes | None, content: str) -> None:
+    """Write the selection and its evidence together, guarding concurrent derivations."""
+    from stat import S_IMODE
+    from tempfile import NamedTemporaryFile
+
+    with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+        temp_path = Path(handle.name)
+        try:
+            handle.write(content)
+            handle.close()
+            lock = path.with_name(f".{path.name}.derive.lock")
+            try:
+                lock.mkdir()
+            except FileExistsError as exc:
+                raise ValueError(f"Another derivation is writing {LEXICON_FILENAME}. Retry the command.") from exc
+            try:
+                if _optional_file_bytes(path) != original:
+                    raise ValueError(f"{LEXICON_FILENAME} changed during derivation. Retry the command.")
+                if original is not None:
+                    temp_path.chmod(S_IMODE(path.stat().st_mode))
+                temp_path.replace(path)
+            finally:
+                lock.rmdir()
+        finally:
+            temp_path.unlink(missing_ok=True)
 
 
 class RequiredArtifactsDeriver:
@@ -72,13 +177,26 @@ class RequiredArtifactsDeriver:
         coverage_decisions: list[AskItem] | None = None,
     ) -> dict[str, Any]:
         """Derive a validated selection and account for all candidates and requirements."""
+        report, _ = self._derive_accounted(requirement_docs, coverage_decisions)
+        return report
+
+    def _derive_accounted(
+        self,
+        requirement_docs: list[str],
+        coverage_decisions: list[AskItem] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         root = self.project_root.resolve()
         documents = []
-        for path in _unique_paths(self._requirement_paths(requirement_docs)):
+        hashes = {}
+        for path in _unique_paths(self._accounted_requirement_paths(requirement_docs)):
             resolved = path.resolve()
-            if not resolved.exists():
-                raise FileNotFoundError(f"Requirement document not found: {path}")
-            documents.append((resolved.relative_to(root).as_posix(), resolved.read_text(encoding="utf-8")))
+            try:
+                text, digest = read_requirement_snapshot(resolved)
+            except FileNotFoundError as exc:
+                raise FileNotFoundError(f"Requirement document not found: {path}") from exc
+            rel = resolved.relative_to(root).as_posix()
+            documents.append((rel, text))
+            hashes[rel] = digest
         items, requirements = number_requirements(documents)
         defaults = self._load_defaults(self.project_type, strict=True)
         candidates: dict[str, dict[str, Any]] = {}
@@ -95,16 +213,26 @@ class RequiredArtifactsDeriver:
         for _ in range(_ACCOUNTED_ATTEMPTS):
             response = self._call_ai(prompt + feedback, allow_empty=True)
             try:
-                return _validate_accounted_response(response, candidates, items)
+                report = _validate_accounted_response(response, candidates, items)
+                break
             except ValueError as exc:
                 violations = str(exc)
                 feedback = (
                     "\nThe previous response failed validation. Correct every issue below "
                     "and return the complete JSON object again.\n" + violations + "\n"
                 )
-        raise ValueError(
-            f"Artifact derivation failed after {_ACCOUNTED_ATTEMPTS} attempts:\n{violations}"
-        )
+        else:
+            raise ValueError(
+                f"Artifact derivation failed after {_ACCOUNTED_ATTEMPTS} attempts:\n{violations}"
+            )
+        selected = {row["id"] for row in report["required_artifacts"]}
+        return report, {
+            "requirements_sha256": hashes,
+            "candidates": {
+                artifact_id: candidate for artifact_id, candidate in candidates.items()
+                if artifact_id in selected
+            },
+        }
 
     def _build_ai_prompt(
         self,
@@ -277,6 +405,20 @@ class RequiredArtifactsDeriver:
         if not paths:
             raise FileNotFoundError("No requirement documents found")
 
+        return paths
+
+    def _accounted_requirement_paths(self, requirement_docs: list[str]) -> list[Path]:
+        if requirement_docs or isinstance(self.config.get("requirement_docs"), list):
+            return self._requirement_paths(requirement_docs)
+
+        # Include requirement documents from the same configured scan as plan --init.
+        from codd.planner import _load_requirement_documents
+
+        root = self.project_root.resolve()
+        paths = self._discover_requirement_docs()
+        paths.extend(root / doc.path for doc in _load_requirement_documents(root, self.project_config))
+        if not paths:
+            raise FileNotFoundError("No requirement documents found")
         return paths
 
     def _discover_requirement_docs(self) -> list[Path]:
