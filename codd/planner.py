@@ -21,8 +21,13 @@ from codd.generator import (
     _load_wave_artifacts,
     _resolve_generation_capabilities,
 )
-from codd.path_safety import is_glob_decl
+from codd.path_safety import is_glob_decl, resolve_project_path
 from codd.project_types import ProjectCapabilities
+from codd.requirement_appendix import (
+    PROVISIONAL_DECISIONS_PATH,
+    read_requirement_appendix,
+    with_requirement_appendix,
+)
 from codd.validator import _iter_doc_files, _parse_codd_frontmatter, validate_project
 
 
@@ -124,7 +129,7 @@ class PlanResult:
 class RequirementDocument:
     """Requirement document used to synthesize wave_config."""
 
-    node_id: str
+    node_id: str | None
     path: str
     content: str
 
@@ -409,6 +414,7 @@ def plan_init(
         # Greenfield: use requirements
         resolved_ai_command = generator_module._resolve_ai_command(config, ai_command, command_name="plan_init")
         prompt = _build_plan_init_prompt(config, requirement_documents, capabilities)
+        has_appendix = any(doc.node_id is None for doc in requirement_documents)
     else:
         # Brownfield: try extracted docs
         extracted_documents = _load_extracted_documents(project_root, config)
@@ -420,10 +426,24 @@ def plan_init(
             )
         resolved_ai_command = generator_module._resolve_ai_command(config, ai_command, command_name="plan_init")
         prompt = _build_brownfield_plan_init_prompt(config, extracted_documents, capabilities)
+        prompt_with_appendix = with_requirement_appendix(prompt, project_root)
+        has_appendix = prompt_with_appendix != prompt
+        prompt = prompt_with_appendix
+
+    if has_appendix:
+        source = "requirement" if requirement_documents else "extracted document"
+        prompt += (
+            f"\nUse {PROVISIONAL_DECISIONS_PATH.as_posix()} as requirements context only. "
+            "Do not assign it a node ID, make it an artifact output, or cite it in depends_on. "
+            f"Use the existing {source} node IDs shown above for source dependencies.\n"
+        )
 
     prompt = generator_module._inject_lexicon(prompt, project_root)
     wave_config = _invoke_and_parse_wave_config(
-        resolved_ai_command, prompt, max_retries=_plan_init_max_retries(config)
+        resolved_ai_command,
+        prompt,
+        max_retries=_plan_init_max_retries(config),
+        appendix_root=project_root if has_appendix else None,
     )
     if requirement_documents:
         # Greenfield: GUARANTEE the canonical VB registry doc is planned so the VB
@@ -1144,6 +1164,11 @@ def _load_requirement_documents(project_root: Path, config: dict[str, Any]) -> l
             )
         )
 
+    # The appendix qualifies the primary requirements without becoming a graph dependency.
+    if documents:
+        appendix = read_requirement_appendix(project_root)
+        if appendix is not None:
+            documents.append(RequirementDocument(None, PROVISIONAL_DECISIONS_PATH.as_posix(), appendix))
     return documents
 
 
@@ -1280,10 +1305,12 @@ def _build_plan_init_prompt(
     ]
 
     for document in requirement_documents:
+        reference = document.node_id or "appendix"
+        content = document.content.rstrip() if document.node_id else document.content.removesuffix("\n")
         lines.extend(
             [
-                f"--- BEGIN REQUIREMENT {document.path} ({document.node_id}) ---",
-                document.content.rstrip(),
+                f"--- BEGIN REQUIREMENT {document.path} ({reference}) ---",
+                content,
                 f"--- END REQUIREMENT {document.path} ---",
                 "",
             ]
@@ -1463,7 +1490,11 @@ def _append_wave_config_retry_feedback(prompt: str, error: str) -> str:
 
 
 def _invoke_and_parse_wave_config(
-    ai_command: str, base_prompt: str, *, max_retries: int = DEFAULT_PLAN_INIT_MAX_RETRIES
+    ai_command: str,
+    base_prompt: str,
+    *,
+    max_retries: int = DEFAULT_PLAN_INIT_MAX_RETRIES,
+    appendix_root: Path | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Invoke the AI for a wave_config with a bounded parse-feedback retry loop.
 
@@ -1482,7 +1513,10 @@ def _invoke_and_parse_wave_config(
         prompt = base_prompt if feedback is None else _append_wave_config_retry_feedback(base_prompt, feedback)
         try:
             raw = generator_module._invoke_ai_command(ai_command, prompt)
-            return _parse_wave_config_output(raw)
+            wave_config = _parse_wave_config_output(raw)
+            if appendix_root is not None:
+                _reject_appendix_graph_references(wave_config, appendix_root)
+            return wave_config
         except ValueError as exc:
             if str(exc).startswith("AI command failed"):
                 raise  # infra failure: retrying the same broken command cannot help
@@ -1490,6 +1524,17 @@ def _invoke_and_parse_wave_config(
             feedback = str(exc)
     assert last_error is not None
     raise last_error
+
+
+def _reject_appendix_graph_references(wave_config: dict[str, list[dict[str, Any]]], project_root: Path) -> None:
+    appendix = (project_root / PROVISIONAL_DECISIONS_PATH).resolve()
+    for artifacts in wave_config.values():
+        for artifact in artifacts:
+            if resolve_project_path(project_root, artifact["output"]) == appendix or any(
+                resolve_project_path(project_root, dependency["id"]) == appendix
+                for dependency in artifact.get("depends_on", [])
+            ):
+                raise ValueError(f"{PROVISIONAL_DECISIONS_PATH.as_posix()} cannot be an output or depends_on entry")
 
 
 def _parse_wave_config_output(raw_output: str) -> dict[str, list[dict[str, Any]]]:

@@ -28,6 +28,7 @@ from codd.project_types import (
     resolve_layout_profile,
     resolve_project_type,
 )
+from codd.requirement_appendix import protect_requirement_appendix, with_requirement_appendix
 from codd.requirements_meta import normalize_operation_flow
 from codd.verifiable_behavior_audit import VB_BLOCKER_SCOPE_GUIDANCE
 
@@ -739,12 +740,12 @@ def _generate_one_artifact(
     layout_placement: str = "",
     feedback: str | None,
 ) -> GenerationResult:
-    """Render ONE artifact's document and write it (overwriting any prior file).
+    """Render ONE artifact's document and write it.
 
     The shared per-artifact rendering step used by both :func:`generate_wave`
     (the wave loop) and :func:`regenerate_artifact` (the single-doc repair seam).
-    Always (re)writes the output; skip-if-exists is the wave loop's decision, not
-    this helper's, so a scoped repair can overwrite exactly one doc.
+    The wave loop handles skip-if-exists. The managed requirements appendix is
+    reserved for elicit and human editing.
     """
 
     output_path = project_root / artifact.output
@@ -770,6 +771,7 @@ def _generate_one_artifact(
             layout_placement=layout_placement,
         ),
     )
+    protect_requirement_appendix(project_root, [Path(artifact.output)])
     output_path.write_text(content, encoding="utf-8")
     return GenerationResult(node_id=artifact.node_id, path=output_path, status="generated")
 
@@ -1213,6 +1215,11 @@ def _inject_lexicon(base_prompt: str, project_root: str | Path | None) -> str:
     return lexicon.as_context_string() + "\n\n---\n\n" + base_prompt
 
 
+def _inject_project_context(prompt: str, project_root: Path | None) -> str:
+    prompt = _inject_lexicon(prompt, project_root)
+    return with_requirement_appendix(prompt, project_root) if project_root is not None else prompt
+
+
 def _generate_document_body(
     artifact: WaveArtifact,
     dependency_documents: list[DependencyDocument],
@@ -1243,7 +1250,7 @@ def _generate_document_body(
             project_language=project_language,
             layout_placement=layout_placement,
         )
-        prompt = _inject_lexicon(prompt, project_root)
+        prompt = _inject_project_context(prompt, project_root)
         try:
             return _sanitize_generated_body(
                 artifact.title,

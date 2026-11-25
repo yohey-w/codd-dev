@@ -12,8 +12,8 @@ Stage sequence (CLI equivalents in parentheses):
   1. ``init``       (``codd init NAME --language LANG [--requirements FILE]``)
                     Skipped when a CoDD config dir already exists.
   2. ``elicit``     (``codd elicit`` + ``codd elicit apply``) — advisory and
-                    NEVER blocking: findings are applied automatically; any
-                    failure degrades to a warning and the pipeline continues.
+                    Findings are applied automatically. Discovery failures are
+                    advisory. An unreadable managed requirement stops the run.
   3. ``plan``       (``codd plan --init --force``) — writes ``wave_config``.
   4. ``generate``   (``codd generate --wave N`` for every wave, in order;
                     the ``--all-waves`` CLI flag is the shell equivalent).
@@ -105,6 +105,7 @@ import yaml
 
 # Leaf module (stdlib-only imports): safe to import at module load, no cycle.
 from codd.path_safety import has_plausible_file_extension, is_glob_decl
+from codd.requirement_appendix import UnreadableRequirementAppendix
 
 
 SESSION_FILENAME = "greenfield_session.yaml"
@@ -365,6 +366,7 @@ class GreenfieldPipeline:
         project_type: str | None = None,
         ai_command: str | None = None,
         elicit: bool | None = None,
+        provisional_decisions: bool | None = None,
         max_repair_attempts: int | None = None,
         coverage_gate: bool | None = None,
         propagate_commit: bool | None = None,
@@ -393,6 +395,7 @@ class GreenfieldPipeline:
         self.requirements = str(requirements) if requirements is not None else None
         self.project_type = project_type
         self.ai_command = ai_command
+        self.provisional_decisions = provisional_decisions
         self._option_overrides = {
             "elicit": elicit,
             "max_repair_attempts": max_repair_attempts,
@@ -434,6 +437,8 @@ class GreenfieldPipeline:
             self.requirements = str(stored["requirements"])
         if self.project_type is None and stored.get("project_type"):
             self.project_type = str(stored["project_type"])
+        if self.provisional_decisions is None and stored.get("provisional_decisions") is True:
+            self.provisional_decisions = True
         for key, value in self._option_overrides.items():
             if value is None and stored.get(key) is not None:
                 self._option_overrides[key] = stored[key]
@@ -472,6 +477,9 @@ class GreenfieldPipeline:
                     **options,
                 }
             )
+        elif options.get("provisional_decisions"):
+            stored = session.get("options")
+            session["options"] = {**(stored if isinstance(stored, dict) else {}), "provisional_decisions": True}
         session["result"] = {"status": "running", "failed_stage": None, "failed_unit": None, "error": None}
         self._session_ref = session
 
@@ -868,6 +876,8 @@ class GreenfieldPipeline:
                 resolved[key] = deepcopy(config_section[key])
             else:
                 resolved[key] = deepcopy(default)
+        if self.provisional_decisions:
+            resolved["provisional_decisions"] = True
         return resolved
 
     # ── notifications (notify-only, never blocking) ─────────
@@ -938,7 +948,7 @@ class GreenfieldPipeline:
         except SystemExit as exc:
             raise StageError(f"codd init failed (exit {exc.code})") from exc
 
-    # ── stage: elicit (advisory, never blocking) ────────────
+    # ── stage: elicit (advisory discovery) ─────────────────
 
     def _stage_elicit(self, project_root: Path, record: dict[str, Any], options: dict[str, Any]) -> None:
         if not options.get("elicit", True):
@@ -947,7 +957,14 @@ class GreenfieldPipeline:
             return
         try:
             runner = self.elicit_runner or _default_elicit_runner
-            record["detail"] = str(runner(project_root, ai_command=self.ai_command))
+            if self.elicit_runner is None and options.get("provisional_decisions"):
+                record["detail"] = _default_elicit_runner(
+                    project_root, ai_command=self.ai_command, provisional_decisions=True, echo=self.echo
+                )
+            else:
+                record["detail"] = str(runner(project_root, ai_command=self.ai_command))
+        except UnreadableRequirementAppendix as exc:
+            raise StageError(str(exc)) from exc
         except Exception as exc:  # noqa: BLE001 — elicit is advisory and must never block the autopilot.
             record["status"] = STATUS_WARNING
             record["detail"] = f"elicit skipped (non-blocking): {exc}"
@@ -3326,6 +3343,8 @@ class GreenfieldPipeline:
             if options.get("elicit", True)
             else "skip — disabled"
         )
+        if options.get("elicit", True) and options.get("provisional_decisions"):
+            elicit_detail = "codd elicit --provisional-decisions (advisory)"
         outcomes.append(StageOutcome("elicit", STATUS_PENDING, elicit_detail))
         outcomes.append(StageOutcome("plan", STATUS_PENDING, "codd plan --init --force"))
 
@@ -3390,13 +3409,28 @@ def _default_notifier(topic: str, message: str) -> bool:
     return _post_ntfy(topic, message)
 
 
-def _default_elicit_runner(project_root: Path, *, ai_command: str | None) -> str:
+def _default_elicit_runner(
+    project_root: Path,
+    *,
+    ai_command: str | None,
+    provisional_decisions: bool = False,
+    echo: Callable[[str], None] = print,
+) -> str:
     import codd.cli as cli_module
     from codd.elicit.apply import ElicitApplyEngine
     from codd.elicit.engine import ElicitEngine
 
     lexicon_config = cli_module._load_elicit_lexicon_configs(project_root, None)
-    result = ElicitEngine(ai_command=ai_command).run(project_root, lexicon_config=lexicon_config)
+    engine = ElicitEngine(ai_command=ai_command)
+    if provisional_decisions:
+        from codd.elicit.workflow import provisional_detail_lines, provisional_summary, run_provisional_elicit
+
+        _, decisions = run_provisional_elicit(project_root, engine, lexicon_config)
+        for line in provisional_detail_lines(decisions):
+            echo(f"[greenfield] elicit: {line.lstrip()}")
+        return provisional_summary(decisions, include_issues=True)
+
+    result = engine.run(project_root, lexicon_config=lexicon_config)
     applied = ElicitApplyEngine(project_root).apply(result.findings)
     return f"findings={len(result.findings)}, applied={applied.applied_count}, skipped={applied.skipped_count}"
 

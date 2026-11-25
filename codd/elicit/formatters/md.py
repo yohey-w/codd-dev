@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 
 import yaml
 
@@ -16,7 +17,12 @@ _CHECKED_APPROVAL_RE = re.compile(r"^\s*-\s*approval:\s*\[[xX]\]\s*`?([^`\s]+)`?
 class MdFormatter:
     name = "md"
 
-    def format(self, findings: list[Finding] | ElicitResult) -> str:
+    def format(
+        self,
+        findings: list[Finding] | ElicitResult,
+        *,
+        approval_states: Mapping[str, str] | None = None,
+    ) -> str:
         result = _coerce_result(findings)
         coverage_section = _coverage_section(result)
         if not result.findings:
@@ -30,8 +36,9 @@ class MdFormatter:
         if coverage_section:
             lines.extend(coverage_section.rstrip("\n").split("\n"))
             lines.append("")
+        approval_states = approval_states or {}
         for finding in result.findings:
-            lines.extend(_format_finding(finding))
+            lines.extend(_format_finding(finding, approval_states.get(finding.id, " ")))
         return "\n".join(lines).rstrip() + "\n"
 
     def parse_approval(self, raw: str) -> list[str]:
@@ -54,7 +61,7 @@ class MdFormatter:
         return [token for token in tokens if token]
 
 
-def _format_finding(finding: Finding) -> list[str]:
+def _format_finding(finding: Finding, approval_state: str = " ") -> list[str]:
     name = finding.name or finding.id
     payload = json.dumps(finding.to_dict(), ensure_ascii=False, sort_keys=True)
     lines = [
@@ -63,7 +70,7 @@ def _format_finding(finding: Finding) -> list[str]:
         "-->",
         f"## {finding.id} - {name}",
         "",
-        f"- approval: [ ] `{finding.id}`",
+        f"- approval: [{approval_state}] `{finding.id}`",
         f"- id: `{finding.id}`",
         f"- kind: `{finding.kind}`",
         f"- severity: `{finding.severity}`",
