@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,6 +12,8 @@ import yaml
 from codd.dag import DAG, Node
 from codd.deployment.providers import VerificationResult as ProviderVerificationResult
 from codd.repair import verify_runner as verify_runner_module
+from codd.repair.loop import _violations_from_verify_result
+from codd.repair.repairability_classifier import RepairabilityClassifier
 from codd.repair.verify_runner import DEFAULT_CHECKS, VerifyRunner, VerificationResult
 
 
@@ -289,6 +292,53 @@ def test_verify_runner_runtime_failure_becomes_verification_failure(tmp_path, mo
     assert result.passed is False
     assert result.failures[0].source == "verification_test_runtime"
     assert "runtime failed" in result.failure.error_messages
+
+
+def test_vitest_excluded_runtime_test_requires_additional_repair_judgment(tmp_path, monkeypatch):
+    target = "tests/e2e/cart.test.ts"
+    include = "tests/unit/**/*.test.ts"
+    test_file = tmp_path / target
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text("import { test } from 'vitest'; test('cart', () => {});\n", encoding="utf-8")
+    (tmp_path / "package.json").write_text('{"name":"sample","type":"module"}\n', encoding="utf-8")
+    (tmp_path / "vitest.config.mjs").write_text(
+        f"export default {{test: {{include: ['{include}']}}}};\n", encoding="utf-8",
+    )
+    node_id = "verification:e2e:cart"
+    dag = _dag(Node(node_id, "verification_test", attributes={
+        "kind": "e2e", "template_ref": "vitest", "source": target,
+    }))
+
+    def replay_vitest(command, *, cwd, **_kwargs):
+        assert command == f"npx vitest run {target}"
+        assert cwd == tmp_path
+        stderr = f"No test files found, exiting with code 1\n\nfilter: {target}\ninclude: {include}\n"
+        return subprocess.CompletedProcess(command, 1, "", stderr)
+
+    monkeypatch.setattr(subprocess, "run", replay_vitest)
+    settings = {"project": {"language": "typescript"}}
+    runner = VerifyRunner(tmp_path, settings)
+    runtime_result, = runner._run_verification_tests(dag, settings)
+    assert runtime_result["passed"] is False
+    failure = runner._failure_from_runtime_result(runtime_result)
+    assert failure is not None
+    assert failure.check_name == "verification_test_runtime"
+    assert "collected/ran 0 tests" in failure.message
+    assert failure.details["failure_class"] == "harness_contract_violation"
+    report = runner._repair_failure_report([failure], dag)
+    result = VerificationResult(False, failures=[failure], failure=report)
+    violations = _violations_from_verify_result(result, fallback=report)
+    prompts = []
+
+    def request_judgment(prompt):
+        prompts.append(prompt)
+        return "{}"
+
+    classification = RepairabilityClassifier(llm=request_judgment, repo_path=tmp_path).classify(violations)
+    assert classification.repairable == []
+    assert not failure.details.get("failed_nodes")
+    assert violations[0].failed_nodes == [node_id]
+    assert len(prompts) == 1
 
 
 def test_verify_runner_unknown_runtime_template_fails_without_crashing(tmp_path, monkeypatch):

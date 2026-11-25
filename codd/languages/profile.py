@@ -635,6 +635,13 @@ class LanguageProfile:
     def strictness(self) -> Strictness:
         return self.identity.strictness
 
+    def test_runner_argv(self, runner: str) -> tuple[str, ...]:
+        """Return the declared test command up through the runner token."""
+        command = self.commands.get("test")
+        if command is None or runner not in command.argv:
+            return ()
+        return command.argv[: command.argv.index(runner) + 1]
+
     def matches(self, name: str) -> bool:
         """True if *name* matches this profile's id or any alias (case-insensitive)."""
         needle = name.strip().lower()

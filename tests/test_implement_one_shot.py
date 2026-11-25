@@ -5,6 +5,7 @@ import json
 import shlex
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -169,6 +170,120 @@ def test_existing_output_uses_prompt_coverage(project, size, capsys):
         project.run(feedback="Keep the context visible in the repair.")
         assert [role for role, _ in project.calls] == ["one-shot"]
         assert "Keep the context visible in the repair." in project.calls[0][1]
+
+
+@pytest.mark.parametrize("initial, prompt_hash", [
+    (None, "c4b765dd9562c98dc1a6d9e1f7cfc7a4c157e4d3a0e640ac9cd86501c28fc599"),
+    ("prior_value = 1\n", "4bbd9e774d54409b3cf65ecfb924b51131afccceb08181134c9b29fc9c86ec92"),
+], ids=["new", "existing-full"])
+def test_one_shot_preserves_main_prompt_and_output(project, initial, prompt_hash):
+    if initial is not None:
+        project.put(OUTPUT, initial)
+    project.configure(normal=[SUCCESS], **{"one-shot": [SUCCESS]})
+
+    result = project.run()
+
+    [(role, prompt)] = project.calls
+    assert role == "one-shot"
+    if initial is not None:
+        assert initial in prompt
+    # Captured from main at d943740 before adding the response guard.
+    assert hashlib.sha256(prompt.encode()).hexdigest() == prompt_hash
+    assert result.generated_files == [project.root / OUTPUT]
+    assert result.generated_files[0].read_bytes() == (
+        b"# @generated-by: codd implement\n"
+        b"# @generated-from: docs/design.md (design:fixture)\n"
+        b"# @design-node: docs/design.md\n"
+        b"# @output-paths: src/unit.py\n\n"
+        b"value = 2\n"
+    )
+    assert project.routing == [("one_shot", "complete_context", False)]
+
+
+@pytest.mark.parametrize("batched", [False, True], ids=["single", "batch"])
+def test_unseen_existing_destination_discards_one_shot_response(project, capsys, batched):
+    original = "def persist_record():\n    return 'saved'\n"
+    storage = project.put("src/storage.py", original)
+    declaration = "Add shared date helpers in src/storage.py"
+    project.plan(("date_helpers", DESIGN, [declaration], []))
+    response = "=== FILE: storage.py ===\ndef parse_date():\n    return 'parsed'\n"
+    if batched:
+        # The new destination precedes the unseen existing one in the response.
+        response = "=== FILE: src/extra.py ===\nextra = True\n" + response
+    project.config["implement"]["no_usable_file_retries"] = 1
+    project.configure(normal=[SUCCESS], **{"one-shot": [response]})
+
+    result = project.run(output="src", expected=[declaration])
+
+    assert project.calls[0][0] == "one-shot"
+    assert declaration in project.calls[0][1]
+    assert original not in project.calls[0][1]
+    assert storage.read_text() == original
+    assert not (project.root / "src/extra.py").exists()
+    assert result.generated_files == [project.root / OUTPUT]
+    assert result.generated_files[0].read_text().endswith("\nvalue = 2\n")
+    assert [role for role, _ in project.calls] == ["one-shot", "normal"]
+    assert project.routing == [
+        ("one_shot", "complete_context", False),
+        ("standard", "unseen_existing_output", True),
+    ]
+    stderr = capsys.readouterr().err
+    assert "route=standard reason=unseen_existing_output fallback=true" in stderr
+    assert project.routing_events[-1]["detail"] in stderr
+
+
+def test_one_shot_accepts_full_existing_content_inline(project):
+    original = "legacy_value = 1"
+    storage = project.put("src/storage.py", original)
+    design = (project.root / DESIGN).read_text()
+    project.put(DESIGN, design + f"The current constant is `{original}`.\n")
+    response = SUCCESS + "=== FILE: src/storage.py ===\nlegacy_value = 2\n"
+    project.configure(normal=[response], **{"one-shot": [response]})
+
+    result = project.run(output="src", expected=[OUTPUT])
+
+    assert [role for role, _ in project.calls] == ["one-shot"]
+    [(_, prompt)] = project.calls
+    assert original in prompt
+    assert f"\n{original}" not in prompt
+    assert result.generated_files == [project.root / OUTPUT, storage]
+    assert storage.read_text().endswith("\nlegacy_value = 2\n")
+
+
+@pytest.mark.parametrize("original, design_text", [
+    ("pass\n", "Keep all checks passing.\n"),
+    ("pass \n", "An example directive appears below.\npass\n"),
+], ids=["word-fragment", "trimmed-line-outside-file-block"])
+def test_unseen_short_file_is_not_matched_to_design_prose(project, original, design_text):
+    helper = project.put("src/helper.py", original)
+    design = (project.root / DESIGN).read_text()
+    project.put(DESIGN, design + design_text)
+    response = "=== FILE: src/helper.py ===\nreplacement = True\n"
+    project.configure(normal=[SUCCESS], **{"one-shot": [response]})
+
+    result = project.run(output="src", expected=[OUTPUT])
+
+    assert project.calls[0][0] == "one-shot"
+    assert design_text.rstrip() in project.calls[0][1]
+    assert original not in project.calls[0][1]
+    assert helper.read_text() == original
+    assert result.generated_files == [project.root / OUTPUT]
+    assert project.routing[-1] == ("standard", "unseen_existing_output", True)
+
+
+def test_one_shot_accepts_full_existing_file_block_with_trimmed_whitespace(project):
+    original = "prior_value = 1  \n\n"
+    project.put(OUTPUT, original)
+    project.configure(normal=[SUCCESS], **{"one-shot": [SUCCESS]})
+
+    result = project.run()
+
+    [(role, prompt)] = project.calls
+    assert role == "one-shot"
+    assert original not in prompt
+    assert f"--- BEGIN EXISTING FILE {OUTPUT} ---\nprior_value = 1\n--- END EXISTING FILE {OUTPUT} ---" in prompt
+    assert result.generated_files == [project.root / OUTPUT]
+    assert result.generated_files[0].read_text().endswith("\nvalue = 2\n")
 
 
 @pytest.mark.parametrize("expected, role", [((), "normal"), ((OUTPUT,), "one-shot")])
@@ -424,6 +539,45 @@ def test_greenfield_uses_same_routing_for_generation_and_feedback(project):
     assert "Repair the unit." in project.calls[-1][1]
     assert project.routing[-1] == ("standard", "incomplete_existing_output", False)
     assert (project.root / OUTPUT).read_text().endswith(existing)
+
+
+def test_verify_rederivation_preserves_one_shot_joint_test_edits(project, monkeypatch):
+    from codd import implement_oracle
+    from codd.greenfield import pipeline
+    from codd.repair import verify_runner
+
+    target = "tests/test_measure.py"
+    helper = "tests/helper.py"
+    old_helper = "legacy_measure = 100\n"
+    project.put(target, "# @generated-by: codd implement\ndef test_measure():\n    assert 1 == 1\n")
+    project.put(helper, old_helper)
+    task = ImplementTaskRef("measure", DESIGN, ("tests",), expected_outputs=(target,))
+    project.plan(("measure", DESIGN, [target], []))
+    project.config["implement"]["existing_output_files_prompt_limit"] = 24000
+    project.config["ai_commands"]["impl_step_derive"] = f"{project.command} derive"
+    steps = json.dumps({"steps": [{
+        "id": "test_measure", "kind": "implementation", "rationale": "Revise the test.",
+        "source_design_section": "Build the unit.", "expected_outputs": [target], "approved": True,
+    }]})
+    test_body = "def test_measure():\n    assert 2 + 2 == 4\n"
+    helper_body = "measure = 4\n"
+    response = f"=== FILE: {target} ===\n{test_body}=== FILE: {helper} ===\n{helper_body}"
+    project.configure(derive=[steps], normal=[response], **{"one-shot": [response]})
+    monkeypatch.setattr(pipeline, "_default_task_lister", lambda root: [task])
+    monkeypatch.setattr(implement_oracle, "run_implement_oracle_gate", lambda *args, **kwargs: None)
+    monkeypatch.setattr(verify_runner, "run_standalone_verify", lambda root: SimpleNamespace(passed=True))
+
+    result = pipeline._drive_test_rederivation(
+        project.root, SimpleNamespace(blocked_test_paths=[target]), project.config, None,
+        lambda message: None, run_repair=lambda result: pytest.fail("Unexpected repair call"),
+    )
+
+    assert "verification passed after impl-blind test re-derivation" in result
+    assert [role for role, _ in project.calls] == ["derive", "one-shot"]
+    assert old_helper.rstrip() not in project.calls[1][1]
+    assert project.routing == [("one_shot", "complete_context", False)]
+    assert (project.root / target).read_text().endswith(test_body)
+    assert (project.root / helper).read_text().endswith(helper_body)
 
 
 def test_unreadable_existing_output_named_only_in_approved_steps_uses_standard(project):

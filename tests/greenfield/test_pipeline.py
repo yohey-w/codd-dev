@@ -2392,12 +2392,15 @@ def test_vb_plan_contract_skipped_when_gate_off(tmp_path: Path) -> None:
 _FACADE_PATH = "src/stub_app/__init__.py"
 
 
-def _derived_source_task(task_id: str, rel: str) -> ImplementTaskRef:
+def _derived_source_task(
+    task_id: str, rel: str, *, dependencies: tuple[str, ...] = (),
+) -> ImplementTaskRef:
     return ImplementTaskRef(
         task_id=task_id,
         design_node="docs/design/core_design.md",
         source="derived",
         expected_outputs=(rel,),
+        dependencies=dependencies,
     )
 
 
@@ -2546,6 +2549,184 @@ def test_facade_coverage_all_configured_project_is_strict_noop(tmp_path: Path) -
     assert result == tasks
     assert deriver.calls == []
     assert lister.calls == 0
+
+
+@pytest.fixture
+def facade_order_tasks() -> list[ImplementTaskRef]:
+    def task(task_id, outputs, dependencies=()):
+        return ImplementTaskRef(
+            task_id=task_id,
+            design_node="docs/design/core_design.md",
+            source="derived",
+            expected_outputs=outputs,
+            dependencies=dependencies,
+        )
+
+    return [
+        task("module", ("src/stub_app/core.py",)),
+        task("first_note", ("docs/first.md",)),
+        task("app", ("src/stub_app/app.py", _FACADE_PATH), ("module",)),
+        task("helpers", ("tests/helpers/",), ("app",)),
+        task("tests", ("tests/test_app.py",), ("app", "helpers")),
+        task("second_note", ("docs/second.md",)),
+        task("exported_module", ("src/stub_app/exported.py",)),
+    ]
+
+
+@pytest.mark.parametrize("relist", [False, True])
+def test_implement_orders_facade_between_modules_and_dependents(
+    tmp_path: Path, monkeypatch, facade_order_tasks, relist: bool,
+) -> None:
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    calls: list[str] = []
+    runners = _fake_runners(calls)
+    runners["task_lister"] = lambda _root: facade_order_tasks
+    pipeline = GreenfieldPipeline(**runners)
+    if relist:
+        # A later derive-stage gate can replace the list returned by the facade gate.
+        monkeypatch.setattr(
+            pipeline, "_enforce_design_doc_task_closure", lambda _root, _tasks: list(facade_order_tasks)
+        )
+
+    pipeline._stage_implement(project, {}, {"coverage_gate": False})
+
+    assert calls == [
+        "implement:module", "implement:first_note", "implement:exported_module",
+        "implement:app", "implement:helpers", "implement:tests", "implement:second_note",
+    ]
+
+
+@pytest.mark.parametrize("has_facade", [False, True])
+def test_implement_preserves_legacy_order_without_facade_dependents(
+    tmp_path: Path, monkeypatch, facade_order_tasks, has_facade: bool,
+) -> None:
+    from dataclasses import replace
+
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    calls: list[str] = []
+    runners = _fake_runners(calls)
+    tasks = facade_order_tasks
+    if has_facade:
+        tasks = [replace(task, dependencies=tuple(d for d in task.dependencies if d != "app")) for task in tasks]
+    runners["task_lister"] = lambda _root: tasks
+    pipeline = GreenfieldPipeline(**runners)
+    if not has_facade:
+        profile_type = type(pipeline._resolve_layout_profile(project))
+        monkeypatch.setattr(profile_type, "facade_output_paths", lambda _profile: ())
+
+    pipeline._stage_implement(project, {}, {"coverage_gate": False})
+
+    assert calls == ([
+        "implement:module", "implement:first_note", "implement:helpers", "implement:tests",
+        "implement:second_note", "implement:exported_module", "implement:app",
+    ] if has_facade else [f"implement:{task.task_id}" for task in tasks])
+
+
+def test_implement_facade_dependency_cycle_reports_task_ids_before_running(
+    tmp_path: Path, facade_order_tasks,
+) -> None:
+    from dataclasses import replace
+
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    calls: list[str] = []
+    runners = _fake_runners(calls)
+    tasks = [
+        replace(task, dependencies=("helpers",)) if task.task_id == "app" else task
+        for task in facade_order_tasks
+    ]
+    runners["task_lister"] = lambda _root: tasks
+    pipeline = GreenfieldPipeline(**runners)
+
+    with pytest.raises(StageError, match=r"cycle.*helpers.*app"):
+        pipeline._stage_implement(project, {}, {"coverage_gate": False})
+    assert calls == []
+
+
+def test_resume_implement_preserves_completed_facade_order_tasks(tmp_path: Path, facade_order_tasks) -> None:
+    project = make_stub_project(tmp_path, "stub-ai --print")
+    first_calls: list[str] = []
+    first = _fake_runners(first_calls, fail_on="implement:helpers")
+    first["task_lister"] = lambda _root: facade_order_tasks
+    result = GreenfieldPipeline(**first).run(project)
+
+    assert result.failed_unit == "helpers"
+    units = load_session(project)["stages"]["implement"]["units"]
+    assert units["app"] == "done"
+    assert units["helpers"] == "failed"
+    assert units["tests"] == "pending"
+
+    resume_calls: list[str] = []
+    resumed = _fake_runners(resume_calls)
+    resumed["task_lister"] = lambda _root: facade_order_tasks
+    result = GreenfieldPipeline(**resumed).run(project, resume=True)
+
+    assert result.status == "success", format_greenfield_result(result, "text")
+    assert [c for c in resume_calls if c.startswith("implement:")] == [
+        "implement:helpers", "implement:tests", "implement:second_note",
+    ]
+    assert load_session(project)["stages"]["implement"]["units"] == dict.fromkeys(units, "done")
+
+
+_SYNTHETIC_FACADE_PATH = "src/package/entry.unit"
+
+
+@pytest.fixture
+def order_facade_tasks(tmp_path: Path, monkeypatch):
+    pipeline = GreenfieldPipeline()
+    monkeypatch.setattr(pipeline, "_api_facade_paths", lambda _root: {_SYNTHETIC_FACADE_PATH})
+
+    def order(tasks: list[ImplementTaskRef]) -> list[str]:
+        return [task.task_id for task in pipeline._order_facade_dependencies(tmp_path, tasks)]
+
+    return order
+
+
+@pytest.mark.parametrize("dependency", ["facade", "client"], ids=["direct", "transitive"])
+def test_facade_order_keeps_dependent_modules_after_facade(order_facade_tasks, dependency: str) -> None:
+    tasks = [
+        _derived_source_task("client", "src/client/run.unit", dependencies=("facade",)),
+        _derived_source_task("extension", "src/package/extension.unit", dependencies=(dependency,)),
+        _derived_source_task("facade", _SYNTHETIC_FACADE_PATH),
+    ]
+
+    assert order_facade_tasks(tasks) == ["facade", "client", "extension"]
+
+
+def test_facade_order_preserves_input_when_facade_is_unreferenced(order_facade_tasks) -> None:
+    tasks = [
+        _derived_source_task("client", "src/client/run.unit", dependencies=("base",)),
+        _derived_source_task("base", "src/client/base.unit"),
+        _derived_source_task("facade", _SYNTHETIC_FACADE_PATH),
+    ]
+
+    assert order_facade_tasks(tasks) == ["client", "base", "facade"]
+
+
+def test_facade_order_preserves_relative_order_of_pulled_modules(order_facade_tasks) -> None:
+    tasks = [
+        _derived_source_task("client", "src/client/run.unit", dependencies=("facade",)),
+        _derived_source_task("facade", _SYNTHETIC_FACADE_PATH),
+        _derived_source_task("z_module", "src/package/z.unit"),
+        _derived_source_task("a_module", "src/package/a.unit"),
+    ]
+
+    assert order_facade_tasks(tasks) == ["z_module", "a_module", "facade", "client"]
+
+
+@pytest.mark.parametrize(
+    "unrelated_path",
+    ["src/package/extra.asset", "src/other/extra.unit"],
+    ids=["different_suffix", "different_package"],
+)
+def test_facade_order_leaves_unrelated_outputs_in_place(order_facade_tasks, unrelated_path: str) -> None:
+    tasks = [
+        _derived_source_task("client", "src/client/run.unit", dependencies=("facade",)),
+        _derived_source_task("facade", _SYNTHETIC_FACADE_PATH),
+        _derived_source_task("unrelated", unrelated_path),
+        _derived_source_task("module", "src/package/core.unit"),
+    ]
+
+    assert order_facade_tasks(tasks) == ["module", "facade", "client", "unrelated"]
 
 
 # ═══════════════════════════════════════════════════════════
