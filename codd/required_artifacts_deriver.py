@@ -489,6 +489,7 @@ Rules:
 - Every R marker must be referenced by at least one selected artifact or listed once in unassigned_requirements with a rationale. Use unassigned only where no design artifact is needed.
 - Every depends_on ID must also be selected. Do not create dependency cycles.
 - Use source ai_derived, user_override or default_template. Include derived_from with ASK item IDs when user decisions materially influenced the artifact.
+- Write every rationale, and the scope of each selected artifact, in the language of the requirement documents.
 - Return only a JSON object with these three lists. Use empty lists where applicable.
 {{
   "required_artifacts": [{{"id": "category:name", "title": "Artifact title", "scope": "What it covers", "rationale": "Why it is needed", "source": "ai_derived", "depends_on": [], "requirement_ids": ["R1"]}}],

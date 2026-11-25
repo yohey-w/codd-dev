@@ -616,3 +616,14 @@ def test_a_leading_rule_that_is_not_front_matter_keeps_its_lines_as_items(openin
     texts = [item["text"] for item in items]
     assert texts[-1] == "Export the log as CSV."
     assert len(texts) >= 2
+
+
+def test_accounted_prompt_asks_for_reasons_in_the_language_of_the_requirements(tmp_path, fake_ai):
+    _project(tmp_path)
+    _requirement(tmp_path, "requirements.md", "Keep a local log.\n")
+    prompts, responses = fake_ai
+    responses.append(_generic_response())
+
+    RequiredArtifactsDeriver(tmp_path, ai_command="mock-ai").derive_accounted([])
+
+    assert "in the language of the requirement documents" in prompts[0]
