@@ -2731,7 +2731,7 @@ def _existing_output_files_context(
     return "\n\n".join(sections)
 
 
-#: Cap on total bytes of dependency-produced file content folded into an
+#: Default cap on total characters of dependency-produced file content folded into an
 #: implement prompt by ``_dependency_artifact_files_context`` (PART 2 of the
 #: cross-artifact symbol-coherence fix). Mirrors
 #: ``EXISTING_OUTPUT_FILES_PROMPT_LIMIT``: full producer content is the
@@ -2739,6 +2739,15 @@ def _existing_output_files_context(
 #: pathological producer must never blow the prompt budget — on overflow the
 #: block degrades to a name-level surface, then to paths only.
 DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT = 20000
+
+
+def _dependency_artifact_files_prompt_limit(config: dict[str, Any]) -> int:
+    section = config.get("implement")
+    if isinstance(section, dict):
+        value = section.get("dependency_artifact_files_prompt_limit")
+        if type(value) is int and value > 0:
+            return value
+    return DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT
 
 
 def _dependency_artifact_degraded_entry(project_root: Path, path_text: str) -> str:
@@ -3112,10 +3121,11 @@ def _dependency_artifact_files_context(
     # single-ladder path when Tier-1 is empty (edge-less/no-observed shape).
     incomplete_tier1 = set() if coverage is not None else None
     incomplete_tier2 = set() if coverage is not None else None
+    limit = _dependency_artifact_files_prompt_limit(config)
     tier1_sections, tier1_used = _render_tier1_dependency_artifacts(
-        project_root, tier1, DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT, incomplete=incomplete_tier1,
+        project_root, tier1, limit, incomplete=incomplete_tier1,
     )
-    remaining = max(0, DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT - tier1_used)
+    remaining = max(0, limit - tier1_used)
     tier2_block = _render_dependency_artifact_files(project_root, tier2, remaining, incomplete=incomplete_tier2)
 
     if coverage is not None and spec is not None:
