@@ -14,12 +14,19 @@ import shutil
 import sys
 import time
 import warnings
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Collection, Iterator
 
 import codd.generator as generator_module
 from codd.ai_usage import note_implement_routing, usage_session
+from codd.discovery import (
+    DEFAULT_IGNORED_DIRS,
+    matches_exclude_pattern,
+    scan_exclude_patterns,
+    should_skip_path,
+)
 from codd.generator import DependencyDocument, _load_project_config, _normalize_conventions
 from codd.languages import resolve_assertion_guidance, resolve_test_framework_guidance
+from codd.path_safety import resolve_project_path
 from codd.project_types import ProjectCapabilities
 from codd.scanner import _extract_frontmatter, build_document_node_path_map
 from codd.verifiable_behavior_audit import VB_BLOCKER_SCOPE_GUIDANCE
@@ -2807,7 +2814,7 @@ def _tier1_signature_entry(project_root: Path, path_text: str) -> str:
 
 
 def _render_tier1_dependency_artifacts(
-    project_root: Path, tier1_paths: list[str], budget: int,
+    project_root: Path, files: list[tuple[str, str]], budget: int,
     *, incomplete: set[str] | None = None,
 ) -> tuple[list[str], int]:
     """Render Tier-1 (distance-1) producer files under the SIGNATURE-FLOOR invariant.
@@ -2820,7 +2827,6 @@ def _render_tier1_dependency_artifacts(
     than silently capped (Root B was precisely the silent distance-1 truncation).
     Returns ``(sections, bytes_used)``.
     """
-    files = list(_read_dependency_artifacts(project_root, tier1_paths, incomplete))
     if not files:
         return [], 0
 
@@ -2848,30 +2854,141 @@ def _render_tier1_dependency_artifacts(
     return sections, used
 
 
+def _read_directory_dependency_artifacts(
+    project_root: Path, directory: Path, exclude_patterns: Collection[str],
+) -> tuple[list[tuple[Path, str]], bool]:
+    """Read regular files in a declared directory and report whether the walk was complete."""
+    directory = directory.absolute()
+    try:
+        root = project_root.resolve()
+        walk_root = resolve_project_path(root, directory)
+    except (OSError, RuntimeError):
+        return [], False
+    if walk_root is None:
+        return [], False
+    lexical_root = project_root.absolute()
+    display_root = walk_root
+    if directory.is_relative_to(lexical_root) and ".." not in directory.parts:
+        display_root = root / directory.relative_to(lexical_root)
+
+    def excluded(path: Path) -> bool:
+        return should_skip_path(path, root, exclude_patterns=exclude_patterns)
+
+    def has_hidden_dir(path: Path, base: Path) -> bool:
+        if not path.is_relative_to(base):
+            base = root
+        return any(part.startswith(".") for part in path.relative_to(base).parts)
+
+    def excluded_dir(path: Path) -> bool:
+        directory_pattern = f"{path.relative_to(root).as_posix()}/"
+        return (
+            path.name in DEFAULT_IGNORED_DIRS
+            or excluded(path)
+            or any(matches_exclude_pattern(directory_pattern, pattern) for pattern in exclude_patterns)
+        )
+
+    if walk_root != display_root and (excluded_dir(walk_root) or has_hidden_dir(walk_root, root)):
+        return [], False
+    if display_root != root and excluded_dir(display_root):
+        return [], False
+
+    files: list[tuple[Path, str]] = []
+    complete = True
+
+    def record_walk_error(_error: OSError) -> None:
+        nonlocal complete
+        complete = False
+
+    for current, dirs, names in os.walk(walk_root, onerror=record_walk_error):
+        current_path = Path(current)
+        display_path = display_root / current_path.relative_to(walk_root)
+        walk_dirs: list[str] = []
+        for name in dirs:
+            path = current_path / name
+            if name.startswith(".") or excluded_dir(path) or excluded_dir(display_path / name):
+                continue
+            try:
+                if not path.is_symlink():
+                    walk_dirs.append(name)
+                    continue
+                # A linked subtree is outside the walk. Ignore it only when its
+                # in-project target is excluded as well.
+                target = resolve_project_path(root, path)
+                if target is None or not (excluded_dir(target) or has_hidden_dir(target, walk_root)):
+                    complete = False
+            except (OSError, RuntimeError):
+                complete = False
+        dirs[:] = walk_dirs
+
+        for name in names:
+            path = current_path / name
+            display_file = display_path / name
+            if excluded(path) or excluded(display_file):
+                continue
+            try:
+                resolved = resolve_project_path(root, path)
+                if resolved is None or not resolved.is_file():
+                    complete = False
+                    continue
+                if resolved != path and (excluded(resolved) or has_hidden_dir(resolved.parent, walk_root)):
+                    continue
+                files.append((display_file.relative_to(root), resolved.read_text(encoding="utf-8")))
+            except (OSError, RuntimeError, UnicodeDecodeError):
+                complete = False
+
+    return sorted(files, key=lambda artifact: artifact[0].as_posix()), complete and bool(files)
+
+
 def _read_dependency_artifacts(
     project_root: Path, output_paths: list[str], incomplete: set[str] | None,
+    *, directory_outputs: Collection[str] = (),
+    exclude_patterns: Collection[str] = (),
+    expanded_paths: set[Path] | None = None,
+    incomplete_directories: set[str] | None = None,
 ) -> Iterator[tuple[str, str]]:
     """Yield readable producer files and record omitted paths when requested."""
+    seen: set[Path] = set()
+    if expanded_paths is None:
+        expanded_paths = set()
+    if incomplete_directories is None:
+        incomplete_directories = incomplete
     for raw in output_paths:
         text = str(raw).strip()
         if not text:
             continue
         candidate = project_root / text
+        expects_directory = text in directory_outputs and text.endswith("/")
         try:
             _ensure_inside_project(project_root, candidate, "dependency artifact")
-        except ValueError:
+            is_directory = text in directory_outputs and candidate.is_dir()
+        except (ValueError, OSError, RuntimeError):
             pass
         else:
-            if candidate.is_file():
+            if is_directory:
+                files, complete = _read_directory_dependency_artifacts(project_root, candidate, exclude_patterns)
+                if not complete and incomplete_directories is not None:
+                    incomplete_directories.add(text)
+                for path, content in files:
+                    member = project_root / path
+                    expanded_paths.add(member)
+                    if member not in seen:
+                        seen.add(member)
+                        yield path.as_posix(), content
+                continue
+            if not expects_directory and candidate.is_file():
+                if candidate in expanded_paths:
+                    continue
                 try:
                     content = candidate.read_text(encoding="utf-8")
                 except (OSError, UnicodeDecodeError):
                     pass
                 else:
+                    seen.add(candidate)
                     yield text, content
                     continue
-        if incomplete is not None:
-            incomplete.add(text)
+        omissions = incomplete_directories if expects_directory else incomplete
+        if omissions is not None:
+            omissions.add(text)
 
 
 def _render_dependency_artifact_files(
@@ -3112,9 +3229,18 @@ def _dependency_artifact_files_context(
     # single-ladder path when Tier-1 is empty (edge-less/no-observed shape).
     incomplete_tier1 = set() if coverage is not None else None
     incomplete_tier2 = set() if coverage is not None else None
+    incomplete_directories: set[str] = set()
+    expanded_paths: set[Path] = set()
+    tier1_files = list(_read_dependency_artifacts(
+        project_root, tier1, incomplete_tier1, directory_outputs=t1_seen,
+        exclude_patterns=scan_exclude_patterns(config), expanded_paths=expanded_paths,
+        incomplete_directories=incomplete_directories,
+    ))
     tier1_sections, tier1_used = _render_tier1_dependency_artifacts(
-        project_root, tier1, DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT, incomplete=incomplete_tier1,
+        project_root, tier1_files, DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT, incomplete=incomplete_tier1,
     )
+    if expanded_paths:
+        tier2 = [path for path in tier2 if project_root / path not in expanded_paths]
     remaining = max(0, DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT - tier1_used)
     tier2_block = _render_dependency_artifact_files(project_root, tier2, remaining, incomplete=incomplete_tier2)
 
@@ -3124,7 +3250,8 @@ def _dependency_artifact_files_context(
         own_outputs = {project_root / path for path in (*spec.expected_outputs, *spec.output_paths)}
         coverage.unmatched_plan_task = bool(plan_records) and not matched_task
         coverage.incomplete_near_dependencies = (
-            any(dep_id not in outputs_by_id for dep_id in direct_dependencies)
+            bool(incomplete_directories)
+            or any(dep_id not in outputs_by_id for dep_id in direct_dependencies)
             or any(project_root / path not in own_outputs for path in incomplete_tier1 or ())
         )
         coverage.incomplete_distant_artifacts = len(
