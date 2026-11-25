@@ -1451,6 +1451,7 @@ class GreenfieldPipeline:
         # layer and no derived task claims it; a doc with an unclassifiable (or
         # requirement-spec) layer is echo-only fail-open — STEERED, never JUDGED.
         tasks = self._enforce_design_doc_task_closure(project_root, tasks)
+        tasks = self._order_facade_dependencies(project_root, tasks)
 
         units: dict[str, str] = record.get("units") or {}
         record["units"] = {task.task_id: units.get(task.task_id, STATUS_PENDING) for task in tasks}
@@ -1583,13 +1584,7 @@ class GreenfieldPipeline:
         """
         from codd.config import load_project_config
 
-        profile = self._resolve_layout_profile(project_root)
-        if profile is None:
-            return tasks
-        try:
-            facade_paths = {p for rel in profile.facade_output_paths() if (p := _norm_decl_path(rel))}
-        except Exception:  # noqa: BLE001 — no facade accessor => no gate.
-            facade_paths = set()
+        facade_paths = self._api_facade_paths(project_root)
         if not facade_paths:
             return tasks
 
@@ -1634,13 +1629,93 @@ class GreenfieldPipeline:
             lister = self.task_lister or _default_task_lister
             tasks = list(lister(project_root))
 
-        # Order rider: stable-move each facade-owner task to the END of the list so
-        # it is authored AFTER the modules whose real symbols it re-exports (the
-        # aggregator runs after the aggregated). Relative order is otherwise
-        # preserved.
+        # Prefer writing the facade after other tasks, as in legacy bundles.
+        # The final execution order also accounts for facade consumers, once all
+        # derive-stage gates have settled on the task list.
         owners = [task for task in tasks if self._task_declares_facade(task, facade_paths)]
         others = [task for task in tasks if not self._task_declares_facade(task, facade_paths)]
         return others + owners
+
+    def _api_facade_paths(self, project_root: Path) -> set[str]:
+        profile = self._resolve_layout_profile(project_root)
+        if profile is None:
+            return set()
+        try:
+            return {p for rel in profile.facade_output_paths() if (p := _norm_decl_path(rel))}
+        except Exception:  # noqa: BLE001 — profiles without a facade accessor opt out.
+            return set()
+
+    def _order_facade_dependencies(
+        self, project_root: Path, tasks: list[ImplementTaskRef],
+    ) -> list[ImplementTaskRef]:
+        """Repair the facade-last preference on the final task list before execution."""
+        referenced = {dep for task in tasks for dep in task.dependencies}
+        if not referenced:
+            return tasks
+        facade_paths = self._api_facade_paths(project_root)
+        owners = {
+            task.task_id: {_norm_decl_path(out) for out in task.expected_outputs} & facade_paths
+            for task in tasks
+            if self._task_declares_facade(task, facade_paths)
+        }
+        if not (owners.keys() & referenced):
+            return tasks
+
+        by_id = {task.task_id: task for task in tasks}
+        position = {task_id: index for index, task_id in enumerate(by_id)}
+        prerequisites = {task.task_id: set(task.dependencies) & by_id.keys() for task in tasks}
+        consumers: dict[str, set[str]] = {task_id: set() for task_id in by_id}
+        for task_id, dependencies in prerequisites.items():
+            for dependency in dependencies:
+                consumers[dependency].add(task_id)
+
+        # The re-export list is not available before implementation. Keep the
+        # facade behind same-package module writers, except declared consumers
+        # of that facade. Explicit prerequisites always apply, even across packages.
+        module_outputs = {
+            task.task_id: [
+                PurePosixPath(_norm_decl_path(out)) for out in task.expected_outputs
+                if not _has_test_shape(out)
+            ]
+            for task in tasks if task.task_id not in owners
+        }
+        for owner, paths in owners.items():
+            downstream = set()
+            pending = list(consumers[owner])
+            while pending:
+                consumer = pending.pop()
+                if consumer not in downstream:
+                    downstream.add(consumer)
+                    pending.extend(consumers[consumer])
+            facades = [PurePosixPath(path) for path in paths]
+            prerequisites[owner].update(
+                task_id for task_id, outputs in module_outputs.items()
+                if task_id not in downstream and any(
+                    facade.suffix and out.suffix == facade.suffix and out.is_relative_to(facade.parent)
+                    for out in outputs for facade in facades
+                )
+            )
+
+        ordered: dict[str, ImplementTaskRef] = {}
+        visiting: dict[str, None] = {}
+
+        def visit(task_id: str) -> None:
+            if task_id in ordered:
+                return
+            if task_id in visiting:
+                chain = list(visiting)
+                cycle = " -> ".join(chain[chain.index(task_id):] + [task_id])
+                raise StageError(f"implement task ordering cycle (task/facade prerequisites): {cycle}")
+            visiting[task_id] = None
+            for dependency in sorted(prerequisites[task_id], key=position.__getitem__):
+                visit(dependency)
+            del visiting[task_id]
+            ordered[task_id] = by_id[task_id]
+
+        # Walk the legacy order and pull only missing prerequisites forward.
+        for task in tasks:
+            visit(task.task_id)
+        return list(ordered.values())
 
     def _facade_owner_violations(
         self,
