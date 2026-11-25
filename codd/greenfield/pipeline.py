@@ -159,6 +159,14 @@ class StageError(RuntimeError):
     """A pipeline stage (or one of its units) failed."""
 
 
+class EnvironmentProvisionError(StageError):
+    """A provisioning failure that requires an operator action."""
+
+    def __init__(self, detail: str, next_step: str) -> None:
+        super().__init__(detail)
+        self.next_step = f"{next_step} After correcting the issue, use the resume command to retry provisioning."
+
+
 @dataclass
 class StageOutcome:
     name: str
@@ -182,9 +190,12 @@ class GreenfieldResult:
     failed_stage: str | None = None
     failed_unit: str | None = None
     error: str | None = None
+    next_step: str | None = None
 
     @property
     def inspect_command(self) -> str | None:
+        if self.next_step is not None:
+            return self.next_step
         if self.failed_stage is None:
             return None
         template = _INSPECT_COMMANDS.get(self.failed_stage, "codd check")
@@ -604,6 +615,11 @@ class GreenfieldPipeline:
             save_session(project_root, session)
             try:
                 runners[stage_name](project_root, record, options)
+            except EnvironmentProvisionError as exc:
+                return self._fail(
+                    project_root, session, options, stage_name, record, str(exc),
+                    next_step=exc.next_step,
+                )
             except StageError as exc:
                 return self._fail(project_root, session, options, stage_name, record, str(exc))
             except Exception as exc:  # noqa: BLE001 — autopilot must always checkpoint + report.
@@ -638,6 +654,8 @@ class GreenfieldPipeline:
         stage_name: str,
         record: dict[str, Any],
         error: str,
+        *,
+        next_step: str | None = None,
     ) -> GreenfieldResult:
         record["status"] = STATUS_FAILED
         record["detail"] = error
@@ -658,6 +676,7 @@ class GreenfieldPipeline:
             failed_stage=stage_name,
             failed_unit=failed_unit,
             error=error,
+            next_step=next_step,
         )
         self.echo(f"[greenfield] stage {stage_name} FAILED: {error}")
         self.echo(f"[greenfield] inspect: {result.inspect_command}")
@@ -1451,6 +1470,7 @@ class GreenfieldPipeline:
         # layer and no derived task claims it; a doc with an unclassifiable (or
         # requirement-spec) layer is echo-only fail-open — STEERED, never JUDGED.
         tasks = self._enforce_design_doc_task_closure(project_root, tasks)
+        tasks = self._order_facade_dependencies(project_root, tasks)
 
         units: dict[str, str] = record.get("units") or {}
         record["units"] = {task.task_id: units.get(task.task_id, STATUS_PENDING) for task in tasks}
@@ -1583,13 +1603,7 @@ class GreenfieldPipeline:
         """
         from codd.config import load_project_config
 
-        profile = self._resolve_layout_profile(project_root)
-        if profile is None:
-            return tasks
-        try:
-            facade_paths = {p for rel in profile.facade_output_paths() if (p := _norm_decl_path(rel))}
-        except Exception:  # noqa: BLE001 — no facade accessor => no gate.
-            facade_paths = set()
+        facade_paths = self._api_facade_paths(project_root)
         if not facade_paths:
             return tasks
 
@@ -1634,13 +1648,93 @@ class GreenfieldPipeline:
             lister = self.task_lister or _default_task_lister
             tasks = list(lister(project_root))
 
-        # Order rider: stable-move each facade-owner task to the END of the list so
-        # it is authored AFTER the modules whose real symbols it re-exports (the
-        # aggregator runs after the aggregated). Relative order is otherwise
-        # preserved.
+        # Prefer writing the facade after other tasks, as in legacy bundles.
+        # The final execution order also accounts for facade consumers, once all
+        # derive-stage gates have settled on the task list.
         owners = [task for task in tasks if self._task_declares_facade(task, facade_paths)]
         others = [task for task in tasks if not self._task_declares_facade(task, facade_paths)]
         return others + owners
+
+    def _api_facade_paths(self, project_root: Path) -> set[str]:
+        profile = self._resolve_layout_profile(project_root)
+        if profile is None:
+            return set()
+        try:
+            return {p for rel in profile.facade_output_paths() if (p := _norm_decl_path(rel))}
+        except Exception:  # noqa: BLE001 — profiles without a facade accessor opt out.
+            return set()
+
+    def _order_facade_dependencies(
+        self, project_root: Path, tasks: list[ImplementTaskRef],
+    ) -> list[ImplementTaskRef]:
+        """Repair the facade-last preference on the final task list before execution."""
+        referenced = {dep for task in tasks for dep in task.dependencies}
+        if not referenced:
+            return tasks
+        facade_paths = self._api_facade_paths(project_root)
+        owners = {
+            task.task_id: {_norm_decl_path(out) for out in task.expected_outputs} & facade_paths
+            for task in tasks
+            if self._task_declares_facade(task, facade_paths)
+        }
+        if not (owners.keys() & referenced):
+            return tasks
+
+        by_id = {task.task_id: task for task in tasks}
+        position = {task_id: index for index, task_id in enumerate(by_id)}
+        prerequisites = {task.task_id: set(task.dependencies) & by_id.keys() for task in tasks}
+        consumers: dict[str, set[str]] = {task_id: set() for task_id in by_id}
+        for task_id, dependencies in prerequisites.items():
+            for dependency in dependencies:
+                consumers[dependency].add(task_id)
+
+        # The re-export list is not available before implementation. Keep the
+        # facade behind same-package module writers, except declared consumers
+        # of that facade. Explicit prerequisites always apply, even across packages.
+        module_outputs = {
+            task.task_id: [
+                PurePosixPath(_norm_decl_path(out)) for out in task.expected_outputs
+                if not _has_test_shape(out)
+            ]
+            for task in tasks if task.task_id not in owners
+        }
+        for owner, paths in owners.items():
+            downstream = set()
+            pending = list(consumers[owner])
+            while pending:
+                consumer = pending.pop()
+                if consumer not in downstream:
+                    downstream.add(consumer)
+                    pending.extend(consumers[consumer])
+            facades = [PurePosixPath(path) for path in paths]
+            prerequisites[owner].update(
+                task_id for task_id, outputs in module_outputs.items()
+                if task_id not in downstream and any(
+                    facade.suffix and out.suffix == facade.suffix and out.is_relative_to(facade.parent)
+                    for out in outputs for facade in facades
+                )
+            )
+
+        ordered: dict[str, ImplementTaskRef] = {}
+        visiting: dict[str, None] = {}
+
+        def visit(task_id: str) -> None:
+            if task_id in ordered:
+                return
+            if task_id in visiting:
+                chain = list(visiting)
+                cycle = " -> ".join(chain[chain.index(task_id):] + [task_id])
+                raise StageError(f"implement task ordering cycle (task/facade prerequisites): {cycle}")
+            visiting[task_id] = None
+            for dependency in sorted(prerequisites[task_id], key=position.__getitem__):
+                visit(dependency)
+            del visiting[task_id]
+            ordered[task_id] = by_id[task_id]
+
+        # Walk the legacy order and pull only missing prerequisites forward.
+        for task in tasks:
+            visit(task.task_id)
+        return list(ordered.values())
 
     def _facade_owner_violations(
         self,
@@ -2187,35 +2281,46 @@ class GreenfieldPipeline:
             )
 
     def _provision_env(self, project_root: Path) -> None:
-        """Run the verify-time test-environment barrier (see the call in _stage_verify).
-
-        Dispatches through the profile realizer registry
-        (:func:`codd.project_types.provision_project_env`) — a strict NO-OP for a
-        stack that declares no env provisioner (returns ``ok=True,
-        action="unsupported"``, no side effects). For a stack that does, the
-        provisioner realizes the isolated, materialized execution environment its
-        layout declares and records a harness-owned state artifact the verify spawn
-        consumes. A build failure is an honest environment/toolchain error (NOT a
-        code defect) raised as a :class:`StageError`, symmetric with the lock-freshness
-        barrier. Language-agnostic: this method knows only "provision the stack's env".
-        """
+        """Provision and, where supported, repair the stack's test environment."""
         from codd.project_types import provision_project_env
 
         config, language, source_dirs, test_dirs = self._layout_inputs(project_root)
         project_name = self._layout_project_name(project_root, config)
-        result = provision_project_env(
-            project_root,
-            language=language,
-            project_name=project_name,
-            source_dirs=source_dirs,
-            test_dirs=test_dirs,
-            config=config,
-        )
+
+        def propose_dependencies(prompt: str) -> str:
+            from codd.ai_invoke import invoke_read_only, resolve_ai_command
+            from codd.elicit.engine import _collect_requirements
+
+            self.echo("[greenfield] verify: attempting to repair missing dependency declarations")
+            requirements = _collect_requirements(project_root, max_chars=40000)
+            return invoke_read_only(
+                resolve_ai_command(config, self.ai_command, command_name="implement"),
+                f"{prompt}\n\nProject requirements:\n{requirements}",
+                project_root=project_root,
+                config=config,
+                stage="greenfield verify",
+            )
+
+        try:
+            result = provision_project_env(
+                project_root,
+                language=language,
+                project_name=project_name,
+                source_dirs=source_dirs,
+                test_dirs=test_dirs,
+                config=config,
+                propose_dependencies=propose_dependencies,
+            )
+        except OSError as exc:
+            raise EnvironmentProvisionError(
+                f"test-execution environment provisioning failed before verify: {exc}",
+                "Check read and write access to the project and its test-environment state.",
+            ) from exc
         if not result.ok:
-            raise StageError(
+            raise EnvironmentProvisionError(
                 "test-execution environment provisioning failed before verify: "
-                f"{result.detail}. This is an environment/toolchain failure (the "
-                "isolated execution environment could not be built), not a code defect."
+                f"{result.detail}",
+                result.next_step or "Inspect the provisioning diagnostic and correct its cause.",
             )
         if result.action == "provisioned":
             self.echo(f"[greenfield] verify: provisioned test environment — {result.detail}")
@@ -3004,10 +3109,9 @@ class GreenfieldPipeline:
         # (its topology needs an isolated, materialized execution environment before
         # its tests can honestly run) gets that environment realized here, and a
         # harness-owned state artifact recorded so the verify spawn can find it. This
-        # is a hard barrier (a build failure is an environment/toolchain error raised
-        # as a StageError — never a code-repair target), mirroring the lock-freshness
-        # barrier above. GREENFIELD-ONLY (a plain ``codd verify`` on a brownfield repo
-        # never reaches here, so no environment is grown outside the autopilot). A
+        # is a hard barrier with its own bounded manifest repair, mirroring the
+        # lock-freshness barrier above. GREENFIELD-ONLY (a plain ``codd verify`` on a
+        # brownfield repo never grows an environment). A
         # strict NO-OP for a stack that declares no provisioner (dispatched through the
         # profile realizer registry — never a language-name branch).
         self._provision_env(project_root)
@@ -5250,6 +5354,7 @@ def _drive_test_rederivation(
             ai_command=ai_command,
             use_derived_steps=True,
             feedback=feedback,
+            _from_verification=True,
         )
 
     def _oracle_check() -> Any:

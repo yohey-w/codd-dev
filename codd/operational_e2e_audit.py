@@ -45,12 +45,12 @@ _COVER_MARKER_RE = re.compile(
     re.IGNORECASE,
 )
 _BLOCKER_MARKER_RE = re.compile(
-    r"codd:\s*(?:blocked|blocks)\s+"
-    r"(?:(?:operation|source_operation)\s*=\s*(?P<operation>[^\s]+)\s+"
-    r"(?:axis|coverage_axis)\s*=\s*(?P<axis>[A-Za-z0-9_.:-]+)"
-    r"|vb\s*=\s*(?P<vb>[A-Za-z0-9_.:-]+))\s+"
-    r"(?:reason|blocker_reason)\s*=\s*(?P<reason>[A-Za-z0-9_.:-]+)"
-    r"(?:\s+(?P<details>.*))?",
+    r"codd:[^\S\r\n]*(?:blocked|blocks)[^\S\r\n]+"
+    r"(?:(?:operation|source_operation)[^\S\r\n]*=[^\S\r\n]*(?P<operation>[^\s]+)[^\S\r\n]+"
+    r"(?:axis|coverage_axis)[^\S\r\n]*=[^\S\r\n]*(?P<axis>[A-Za-z0-9_.:-]+)"
+    r"|vb[^\S\r\n]*=[^\S\r\n]*(?P<vb>[A-Za-z0-9_.:-]+))[^\S\r\n]+"
+    r"(?:reason|blocker_reason)[^\S\r\n]*=[^\S\r\n]*(?P<reason>[A-Za-z0-9_.:-]+)"
+    r"(?:[^\S\r\n]+(?P<details>[^\r\n]*))?",
     re.IGNORECASE,
 )
 _DOD_MARKER_RE = re.compile(

@@ -35,6 +35,7 @@ from codd.deployment.providers import (
     VerificationTemplate,
     register_verification_template,
 )
+from codd.languages.adapters.python_pytest import pytest_launcher
 
 
 DEFAULTS_PATH = Path(__file__).parents[2] / "defaults" / "verification_templates.yaml"
@@ -96,10 +97,7 @@ class PytestHttpTemplate(VerificationTemplate):
         test_target = _specific_test_target(runtime_state, kind, project_root)
         if test_target is None:
             test_target = "tests/e2e/" if kind == "e2e" else "tests/smoke/"
-        # ``python -m pytest`` (not bare ``pytest``) so the project's interpreter
-        # /venv resolves the runner; the positional scopes the run to the e2e
-        # file/dir so an e2e node runs its OWN test, not the whole suite.
-        return f"python -m pytest -q {shlex.quote(test_target)}"
+        return shlex.join([*pytest_launcher(), "-q", test_target])
 
     def execute(
         self, command: str, cwd: Path | None = None, env: Mapping[str, str] | None = None
