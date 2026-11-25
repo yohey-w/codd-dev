@@ -2856,8 +2856,9 @@ def _render_tier1_dependency_artifacts(
 
 def _read_directory_dependency_artifacts(
     project_root: Path, directory: Path, exclude_patterns: Collection[str],
+    producer_ids: set[str], declared_output_owners: dict[Path, set[str]],
 ) -> tuple[list[tuple[Path, str]], bool]:
-    """Read regular files in a declared directory and report whether the walk was complete."""
+    """Read the directory producers' files and report coverage for each producer."""
     directory = directory.absolute()
     try:
         root = project_root.resolve()
@@ -2893,6 +2894,7 @@ def _read_directory_dependency_artifacts(
         return [], False
 
     files: list[tuple[Path, str]] = []
+    covered_producers: set[str] = set()
     complete = True
 
     def record_walk_error(_error: OSError) -> None:
@@ -2925,6 +2927,9 @@ def _read_directory_dependency_artifacts(
             display_file = display_path / name
             if excluded(path) or excluded(display_file):
                 continue
+            owners = declared_output_owners.get(display_file) or declared_output_owners.get(path)
+            if owners and producer_ids.isdisjoint(owners):
+                continue
             try:
                 resolved = resolve_project_path(root, path)
                 if resolved is None or not resolved.is_file():
@@ -2932,22 +2937,50 @@ def _read_directory_dependency_artifacts(
                     continue
                 if resolved != path and (excluded(resolved) or has_hidden_dir(resolved.parent, walk_root)):
                     continue
+                owners = owners or declared_output_owners.get(resolved)
+                matching_producers = producer_ids & owners if owners else producer_ids
+                if not matching_producers:
+                    continue
                 files.append((display_file.relative_to(root), resolved.read_text(encoding="utf-8")))
+                covered_producers.update(matching_producers)
             except (OSError, RuntimeError, UnicodeDecodeError):
                 complete = False
 
-    return sorted(files, key=lambda artifact: artifact[0].as_posix()), complete and bool(files)
+    return sorted(files, key=lambda artifact: artifact[0].as_posix()), complete and covered_producers == producer_ids
+
+
+def _declared_dependency_output_owners(
+    project_root: Path, outputs_by_id: dict[str, list[str]],
+) -> dict[Path, set[str]]:
+    """Index explicit paths and their in-project targets for directory reads."""
+    owners: dict[Path, set[str]] = {}
+    for task_id, outputs in outputs_by_id.items():
+        for output in outputs:
+            if output.endswith("/"):
+                continue
+            path = project_root / output
+            owners.setdefault(path, set()).add(task_id)
+            try:
+                resolved = resolve_project_path(project_root, path)
+            except RuntimeError:  # A symlink loop has no resolved target.
+                continue
+            if resolved is not None:
+                owners.setdefault(resolved, set()).add(task_id)
+    return owners
 
 
 def _read_dependency_artifacts(
     project_root: Path, output_paths: list[str], incomplete: set[str] | None,
-    *, directory_outputs: Collection[str] = (),
+    *, declared_producers: dict[str, set[str]] | None = None,
+    outputs_by_id: dict[str, list[str]] | None = None,
     exclude_patterns: Collection[str] = (),
     expanded_paths: set[Path] | None = None,
     incomplete_directories: set[str] | None = None,
 ) -> Iterator[tuple[str, str]]:
     """Yield readable producer files and record omitted paths when requested."""
     seen: set[Path] = set()
+    declared_producers = declared_producers or {}
+    declared_output_owners: dict[Path, set[str]] | None = None
     if expanded_paths is None:
         expanded_paths = set()
     if incomplete_directories is None:
@@ -2957,15 +2990,21 @@ def _read_dependency_artifacts(
         if not text:
             continue
         candidate = project_root / text
-        expects_directory = text in directory_outputs and text.endswith("/")
+        producer_ids = declared_producers.get(text, set())
+        expects_directory = bool(producer_ids) and text.endswith("/")
         try:
             _ensure_inside_project(project_root, candidate, "dependency artifact")
-            is_directory = text in directory_outputs and candidate.is_dir()
+            is_directory = bool(producer_ids) and candidate.is_dir()
         except (ValueError, OSError, RuntimeError):
             pass
         else:
             if is_directory:
-                files, complete = _read_directory_dependency_artifacts(project_root, candidate, exclude_patterns)
+                # Resolve output ownership only when a directory needs expansion.
+                if declared_output_owners is None:
+                    declared_output_owners = _declared_dependency_output_owners(project_root, outputs_by_id or {})
+                files, complete = _read_directory_dependency_artifacts(
+                    project_root, candidate, exclude_patterns, producer_ids, declared_output_owners,
+                )
                 if not complete and incomplete_directories is not None:
                     incomplete_directories.add(text)
                 for path, content in files:
@@ -3197,13 +3236,10 @@ def _dependency_artifact_files_context(
 
     # DISTANCE-1 declared producers: the outputs of THIS task's IMMEDIATE deps only
     # (the first BFS level), NOT the transitive closure.
-    tier1_declared: list[str] = []
-    t1_seen: set[str] = set()
+    tier1_declared: dict[str, set[str]] = {}
     for dep_id in direct_dependencies:
         for output in outputs_by_id.get(dep_id, ()):
-            if output not in t1_seen:
-                t1_seen.add(output)
-                tier1_declared.append(output)
+            tier1_declared.setdefault(output, set()).add(dep_id)
 
     # TIER-1 = observed ∪ declared distance-1 (observed = highest priority). Its
     # surface is ALWAYS carried at signature granularity or above (the Root B floor).
@@ -3232,7 +3268,8 @@ def _dependency_artifact_files_context(
     incomplete_directories: set[str] = set()
     expanded_paths: set[Path] = set()
     tier1_files = list(_read_dependency_artifacts(
-        project_root, tier1, incomplete_tier1, directory_outputs=t1_seen,
+        project_root, tier1, incomplete_tier1, declared_producers=tier1_declared,
+        outputs_by_id=outputs_by_id,
         exclude_patterns=scan_exclude_patterns(config), expanded_paths=expanded_paths,
         incomplete_directories=incomplete_directories,
     ))

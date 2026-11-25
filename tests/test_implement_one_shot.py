@@ -243,6 +243,74 @@ def test_directory_dependency_artifacts_are_rendered_in_full(project):
     assert project.routing == [("one_shot", "complete_context", False)]
 
 
+@pytest.mark.parametrize("declaration", ["direct", "symlink-parent", "parent-traversal"])
+def test_directory_dependency_with_only_another_tasks_output_uses_standard(project, declaration):
+    directory = "src/shared"
+    foreign_file = f"{directory}/other.txt"
+    foreign_content = "Separate task output.\n"
+    project.put(foreign_file, foreign_content)
+    declared_file = foreign_file
+    if declaration == "symlink-parent":
+        (project.root / "src/alias").symlink_to("shared", target_is_directory=True)
+        declared_file = "src/alias/other.txt"
+    elif declaration == "parent-traversal":
+        (project.root / "src/extra").mkdir()
+        declared_file = f"src/extra/../{Path(foreign_file).relative_to('src')}"
+    project.plan(
+        ("directory_producer", "docs/directory.md", [f"{directory}/"], []),
+        ("file_producer", "docs/file.md", [declared_file], []),
+        ("consume", DESIGN, [OUTPUT], ["directory_producer"]),
+    )
+    project.configure(normal=[SUCCESS], **{"one-shot": [SUCCESS]})
+
+    project.run(expected=[OUTPUT])
+
+    [(role, prompt)] = project.calls
+    foreign_artifact = f"BEGIN DEPENDENCY ARTIFACT {foreign_file} ---"
+    assert (role, project.routing) == ("normal", [("standard", "incomplete_dependency_artifact", False)]), (
+        f"Other task output was rendered as an artifact: {foreign_artifact in prompt}"
+    )
+    assert foreign_file not in prompt
+    assert foreign_content not in prompt
+
+
+@pytest.mark.parametrize("directory_populated, file_is_dependency", [
+    (True, False), (True, True), (False, True),
+], ids=["mixed-ownership", "both-dependencies", "missing-directory-artifact"])
+def test_directory_dependency_preserves_direct_file_dependencies(project, directory_populated, file_is_dependency):
+    directory = "src/shared"
+    directory_file = f"{directory}/directory.txt"
+    foreign_file = f"./{directory}/other"
+    foreign_content = "Separate task output.\n"
+    project.put(foreign_file, foreign_content)
+    if directory_populated:
+        project.put(directory_file, "Directory task output.\n")
+    dependencies = ["directory_producer"]
+    if file_is_dependency:
+        dependencies.append("file_producer")
+    project.plan(
+        ("directory_producer", "docs/directory.md", [directory], []),
+        ("file_producer", "docs/file.md", [foreign_file], []),
+        ("consume", DESIGN, [OUTPUT], dependencies),
+    )
+    project.configure(normal=[SUCCESS], **{"one-shot": [SUCCESS]})
+
+    project.run(expected=[OUTPUT])
+
+    [(role, prompt)] = project.calls
+    directory_artifact = f"BEGIN DEPENDENCY ARTIFACT {directory_file} ---\nDirectory task output."
+    foreign_artifact = f"BEGIN DEPENDENCY ARTIFACT {foreign_file} ---\n{foreign_content}"
+    assert (directory_artifact in prompt) == directory_populated
+    assert (foreign_artifact in prompt) == file_is_dependency
+    assert prompt.count(foreign_content) == int(file_is_dependency)
+    if directory_populated:
+        assert role == "one-shot"
+        assert project.routing == [("one_shot", "complete_context", False)]
+    else:
+        assert role == "normal"
+        assert project.routing == [("standard", "incomplete_dependency_artifact", False)]
+
+
 @pytest.mark.parametrize("problem", [
     "empty", "missing", "unreadable", "walk-error", "dangling", "inside-dir-link", "outside-file",
     "outside-dir", "outside-output", "replaced-with-file", "excluded-root-alias", "shared-output-scope",
