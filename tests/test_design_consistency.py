@@ -887,6 +887,7 @@ LIMIT = "The importer accepts files of at most 100 bytes."
 UNBOUNDED = "Input validation accepts files of any size."
 ALIGNED = "Input validation rejects files above the importer's 100 byte limit."
 RECONCILIATIONS = ".codd/audit/design-reconciliations.jsonl"
+RECONCILIATION_FAILURES = ".codd/audit/design-reconciliation-failures.jsonl"
 
 
 def _declaration(quote, *, spec=None, documents=()):
@@ -914,6 +915,168 @@ def _upstream_disagreement_project(tmp_path):
     _write(project, PEER, _declaration(UNBOUNDED, spec="input-validation"))
     _write(project, DEPENDENT, _declaration("The service delegates input validation."))
     return project
+
+
+@pytest.mark.parametrize(("failure", "stage", "reason", "attempt_calls"), [
+    ("scope", "select edit scope", "invalid line numbers in replace_lines", ["scope"]),
+    ("outside_scope", "rewrite", "outside the approved edit scope", ["rewrite"]),
+    ("unchanged", "rewrite", "reconciliation did not change the document body", ["rewrite"]),
+    ("stale_dependent", "check rewritten documents", "conflicts with", ["rewrite"]),
+    ("still_reported", "regenerate reporter", "unresolved disagreement between", ["rewrite", "reporter"]),
+])
+def test_reconciliation_reports_and_records_each_failed_attempt(
+    tmp_path, monkeypatch, failure, stage, reason, attempt_calls,
+):
+    from codd.greenfield.pipeline import format_greenfield_result
+
+    project = _upstream_disagreement_project(tmp_path)
+    config = load_project_config(project)
+    config["generate"]["body_retry"]["max_retries"] = 2
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+
+    original = _declaration(UNBOUNDED, spec="input-validation")
+    replacement = _declaration(ALIGNED, spec="input-validation")
+    if failure in {"scope", "outside_scope"}:
+        note = "Keep the original file name in the import log."
+        original = original.replace("```codd-behavior", f"{note}\n\n```codd-behavior")
+        replacement = replacement.replace("```codd-behavior", "Discard the original file name.\n\n```codd-behavior")
+    if failure == "unchanged":
+        replacement = original
+    if failure == "stale_dependent":
+        block = _block(UNBOUNDED, "accept").replace(SPEC, "input-validation")
+        _write(project, DEPENDENT, _document(UNBOUNDED, block))
+        block = _block(ALIGNED, "reject", owner=True).replace(SPEC, "input-validation")
+        replacement = _document(ALIGNED, block)
+    peer = _write(project, PEER, original)
+    calls = []
+
+    def fake(command, prompt):
+        assert command == "fake-ai"
+        if "Select reconciliation edit locations" in prompt:
+            calls.append("scope")
+            allowed = [i for i, line in enumerate(original.splitlines(), 1) if UNBOUNDED in line]
+            return json.dumps({"replace_lines": [999] if failure == "scope" else allowed, "insert_after": []})
+        if "Node ID: design:validation" in prompt:
+            calls.append("rewrite")
+            if failure == "outside_scope" and calls.count("rewrite") == 2:
+                return replacement.replace("Discard the original file name.", note).replace("## Overview", "## Details")
+            return replacement
+        assert "Node ID: test:acceptance" in prompt
+        calls.append("reporter")
+        return _declaration(DISPUTE, documents=(OWNER, PEER))
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake)
+    if failure == "still_reported":
+        result = _run_through_design_check(project)
+        assert result.failed_stage == "generate"
+        output = format_greenfield_result(result, "text")
+    else:
+        result = CliRunner().invoke(main, [
+            "generate", "--wave", "4", "--no-contract-gate", "--path", str(project),
+        ])
+        assert result.exit_code == 1
+        output = result.output
+
+    expected_calls = ["reporter"] + attempt_calls * 2
+    if failure == "outside_scope":
+        expected_calls.insert(1, "scope")
+    assert calls == expected_calls
+    assert peer.read_text(encoding="utf-8") == original
+    assert not (project / CONSUMER).exists()
+    assert "Provisional design decisions:" not in output
+    assert "codd generate --check-design" in output
+    assert "Automatic design reconciliation failed after 2 attempts." in output
+    assert f"Rewrite {PEER} to follow {OWNER}." in output
+    entry = json.loads((project / RECONCILIATION_FAILURES).read_text(encoding="utf-8"))
+    assert entry["outcome"] == "failed"
+    assert entry["disagreements"] == [{"reporter": CONSUMER, "documents": [OWNER, PEER], "quote": DISPUTE}]
+    assert entry["rewrites"] == [{"document": PEER, "follow": [OWNER]}]
+    assert [attempt["stage"] for attempt in entry["attempts"]] == [stage, stage]
+    assert [attempt["attempt"] for attempt in entry["attempts"]] == [1, 2]
+    document = {"still_reported": CONSUMER, "stale_dependent": None}.get(failure, PEER)
+    phase = f"{stage} {document}" if document else stage
+    for attempt in entry["attempts"]:
+        assert attempt["document"] == document
+        assert reason in attempt["reason"]
+        line = f"Attempt {attempt['attempt']} ({phase}): {attempt['reason']}"
+        assert " ".join(line.split()) in " ".join(output.split())
+    if failure == "outside_scope":
+        assert entry["attempts"][0]["reason"] != entry["attempts"][1]["reason"]
+    assert not (project / RECONCILIATIONS).exists()
+
+
+@pytest.mark.parametrize("ineligible", ["zero_budget", "later_document", "cited_reporter"])
+def test_reconciliation_reports_and_records_why_it_was_skipped(tmp_path, monkeypatch, ineligible):
+    project = _upstream_disagreement_project(tmp_path)
+    config = load_project_config(project)
+    if ineligible == "zero_budget":
+        config["generate"]["body_retry"]["max_retries"] = 0
+        reason = "generate.body_retry.max_retries is 0"
+    elif ineligible == "later_document":
+        config["wave_config"]["4"].extend(config["wave_config"].pop("2"))
+        reason = f"{PEER} is not earlier than reporter {CONSUMER}"
+    else:
+        _write(project, PEER, _declaration(
+            UNBOUNDED, spec="input-validation", documents=(OWNER, DEPENDENT),
+        ))
+        reason = f"{PEER} reports its own unresolved disagreement"
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+    calls = []
+
+    def fake(command, prompt):
+        assert command == "fake-ai"
+        assert "Node ID: test:acceptance" in prompt
+        calls.append("reporter")
+        return _declaration(DISPUTE, documents=(OWNER, PEER))
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake)
+    result = CliRunner().invoke(main, [
+        "generate", "--wave", "4", "--no-contract-gate", "--path", str(project),
+    ])
+
+    assert result.exit_code == 1
+    assert calls == ["reporter"]
+    assert f"Automatic design reconciliation skipped: {reason}." in result.output.splitlines()
+    assert "Review the reported design documents, then run 'codd generate --check-design'." in result.output
+    assert "Provisional design decisions:" not in result.output
+    entry = json.loads((project / RECONCILIATION_FAILURES).read_text(encoding="utf-8"))
+    assert entry["outcome"] == "skipped"
+    assert entry["reason"] == f"{reason}."
+    assert entry["attempts"] == []
+    assert not (project / RECONCILIATIONS).exists()
+
+
+def test_successful_reconciliation_keeps_the_original_output(tmp_path, monkeypatch):
+    project = _upstream_disagreement_project(tmp_path)
+    calls = []
+
+    def fake(command, prompt):
+        assert command == "fake-ai"
+        if "Node ID: design:validation" in prompt:
+            calls.append("rewrite")
+            return _declaration(ALIGNED, spec="input-validation")
+        assert "Node ID: test:acceptance" in prompt
+        calls.append("reporter")
+        if ALIGNED not in prompt:
+            return _declaration(DISPUTE, documents=(OWNER, PEER))
+        return _declaration("Files above 100 bytes are rejected.")
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake)
+    result = CliRunner().invoke(main, [
+        "generate", "--wave", "4", "--no-contract-gate", "--path", str(project),
+    ])
+
+    assert result.exit_code == 0
+    assert calls == ["reporter", "rewrite", "reporter"]
+    assert result.output == (
+        f"Generated: {CONSUMER} (test:acceptance)\n"
+        "Wave 4: 1 generated, 0 skipped\n"
+        f"Provisional design decisions: {RECONCILIATIONS}\n"
+        f"Review existing dependent documents: {DEPENDENT}\n"
+    )
+    entry = json.loads((project / RECONCILIATIONS).read_text(encoding="utf-8"))
+    assert entry.keys() == {"reporter", "documents", "quote", "rewritten", "change", "review_dependents"}
+    assert not (project / RECONCILIATION_FAILURES).exists()
 
 
 @pytest.mark.parametrize("entrypoint", ["generate", "greenfield", "single-wave"])

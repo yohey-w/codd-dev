@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from difflib import SequenceMatcher, unified_diff
 from functools import partial
 import json
@@ -78,6 +78,7 @@ DEFAULT_SEMANTIC = "governance"
 # Overridable per project via `generate.body_retry.max_retries` in codd.yaml.
 DEFAULT_BODY_MAX_RETRIES = 2
 DESIGN_RECONCILIATION_LOG = Path(".codd/audit/design-reconciliations.jsonl")
+DESIGN_RECONCILIATION_FAILURE_LOG = Path(".codd/audit/design-reconciliation-failures.jsonl")
 DOC_TYPE_BY_DIR = {
     "requirements": "requirement",
     "design": "design",
@@ -707,6 +708,7 @@ class _DesignRewrite:
     before: str
     reasons: str
     scope: tuple[set[int], set[int]] | None = None
+    selecting_scope: bool = False
 
     def draft(
         self, artifact: WaveArtifact, dependencies: list[DependencyDocument],
@@ -721,7 +723,9 @@ class _DesignRewrite:
         numbered = "\n".join(f"{number}: {line}" for number, line in enumerate(lines, 1))
         context = "\n\n".join(f"{doc.path}:\n{doc.content}" for doc in dependencies)
         if self.scope is None:
+            self.selecting_scope = True
             self.scope = self._select_scope(artifact, lines, len(prefix.splitlines()), numbered, context, ai_command)
+            self.selecting_scope = False
         replace_lines, insert_after = self.scope
         prompt = _inject_lexicon(
             f"Reconcile the Markdown document at {artifact.output}.\nNode ID: {artifact.node_id}\n"
@@ -1046,6 +1050,66 @@ def reconcile_generated_design(
         pass  # Leave diagnostics unrelated to reported disagreements to the usual gates.
 
 
+@dataclass(frozen=True)
+class _ReconciliationAttempt:
+    attempt: int
+    stage: str
+    document: str | None
+    reason: str
+
+
+def _report_reconciliation_failure(
+    project_root: Path,
+    artifacts: list[WaveArtifact],
+    original: DesignConsistencyError,
+    *,
+    skip_reason: str | None = None,
+    rewrites: dict[str, list[str]] | None = None,
+    attempts: tuple[_ReconciliationAttempt, ...] = (),
+) -> None:
+    """Add terminal diagnostics to the original error and append them to the audit log."""
+    entry: dict[str, Any] = {
+        "disagreements": [asdict(issue) for issue in original.disagreements],
+        "attempts": [asdict(attempt) for attempt in attempts],
+    }
+    if skip_reason is not None:
+        entry.update(outcome="skipped", reason=skip_reason)
+        lines = ["Automatic design reconciliation skipped: " + " ".join(skip_reason.splitlines())]
+    else:
+        count = len(attempts)
+        unit = "attempt" if count == 1 else "attempts"
+        lines = [f"Automatic design reconciliation failed after {count} {unit}."]
+        entry.update(outcome="failed", rewrites=[
+            {"document": output, "follow": peers} for output, peers in (rewrites or {}).items()
+        ])
+        for output, peers in (rewrites or {}).items():
+            lines.append(f"  Rewrite {output} to follow {', '.join(peers)}.")
+        for attempt in attempts:
+            phase = f"{attempt.stage} {attempt.document}" if attempt.document else attempt.stage
+            reason = attempt.reason.replace("\n", "\n    ")
+            lines.append(f"  Attempt {attempt.attempt} ({phase}): {reason}")
+
+    try:
+        parent = resolve_project_path(project_root, DESIGN_RECONCILIATION_FAILURE_LOG.parent)
+        if parent is None:
+            raise ValueError("invalid audit directory")
+        log = parent / DESIGN_RECONCILIATION_FAILURE_LOG.name
+        if (
+            log.is_symlink() or (log.exists() and not log.is_file())
+            or log == resolve_project_path(project_root, DESIGN_RECONCILIATION_LOG)
+            or any(log == resolve_project_path(project_root, artifact.output) for artifact in artifacts)
+        ):
+            raise ValueError("invalid audit path")
+        parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except (OSError, ValueError, RuntimeError) as exc:
+        lines.append(f"Could not record {DESIGN_RECONCILIATION_FAILURE_LOG}: {exc}")
+
+    # Keep the original exception and its details for the existing CLI and pipeline handlers.
+    original.args = (str(original) + "\n" + "\n".join(lines),)
+
+
 def _reconcile_upstream_design(
     project_root: Path,
     config: dict[str, Any],
@@ -1058,8 +1122,16 @@ def _reconcile_upstream_design(
 ) -> GenerationResult | None:
     """Rewrite later accepted peers and regenerate reporters before saving any draft."""
     budget = _body_max_retries(config)
-    if not original.disagreements or not budget or design_consistency_disabled(config):
+    if not original.disagreements:
         return None
+
+    def skip(reason: str) -> None:
+        _report_reconciliation_failure(project_root, artifacts, original, skip_reason=reason)
+
+    if not budget:
+        return skip("generate.body_retry.max_retries is 0.")
+    if design_consistency_disabled(config):
+        return skip("Automatic design consistency checks are disabled.")
 
     # Sort stably so the within-wave tie-breaker matches generate_wave.
     ordered = sorted(artifacts, key=lambda artifact: artifact.wave)
@@ -1067,14 +1139,17 @@ def _reconcile_upstream_design(
     rank = {artifact.output: index for index, artifact in enumerate(ordered)}
     dependencies = {artifact.node_id: [d["id"] for d in artifact.depends_on] for artifact in ordered}
     if len(by_output) != len(ordered) or len(dependencies) != len(ordered):
-        return None
+        return skip("The generation plan contains duplicate output paths or node IDs.")
 
     reporters = sorted({issue.reporter for issue in original.disagreements}, key=rank.__getitem__)
     rewrites: dict[str, list[DesignDisagreement]] = {}
     context_by_reporter: dict[str, set[str]] = {reporter: set() for reporter in reporters}
     for issue in original.disagreements:
-        if any(rank[path] >= rank[issue.reporter] or path in reporters for path in issue.documents):
-            return None
+        for path in issue.documents:
+            if rank[path] >= rank[issue.reporter]:
+                return skip(f"{path} is not earlier than reporter {issue.reporter}.")
+            if path in reporters:
+                return skip(f"{path} reports its own unresolved disagreement.")
         target = max(issue.documents, key=rank.__getitem__)
         rewrites.setdefault(target, []).append(issue)
         context_by_reporter[issue.reporter].update(issue.documents)
@@ -1087,8 +1162,10 @@ def _reconcile_upstream_design(
     contents: dict[str, str | None] = {}
     for output in (artifact.output for artifact in ordered if is_behavior_document(artifact.output)):
         path = resolve_project_path(project_root, output)
-        if path is None or path in paths.values():
-            return None
+        if path is None:
+            return skip(f"{output} resolves outside the project.")
+        if path in paths.values():
+            return skip(f"{output} resolves to the same file as another planned document.")
         paths[output] = path
         try:
             source = path.read_bytes() if path.is_file() else None
@@ -1096,15 +1173,17 @@ def _reconcile_upstream_design(
             contents[output] = text = source.decode("utf-8") if source is not None else None
             if output in cited:
                 if text is None:
-                    return None
+                    return skip(f"Cited document {output} is missing.")
                 contract = validate_document_role(
                     by_output[output], text, required=True,
                     operation_flow_owner_elsewhere=has_other_operation_flow_owner(config, output),
                 )
-                if contract is None or contract.unresolved:
-                    return None
-        except (OSError, ValueError):
-            return None
+                if contract is None:
+                    return skip(f"Cited document {output} has no behavior declaration.")
+                if contract.unresolved:
+                    return skip(f"{output} reports its own unresolved disagreement.")
+        except (OSError, ValueError) as exc:
+            return skip(f"Could not read or validate {output}: {exc}")
 
     def body(text: str) -> str:
         return without_behavior_contract(parse_frontmatter(text).body).strip()
@@ -1113,20 +1192,26 @@ def _reconcile_upstream_design(
         return tuple(by_output[output] for output in sorted(outputs, key=rank.__getitem__))
 
     scoped_rewrites: dict[str, _DesignRewrite] = {}
+    attempted_rewrites: dict[str, list[str]] = {}
+    attempts: list[_ReconciliationAttempt] = []
     last_error: OSError | ValueError = original
-    for _ in range(budget):
+    for number in range(1, budget + 1):
         drafts = contents | dict.fromkeys(reporters)
         try:
             changes = {}
             for output in targets:
+                stage, document = "rewrite", output
                 before = contents[output]
                 assert before is not None
                 issues = rewrites[output]
-                peers = {path for issue in issues for path in issue.documents if path != output}
+                peers = context({path for issue in issues for path in issue.documents if path != output})
+                attempted_rewrites[output] = [peer.output for peer in peers]
                 reasons = "\n".join(f"- {' and '.join(issue.documents)}: {issue.quote}" for issue in issues)
+                rewrite = scoped_rewrites.setdefault(output, _DesignRewrite(before, reasons))
+                rewrite.selecting_scope = False
                 generate_artifact(
-                    artifact=by_output[output], drafts=drafts, context=context(peers), body_max_retries=0,
-                    rewrite=scoped_rewrites.setdefault(output, _DesignRewrite(before, reasons)),
+                    artifact=by_output[output], drafts=drafts, context=peers, body_max_retries=0,
+                    rewrite=rewrite,
                     feedback=f"Latest validation:\n{last_error}",
                 )
                 after = drafts[output]
@@ -1139,8 +1224,10 @@ def _reconcile_upstream_design(
 
             # The old reporters are still rejected. Check all other available
             # documents, then require regenerated reporters to pass the same gate.
+            stage, document = "check rewritten documents", None
             enforce_design_consistency(project_root, config, complete=True, drafts=drafts, allow_missing=True)
             for reporter in reporters:
+                stage, document = "regenerate reporter", reporter
                 result = generate_artifact(
                     artifact=by_output[reporter], drafts=drafts,
                     context=context(context_by_reporter[reporter]), body_max_retries=0,
@@ -1150,8 +1237,12 @@ def _reconcile_upstream_design(
                         "Report any remaining disagreements.\n" + str(last_error),
                     ])),
                 )
+            stage, document = "check regenerated documents", None
             enforce_design_consistency(project_root, config, complete=True, drafts=drafts, allow_missing=not complete)
         except (OSError, ValueError) as exc:
+            if stage == "rewrite" and rewrite.selecting_scope:
+                stage = "select edit scope"
+            attempts.append(_ReconciliationAttempt(number, stage, document, str(exc)))
             last_error = exc
             continue
 
@@ -1170,6 +1261,9 @@ def _reconcile_upstream_design(
         updates = {output: drafts[output] for output in [*targets, *reporters]}
         _publish_reconciled_design(project_root, paths, snapshots, updates, entries)
         return result
+    _report_reconciliation_failure(
+        project_root, artifacts, original, rewrites=attempted_rewrites, attempts=tuple(attempts),
+    )
     return None
 
 
