@@ -84,7 +84,8 @@ from codd.languages.adapters.implement_oracle import (
     OracleContext,
     OracleStepObservation,
 )
-from codd.languages.profile import CommandSpec
+from codd.languages.adapters.python_pytest import pytest_launcher
+from codd.languages.profile import CommandSpec, LanguageProfile
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1080,6 +1081,8 @@ def _run_python_pytest_collect_layer(
     test_root: str,
     scope: PythonOracleScope,
     config: Mapping[str, Any] | None,
+    *,
+    profile: LanguageProfile | None = None,
 ) -> PythonToolRun:
     """``python -m pytest <test_root> --collect-only -q`` — test importability.
 
@@ -1094,10 +1097,10 @@ def _run_python_pytest_collect_layer(
     """
     timeout = _python_collect_timeout_seconds(config)
     test_root_rel = _py_norm(test_root) or "."
-    command = (
-        f"{shlex.quote(sys.executable)} -m pytest {shlex.quote(test_root_rel)} "
-        f"--collect-only -q -p no:cacheprovider"
-    )
+    launcher = pytest_launcher(profile, interpreter=sys.executable)
+    command = shlex.join([
+        *launcher, test_root_rel, "--collect-only", "-q", "-p", "no:cacheprovider",
+    ])
     try:
         completed = subprocess.run(
             command,
@@ -1656,7 +1659,8 @@ class PythonCompositeOracleAdapter:
                 project_root, source_root, package_root, test_root, scope, all_files
             ),
             _run_python_pytest_collect_layer(
-                project_root, source_root, package_root, test_root, scope, config
+                project_root, source_root, package_root, test_root, scope, config,
+                profile=ctx.language_profile,
             ),
         ]
         lint_mode = _python_lint_mode(config)

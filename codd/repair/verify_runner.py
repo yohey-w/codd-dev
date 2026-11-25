@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 import re
+import shlex
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -865,7 +866,9 @@ class VerifyRunner:
         # opt-out, like the explicit-command override: route to legacy (which, with no
         # detected command, yields the structural-only result the author asked for).
         if structural_only_allowed(settings):
-            return self._legacy_test_command(settings, reason="structural_only")
+            return self._legacy_test_command(
+                settings, reason="structural_only", profile=contract.profile if contract else None
+            )
 
         # (3) No declared language → legacy fallback (the common existing case).
         if contract is None:
@@ -874,7 +877,7 @@ class VerifyRunner:
         # (4) No verify command in the profile → legacy fallback.
         plan = build_verify_plan(contract)
         if plan is None:
-            return self._legacy_test_command(settings, reason="no_verify_plan")
+            return self._legacy_test_command(settings, reason="no_verify_plan", profile=contract.profile)
 
         # (5) Scoped runner_report-adapter gate (NOT full require_complete()). The
         # executor reads the report via ``default_adapter_registry.get("runner_report",
@@ -922,7 +925,7 @@ class VerifyRunner:
                     )
                 # legacy_compatible → pre-execution fallback (NOT a RED).
                 return self._legacy_test_command(
-                    settings, reason="missing_adapter_legacy_compatible"
+                    settings, reason="missing_adapter_legacy_compatible", profile=contract.profile
                 )
 
         # (6) Run the contract executor. Its verdict is FINAL (no legacy rescue).
@@ -996,7 +999,7 @@ class VerifyRunner:
         return env
 
     def _legacy_test_command(
-        self, settings: dict[str, Any], *, reason: str
+        self, settings: dict[str, Any], *, reason: str, profile: LanguageProfile | None = None
     ) -> tuple[bool, str | None, str, VerificationFailure | None]:
         """PRE-execution legacy fallback — the original detect+run test ladder.
 
@@ -1013,6 +1016,11 @@ class VerifyRunner:
         command = detect_test_command(self.project_root, config=settings)
         if not command:
             return False, None, "no test command detected", None
+        if profile is not None:
+            runner = command.split(maxsplit=1)[0]
+            launcher = profile.test_runner_argv(runner)
+            if len(launcher) > 1:
+                command = f"{shlex.join(launcher[:-1])} {command}"
         executed, summary, failure = self._run_evidence_command(
             command, settings, check_name="test_command", label="test command"
         )

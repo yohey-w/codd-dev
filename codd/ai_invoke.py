@@ -859,6 +859,26 @@ def invoke_ai(
                 held_workspace.cleanup()
 
 
+def invoke_read_only(
+    ai_command: str,
+    prompt: str,
+    *,
+    project_root: Path,
+    config: Mapping[str, Any],
+    stage: str,
+) -> str:
+    """Request a plain-text response from outside the project workspace."""
+    return invoke_ai(
+        ai_command,
+        prompt,
+        project_root=project_root,
+        config=config,
+        stage=stage,
+        harden_read_only=True,
+        force_print_on_claude=True,
+    )
+
+
 __all__ = [
     "AiInvoke",
     "AI_CALL_TIMEOUT_ENV",
@@ -869,6 +889,7 @@ __all__ = [
     "force_claude_print",
     "invoke_ai",
     "invoke_file_writing_agent",
+    "invoke_read_only",
     "is_codex_exec_command",
     "is_file_writing_agent",
     "prepare_read_only_codex",
