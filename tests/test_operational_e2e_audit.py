@@ -591,6 +591,64 @@ test('provider accepts the message once credentials exist', async () => {});
     assert "system send_provider_email success" not in candidate_names
 
 
+def test_operational_audit_reads_each_consecutive_blocker_marker(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        "operation_flow:\n  operations:\n    - id: op-a\n    - id: op-b\n    - id: op-c\n",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_markers.py").write_text(
+        "# codd: blocked operation=op-a axis=happy_path reason=reason-a\n"
+        "# codd: blocked operation=op-b axis=happy_path reason=reason-b \t\n"
+        "# codd: blocked operation=op-c axis=happy_path reason=reason-c \t detail text\n",
+        encoding="utf-8",
+    )
+
+    report = build_operational_e2e_audit(tmp_path)
+
+    assert {
+        row.source_operation: (row.coverage_status, row.blocker_reason, row.blocker_details)
+        for row in report.rows
+        if row.coverage_axis == "happy_path"
+    } == {
+        "codd.yaml.operation_flow#op-a": ("blocked", "reason-a", ""),
+        "codd.yaml.operation_flow#op-b": ("blocked", "reason-b", ""),
+        "codd.yaml.operation_flow#op-c": ("blocked", "reason-c", "detail text"),
+    }
+
+
+def test_operational_audit_ignores_blocker_reason_on_next_line(tmp_path):
+    codd_dir = tmp_path / "codd"
+    codd_dir.mkdir()
+    (codd_dir / "codd.yaml").write_text(
+        "operation_flow:\n  operations:\n    - id: op-a\n    - id: op-b\n    - id: op-c\n",
+        encoding="utf-8",
+    )
+    tests_dir = tmp_path / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_markers.py").write_text(
+        "# codd: blocked operation=op-a axis=happy_path reason=one\n"
+        "# codd: blocked operation=op-b axis=happy_path\n"
+        "reason = None  # codd: blocked operation=op-c axis=happy_path reason=three\n",
+        encoding="utf-8",
+    )
+
+    report = build_operational_e2e_audit(tmp_path)
+
+    assert {
+        row.source_operation: (row.coverage_status, row.blocker_reason)
+        for row in report.rows
+        if row.coverage_axis == "happy_path"
+    } == {
+        "codd.yaml.operation_flow#op-a": ("blocked", "one"),
+        "codd.yaml.operation_flow#op-b": ("uncovered", ""),
+        "codd.yaml.operation_flow#op-c": ("blocked", "three"),
+    }
+
+
 def test_cli_e2e_audit_writes_markdown(tmp_path):
     codd_dir = tmp_path / "codd"
     codd_dir.mkdir()
