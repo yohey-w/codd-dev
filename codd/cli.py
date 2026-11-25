@@ -3970,8 +3970,14 @@ def generate(
     check_design: bool = False,
 ):
     """Generate CoDD documents for a specific wave (or all waves)."""
-    from codd.design_consistency import enforce_design_consistency
-    from codd.generator import generate_wave, _load_project_config, reconcile_design_artifact
+    from codd.design_consistency import DesignConsistencyError, enforce_design_consistency
+    from codd.generator import (
+        _load_project_config,
+        design_reconciliation_notice,
+        generate_wave,
+        reconcile_design_artifact,
+        reconcile_generated_design,
+    )
 
     if reconcile_design or check_design:
         if all_waves or wave is not None or (reconcile_design and check_design):
@@ -4029,6 +4035,15 @@ def generate(
         click.echo(f"Wave {wave_number}: {generated} generated, {skipped} skipped")
         return generated, skipped
 
+    def _report_disagreement(exc: Exception) -> None:
+        if isinstance(exc, DesignConsistencyError) and exc.disagreements:
+            click.echo("Review the reported design documents, then run 'codd generate --check-design'.")
+
+    def _report_decisions() -> None:
+        notice = design_reconciliation_notice(project_root)
+        if notice is not None:
+            click.echo(notice)
+
     if all_waves:
         try:
             wave_numbers = _wave_numbers_from_config(_load_project_config(project_root))
@@ -4050,13 +4065,18 @@ def generate(
                     f"Stopped at wave {wave_number}; "
                     f"completed wave(s): {', '.join(str(item) for item in completed) or 'none'}"
                 )
+                _report_disagreement(exc)
+                _report_decisions()
                 raise SystemExit(1)
             completed.append(wave_number)
             total_generated += generated
             total_skipped += skipped
         try:
+            reconcile_generated_design(project_root, ai_command=ai_cmd)
             summary = enforce_design_consistency(project_root, _load_project_config(project_root), complete=True)
         except ValueError as exc:
+            _report_disagreement(exc)
+            _report_decisions()
             raise click.ClickException(str(exc)) from exc
         if summary is not None:
             click.echo(str(summary))
@@ -4064,14 +4084,20 @@ def generate(
             f"All waves complete ({len(completed)} wave(s)): "
             f"{total_generated} generated, {total_skipped} skipped"
         )
+        _report_decisions()
         _enforce_stage_contract_gate(project_root, "generate", opt_out=no_contract_gate)
         return
 
     try:
-        _generate_one(int(wave))  # type: ignore[arg-type]
+        wave_number = int(wave)  # type: ignore[arg-type]
+        _generate_one(wave_number)
+        reconcile_generated_design(project_root, ai_command=ai_cmd, wave=wave_number)
     except (FileNotFoundError, ValueError) as exc:
         click.echo(f"Error: {exc}")
+        _report_disagreement(exc)
+        _report_decisions()
         raise SystemExit(1)
+    _report_decisions()
 
     _enforce_stage_contract_gate(project_root, "generate", opt_out=no_contract_gate)
 

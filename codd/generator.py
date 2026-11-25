@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from difflib import SequenceMatcher, unified_diff
+from functools import partial
+import json
 from pathlib import Path, PurePosixPath
 import re
 import subprocess  # noqa: F401 — kept: tests monkeypatch ``generator.subprocess.run``
+from tempfile import NamedTemporaryFile
 from typing import Any, Callable
 
 import yaml
@@ -22,6 +26,9 @@ from codd.config import load_project_config
 from codd.design_consistency import (
     CONTRACT_GUIDANCE,
     DesignConsistencyError,
+    DesignDisagreement,
+    _contract_blocks,
+    _depends_on,
     StrictDesignLoader,
     design_consistency_disabled,
     enforce_design_consistency,
@@ -36,6 +43,7 @@ from codd.design_consistency import (
     without_behavior_contract,
 )
 from codd.e2e_harness import resolve_e2e_harness
+from codd.frontmatter import parse_frontmatter
 from codd.languages import resolve_test_framework_guidance
 from codd.path_safety import resolve_project_path
 from codd.project_types import (
@@ -69,6 +77,7 @@ DEFAULT_SEMANTIC = "governance"
 # Bounded regeneration attempts when a generated body fails output validation.
 # Overridable per project via `generate.body_retry.max_retries` in codd.yaml.
 DEFAULT_BODY_MAX_RETRIES = 2
+DESIGN_RECONCILIATION_LOG = Path(".codd/audit/design-reconciliations.jsonl")
 DOC_TYPE_BY_DIR = {
     "requirements": "requirement",
     "design": "design",
@@ -693,6 +702,118 @@ class DependencyDocument:
     content: str
 
 
+@dataclass
+class _DesignRewrite:
+    before: str
+    reasons: str
+    scope: tuple[set[int], set[int]] | None = None
+
+    def draft(
+        self, artifact: WaveArtifact, dependencies: list[DependencyDocument],
+        ai_command: str, feedback: str | None, project_root: Path,
+    ) -> str:
+        body = parse_frontmatter(self.before).body
+        start = len(body) - len(body.lstrip("\r\n"))
+        end = len(body.rstrip("\r\n"))
+        prefix = self.before.removesuffix(body) + body[:start]
+        source = body[start:end]
+        lines = source.splitlines()
+        numbered = "\n".join(f"{number}: {line}" for number, line in enumerate(lines, 1))
+        context = "\n\n".join(f"{doc.path}:\n{doc.content}" for doc in dependencies)
+        if self.scope is None:
+            self.scope = self._select_scope(artifact, lines, len(prefix.splitlines()), numbered, context, ai_command)
+        replace_lines, insert_after = self.scope
+        prompt = _inject_lexicon(
+            f"Reconcile the Markdown document at {artifact.output}.\nNode ID: {artifact.node_id}\n"
+            f"Reported disagreements:\n{self.reasons}\n\nFixed dependency documents:\n{context}\n\n"
+            f"{feedback or ''}\n\n{CONTRACT_GUIDANCE}\n\n"
+            "Return the full Markdown body, preserving every line outside the approved edit scope verbatim. "
+            "Within the approved lines, retain clauses unrelated to the disagreement. "
+            "Keep the existing ownership and any declaration unrelated to these disagreements. "
+            "Keep explicit requirements. When requirements leave a choice open, state the provisional "
+            "decision in the body and record applicable boundary cases. No frontmatter, line numbers, "
+            "outer code fence, or commentary.\n"
+            f"Lines allowed to be replaced or removed: {sorted(replace_lines)}\n"
+            f"New lines may be inserted after these lines only (0 means before line 1): {sorted(insert_after)}\n\n"
+            f"Original body (numbered for reference):\n{numbered}",
+            project_root,
+        )
+        proposal = _invoke_ai_command(ai_command, prompt).strip("\r\n").splitlines()
+        updated = _apply_reconciliation_scope(artifact.output, source, proposal, self.scope)
+        _validate_generated_body(artifact.title, updated, output_path=artifact.output)
+        return prefix + updated + body[end:]
+
+    def _select_scope(
+        self, artifact: WaveArtifact, lines: list[str], line_offset: int, numbered: str, context: str, ai_command: str,
+    ) -> tuple[set[int], set[int]]:
+        # When the whole document makes just one declared claim in one prose
+        # line, that line and its declaration already locate the only decision.
+        [(first, last)] = _contract_blocks("\n".join(lines))
+        contract = parse_behavior_contract(self.before, artifact.output)
+        assert contract is not None
+        prose = [i for i, line in enumerate(lines, 1)
+                 if not first < i <= last + 1 and line.strip() and not line.lstrip().startswith("#")]
+        if (len(prose) == 1 and list(contract.owns.values()) == [f"{artifact.output}:{line_offset + prose[0]}"]
+                and not contract.cases and not contract.unresolved):
+            interior = set(range(first + 2, last + 1))
+            return set(prose) | interior, interior | {first + 1}
+
+        # Freeze the scope before asking for replacement text. A rejected
+        # rewrite must not be able to widen its own scope on the next attempt.
+        response = _invoke_ai_command(ai_command, (
+            f"Select reconciliation edit locations in {artifact.output}.\n"
+            f"Reported disagreements:\n{self.reasons}\n\nFixed dependency documents:\n{context}\n\n"
+            "Select only the individual lines that must change or be removed to resolve these disagreements, "
+            "including affected table rows and codd-behavior declarations. Also select positions for any "
+            "necessary new lines, such as the provisional decision and boundary declarations. Preserve all "
+            "other decisions, wording, formatting and declarations. Return a JSON object with exactly the "
+            "integer lists replace_lines and insert_after. Numbering starts at 1; use 0 in insert_after to "
+            "allow insertion before line 1. Return locations only.\n\n"
+            f"Original body:\n{numbered}"
+        ))
+        try:
+            from codd.llm.plan_deriver import strip_json_fence
+
+            data = json.loads(strip_json_fence(response))
+            if not isinstance(data, dict) or data.keys() != {"replace_lines", "insert_after"}:
+                raise ValueError("expected replace_lines and insert_after")
+            for key, minimum in (("replace_lines", 1), ("insert_after", 0)):
+                if not isinstance(data[key], list) or any(
+                    type(i) is not int or not minimum <= i <= len(lines) for i in data[key]
+                ):
+                    raise ValueError(f"invalid line numbers in {key}")
+            if not any(data.values()):
+                raise ValueError("no edit locations selected")
+        except ValueError as exc:
+            raise ValueError(f"{artifact.output}: invalid reconciliation edit scope: {exc}") from exc
+        return set(data["replace_lines"]), set(data["insert_after"])
+
+
+def _apply_reconciliation_scope(
+    output: str, source: str, new: list[str], scope: tuple[set[int], set[int]],
+) -> str:
+    """Apply the approved line edits to the snapshot, preserving untouched bytes."""
+    replace_lines, insert_after = scope
+    raw = source.splitlines(keepends=True)
+    newline = "\r\n" if raw[0].endswith("\r\n") else "\n"
+    updated = []
+    for tag, start, end, new_start, new_end in SequenceMatcher(
+        None, source.splitlines(), new, autojunk=False,
+    ).get_opcodes():
+        if tag == "equal":
+            updated.extend(raw[start:end])
+            if end == len(raw) and new_end < len(new):
+                updated.append(newline)
+            continue
+        if not set(range(start + 1, end + 1)) <= replace_lines or (
+            new_end - new_start > end - start and not any(start <= i <= end for i in insert_after)
+        ):
+            raise ValueError(f"{output}: rewrite changes lines {start + 1}–{max(start + 1, end)} "
+                             "outside the approved edit scope; keep those lines unchanged")
+        updated.extend(line + newline for line in new[new_start:new_end])
+    return "".join(updated).rstrip("\r\n")
+
+
 def generate_wave(
     project_root: Path,
     wave: int,
@@ -701,22 +822,13 @@ def generate_wave(
     feedback: str | None = None,
 ) -> list[GenerationResult]:
     """Generate or skip all documents configured for a wave."""
-    from codd.scanner import build_document_node_path_map
-
     config = _load_project_config(project_root)
     artifacts = _load_wave_artifacts(config)
     selected = [artifact for artifact in artifacts if artifact.wave == wave]
     if not selected:
         raise ValueError(f"wave_config has no entries for wave {wave}")
 
-    resolved_ai_command = _resolve_ai_command(config, ai_command, command_name="generate")
-    global_conventions = _normalize_conventions(config.get("conventions", []))
-    depended_by_map = _build_depended_by_map(artifacts)
-    document_node_paths = build_document_node_path_map(project_root, config)
-    body_max_retries = _body_max_retries(config)
-    capabilities = _resolve_generation_capabilities(config, project_root)
-    project_language = _resolve_project_language(config)
-    layout_placement = _resolve_layout_placement_contract(config, project_root)
+    generate_artifact = _artifact_generator(project_root, config, artifacts, ai_command)
 
     results: list[GenerationResult] = []
     for artifact in selected:
@@ -724,25 +836,39 @@ def generate_wave(
         if output_path.exists() and not force:
             results.append(GenerationResult(node_id=artifact.node_id, path=output_path, status="skipped"))
             continue
-        results.append(
-            _generate_one_artifact(
-                artifact=artifact,
-                project_root=project_root,
-                config=config,
-                global_conventions=global_conventions,
-                depended_by_map=depended_by_map,
-                document_node_paths=document_node_paths,
-                resolved_ai_command=resolved_ai_command,
-                body_max_retries=body_max_retries,
-                capabilities=capabilities,
-                project_language=project_language,
-                layout_placement=layout_placement,
-                feedback=feedback,
+        try:
+            result = generate_artifact(artifact=artifact, feedback=feedback)
+        except DesignConsistencyError as exc:
+            result = _reconcile_upstream_design(
+                project_root, config, artifacts, generate_artifact, exc, feedback=feedback,
             )
-        )
+            if result is None:
+                raise
+        results.append(result)
 
     _enforce_vb_declaration_coherence(project_root, config, results)
     return results
+
+
+def _artifact_generator(
+    project_root: Path, config: dict[str, Any], artifacts: list[WaveArtifact], ai_command: str | None,
+) -> Callable[..., GenerationResult]:
+    from codd.scanner import build_document_node_path_map
+
+    resolved_ai_command = _resolve_ai_command(config, ai_command, command_name="generate")
+    return partial(
+        _generate_one_artifact,
+        project_root=project_root,
+        config=config,
+        global_conventions=_normalize_conventions(config.get("conventions", [])),
+        depended_by_map=_build_depended_by_map(artifacts),
+        document_node_paths=build_document_node_path_map(project_root, config),
+        resolved_ai_command=resolved_ai_command,
+        body_max_retries=_body_max_retries(config),
+        capabilities=_resolve_generation_capabilities(config, project_root),
+        project_language=_resolve_project_language(config),
+        layout_placement=_resolve_layout_placement_contract(config, project_root),
+    )
 
 
 def _generate_one_artifact(
@@ -759,6 +885,9 @@ def _generate_one_artifact(
     project_language: str | None,
     layout_placement: str = "",
     feedback: str | None,
+    drafts: dict[str, str | None] | None = None,
+    context: tuple[WaveArtifact, ...] = (),
+    rewrite: _DesignRewrite | None = None,
 ) -> GenerationResult:
     """Render ONE artifact's document and write it (overwriting any prior file).
 
@@ -786,10 +915,19 @@ def _generate_one_artifact(
         managed and artifact.owns_operation_flow is False
         and has_other_operation_flow_owner(config, artifact.output)
     )
+    # Cited peers use their planned paths even if a pre-existing file shadows
+    # their node id. Additional context does not change the rendered dependencies.
     dependency_documents = _load_dependency_documents(
-        project_root, artifact.depends_on, document_node_paths
+        project_root, artifact.depends_on + [{"id": peer.node_id} for peer in context],
+        document_node_paths | {peer.node_id: Path(peer.output) for peer in context}, drafts=drafts,
     )
-    if not managed:
+    if rewrite is not None:
+        assert drafts is not None
+        text = rewrite.draft(artifact, dependency_documents, resolved_ai_command, feedback, project_root)
+        enforce_design_consistency(project_root, config, candidate=(artifact.output, text), drafts=drafts)
+        drafts[artifact.output] = text
+        return GenerationResult(node_id=artifact.node_id, path=output_path, status="generated")
+    if not managed and drafts is None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
     combined_conventions = deepcopy(global_conventions) + deepcopy(artifact.conventions)
 
@@ -807,7 +945,7 @@ def _generate_one_artifact(
         nonlocal validate_contract
         validate_contract = validate_contract or has_behavior_contract(body)
         if validate_contract:
-            enforce_design_consistency(project_root, config, candidate=(artifact.output, render(body)))
+            enforce_design_consistency(project_root, config, candidate=(artifact.output, render(body)), drafts=drafts)
 
     body = _generate_document_body(
         artifact=artifact,
@@ -824,9 +962,12 @@ def _generate_one_artifact(
         validate_body=check_candidate if managed or check_emitted_contract else None,
         operation_flow_owner_elsewhere=operation_flow_owner_elsewhere,
     )
-    if managed:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(render(body), encoding="utf-8")
+    if drafts is not None:
+        drafts[artifact.output] = render(body)
+    else:
+        if managed:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(render(body), encoding="utf-8")
     return GenerationResult(node_id=artifact.node_id, path=output_path, status="generated")
 
 
@@ -853,8 +994,6 @@ def regenerate_artifact(
     — an ambiguous or absent target must fail loudly, never silently no-op.
     """
 
-    from codd.scanner import build_document_node_path_map
-
     if not node_id and not output_path:
         raise ValueError("regenerate_artifact requires node_id or output_path")
 
@@ -879,30 +1018,231 @@ def regenerate_artifact(
         target = node_id or output_path
         raise ValueError(f"wave_config has {len(matched)} artifacts matching {target!r}; ambiguous")
 
-    artifact = matched[0]
-    resolved_ai_command = _resolve_ai_command(config, ai_command, command_name="generate")
-    global_conventions = _normalize_conventions(config.get("conventions", []))
-    depended_by_map = _build_depended_by_map(artifacts)
-    document_node_paths = build_document_node_path_map(project_root, config)
-    body_max_retries = _body_max_retries(config)
-    capabilities = _resolve_generation_capabilities(config, project_root)
-    project_language = _resolve_project_language(config)
-    layout_placement = _resolve_layout_placement_contract(config, project_root)
+    generate_artifact = _artifact_generator(project_root, config, artifacts, ai_command)
+    return generate_artifact(artifact=matched[0], feedback=feedback)
 
-    return _generate_one_artifact(
-        artifact=artifact,
-        project_root=project_root,
-        config=config,
-        global_conventions=global_conventions,
-        depended_by_map=depended_by_map,
-        document_node_paths=document_node_paths,
-        resolved_ai_command=resolved_ai_command,
-        body_max_retries=body_max_retries,
-        capabilities=capabilities,
-        project_language=project_language,
-        layout_placement=layout_placement,
-        feedback=feedback,
-    )
+
+def reconcile_generated_design(
+    project_root: Path, *, ai_command: str | None = None, wave: int | None = None,
+) -> None:
+    """Reconcile already-written reports before the usual end-of-generation checks."""
+    try:
+        config = _load_project_config(project_root)
+        enforce_design_consistency(project_root, config, complete=True, allow_missing=wave is not None)
+    except DesignConsistencyError as exc:
+        if not exc.disagreements:
+            return
+        artifacts = _load_wave_artifacts(config)
+        if wave is not None:
+            reporters = {issue.reporter for issue in exc.disagreements}
+            if not any(artifact.wave == wave and artifact.output in reporters for artifact in artifacts):
+                return
+        generate_artifact = _artifact_generator(project_root, config, artifacts, ai_command)
+        if _reconcile_upstream_design(
+            project_root, config, artifacts, generate_artifact, exc, complete=wave is None,
+        ) is None:
+            raise
+    except (OSError, ValueError):
+        pass  # Leave diagnostics unrelated to reported disagreements to the usual gates.
+
+
+def _reconcile_upstream_design(
+    project_root: Path,
+    config: dict[str, Any],
+    artifacts: list[WaveArtifact],
+    generate_artifact: Callable[..., GenerationResult],
+    original: DesignConsistencyError,
+    *,
+    feedback: str | None = None,
+    complete: bool = False,
+) -> GenerationResult | None:
+    """Rewrite later accepted peers and regenerate reporters before saving any draft."""
+    budget = _body_max_retries(config)
+    if not original.disagreements or not budget or design_consistency_disabled(config):
+        return None
+
+    # Sort stably so the within-wave tie-breaker matches generate_wave.
+    ordered = sorted(artifacts, key=lambda artifact: artifact.wave)
+    by_output = {artifact.output: artifact for artifact in ordered}
+    rank = {artifact.output: index for index, artifact in enumerate(ordered)}
+    dependencies = {artifact.node_id: [d["id"] for d in artifact.depends_on] for artifact in ordered}
+    if len(by_output) != len(ordered) or len(dependencies) != len(ordered):
+        return None
+
+    reporters = sorted({issue.reporter for issue in original.disagreements}, key=rank.__getitem__)
+    rewrites: dict[str, list[DesignDisagreement]] = {}
+    context_by_reporter: dict[str, set[str]] = {reporter: set() for reporter in reporters}
+    for issue in original.disagreements:
+        if any(rank[path] >= rank[issue.reporter] or path in reporters for path in issue.documents):
+            return None
+        target = max(issue.documents, key=rank.__getitem__)
+        rewrites.setdefault(target, []).append(issue)
+        context_by_reporter[issue.reporter].update(issue.documents)
+
+    targets = sorted(rewrites, key=rank.__getitem__)
+    affected = set(reporters) | set(targets)
+    cited = set().union(*context_by_reporter.values())
+    paths: dict[str, Path] = {}
+    snapshots: dict[str, bytes | None] = {}
+    contents: dict[str, str | None] = {}
+    for output in (artifact.output for artifact in ordered if is_behavior_document(artifact.output)):
+        path = resolve_project_path(project_root, output)
+        if path is None or path in paths.values():
+            return None
+        paths[output] = path
+        try:
+            source = path.read_bytes() if path.is_file() else None
+            snapshots[output] = source
+            contents[output] = text = source.decode("utf-8") if source is not None else None
+            if output in cited:
+                if text is None:
+                    return None
+                contract = validate_document_role(
+                    by_output[output], text, required=True,
+                    operation_flow_owner_elsewhere=has_other_operation_flow_owner(config, output),
+                )
+                if contract is None or contract.unresolved:
+                    return None
+        except (OSError, ValueError):
+            return None
+
+    def body(text: str) -> str:
+        return without_behavior_contract(parse_frontmatter(text).body).strip()
+
+    def context(outputs: set[str]) -> tuple[WaveArtifact, ...]:
+        return tuple(by_output[output] for output in sorted(outputs, key=rank.__getitem__))
+
+    scoped_rewrites: dict[str, _DesignRewrite] = {}
+    last_error: OSError | ValueError = original
+    for _ in range(budget):
+        drafts = contents | dict.fromkeys(reporters)
+        try:
+            changes = {}
+            for output in targets:
+                before = contents[output]
+                assert before is not None
+                issues = rewrites[output]
+                peers = {path for issue in issues for path in issue.documents if path != output}
+                reasons = "\n".join(f"- {' and '.join(issue.documents)}: {issue.quote}" for issue in issues)
+                generate_artifact(
+                    artifact=by_output[output], drafts=drafts, context=context(peers), body_max_retries=0,
+                    rewrite=scoped_rewrites.setdefault(output, _DesignRewrite(before, reasons)),
+                    feedback=f"Latest validation:\n{last_error}",
+                )
+                after = drafts[output]
+                if after is None or body(before) == body(after):
+                    raise ValueError(f"{output}: reconciliation did not change the document body")
+                changes[output] = "\n".join(unified_diff(
+                    before.splitlines(), after.splitlines(),
+                    fromfile=output + " (previous)", tofile=output + " (provisional)", n=1, lineterm="",
+                ))
+
+            # The old reporters are still rejected. Check all other available
+            # documents, then require regenerated reporters to pass the same gate.
+            enforce_design_consistency(project_root, config, complete=True, drafts=drafts, allow_missing=True)
+            for reporter in reporters:
+                result = generate_artifact(
+                    artifact=by_output[reporter], drafts=drafts,
+                    context=context(context_by_reporter[reporter]), body_max_retries=0,
+                    feedback="\n\n".join(filter(None, [
+                        feedback,
+                        "The cited upstream documents have been rewritten. Check them again. "
+                        "Report any remaining disagreements.\n" + str(last_error),
+                    ])),
+                )
+            enforce_design_consistency(project_root, config, complete=True, drafts=drafts, allow_missing=not complete)
+        except (OSError, ValueError) as exc:
+            last_error = exc
+            continue
+
+        # Existing dependents remain in place only after the check above. Their
+        # prose may need review beyond the declared cases the checker can compare.
+        review = [
+            artifact.output for artifact in ordered if artifact.output not in affected
+            and any(_depends_on(artifact.node_id, by_output[path].node_id, dependencies) for path in affected)
+            and (project_root / artifact.output).is_file()
+        ]
+        entries = [
+            {"reporter": issue.reporter, "documents": issue.documents, "quote": issue.quote,
+             "rewritten": output, "change": changes[output], "review_dependents": review}
+            for output in targets for issue in rewrites[output]
+        ]
+        updates = {output: drafts[output] for output in [*targets, *reporters]}
+        _publish_reconciled_design(project_root, paths, snapshots, updates, entries)
+        return result
+    return None
+
+
+def _publish_reconciled_design(
+    project_root: Path,
+    paths: dict[str, Path],
+    snapshots: dict[str, bytes | None],
+    drafts: dict[str, str | None],
+    entries: list[dict[str, Any]],
+) -> None:
+    log = resolve_project_path(project_root, DESIGN_RECONCILIATION_LOG)
+    if log is None or log in paths.values() or (log.exists() and not log.is_file()):
+        raise ValueError(f"Invalid design reconciliation log path: {DESIGN_RECONCILIATION_LOG}")
+    log.parent.mkdir(parents=True, exist_ok=True)
+    payload = "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries).encode("utf-8")
+    previous_log = log.read_bytes() if log.is_file() else None
+    for output, path in paths.items():
+        if (path.read_bytes() if path.is_file() else None) != snapshots[output]:
+            raise ValueError(f"{output}: document changed during design reconciliation; retry generation")
+    written = []
+    pending_log = None
+    try:
+        for output, draft in drafts.items():
+            assert draft is not None
+            path = paths[output]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            written.append(output)
+            path.write_bytes(draft.encode("utf-8"))
+        # A failed append can leave a partial entry that describes rolled-back
+        # documents. Replace the log only after the full new contents are ready.
+        with NamedTemporaryFile(dir=log.parent, prefix=f".{log.name}.", delete=False) as handle:
+            pending_log = Path(handle.name)
+            handle.write((previous_log or b"") + payload)
+        if (log.read_bytes() if log.is_file() else None) != previous_log:
+            raise ValueError("Design reconciliation log changed during publication; retry generation")
+        pending_log.replace(log)
+    except BaseException:
+        for output in reversed(written):
+            previous = snapshots[output]
+            if previous is None:
+                paths[output].unlink(missing_ok=True)
+            else:
+                paths[output].write_bytes(previous)
+        raise
+    finally:
+        if pending_log is not None:
+            pending_log.unlink(missing_ok=True)
+
+
+def design_reconciliation_notice(project_root: Path) -> str | None:
+    """Point to the durable decision log and list existing dependents for review."""
+    log = resolve_project_path(project_root, DESIGN_RECONCILIATION_LOG)
+    if log is None or not log.is_file():
+        return None
+    try:
+        if design_consistency_disabled(_load_project_config(project_root)):
+            return None
+    except (OSError, ValueError):
+        return None
+    notice = f"Provisional design decisions: {DESIGN_RECONCILIATION_LOG.as_posix()}"
+    try:
+        lines = log.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return notice
+    review = set()
+    for line in lines:
+        try:
+            review.update(json.loads(line)["review_dependents"])
+        except (ValueError, KeyError, TypeError):
+            continue
+    if review:
+        notice += "\nReview existing dependent documents: " + ", ".join(sorted(review))
+    return notice
 
 
 def reconcile_design_artifact(
@@ -1354,6 +1694,8 @@ def _load_dependency_documents(
     project_root: Path,
     dependencies: list[dict[str, Any]],
     document_node_paths: dict[str, Path],
+    *,
+    drafts: dict[str, str | None] | None = None,
 ) -> list[DependencyDocument]:
     documents: list[DependencyDocument] = []
     missing_node_ids: list[str] = []
@@ -1371,7 +1713,11 @@ def _load_dependency_documents(
             continue
 
         file_path = project_root / rel_path
-        if not file_path.exists():
+        if drafts is not None and rel_path.as_posix() in drafts:
+            content = drafts[rel_path.as_posix()]
+        else:
+            content = file_path.read_text(encoding="utf-8") if file_path.exists() else None
+        if content is None:
             raise ValueError(
                 f"dependency document {node_id!r} maps to {rel_path.as_posix()}, but the file does not exist"
             )
@@ -1380,7 +1726,7 @@ def _load_dependency_documents(
             DependencyDocument(
                 node_id=node_id,
                 path=rel_path,
-                content=file_path.read_text(encoding="utf-8"),
+                content=content,
             )
         )
 

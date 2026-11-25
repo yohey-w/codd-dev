@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -876,3 +877,310 @@ def test_explicit_check_on_opted_out_project_skips_dependency_reachability(tmp_p
 
     assert result.exit_code == 0, result.output
     assert "add a dependency" not in result.output
+
+
+PEER = "docs/design/validation.md"
+DEPENDENT = "docs/design/service.md"
+FOLLOW_UP = "docs/plan/implementation.md"
+DISPUTE = "Input validation accepts files larger than the importer's 100 byte limit."
+LIMIT = "The importer accepts files of at most 100 bytes."
+UNBOUNDED = "Input validation accepts files of any size."
+ALIGNED = "Input validation rejects files above the importer's 100 byte limit."
+RECONCILIATIONS = ".codd/audit/design-reconciliations.jsonl"
+
+
+def _declaration(quote, *, spec=None, documents=()):
+    data = {"owns": {spec: quote} if spec else {}, "cases": [],
+            "unresolved": [{"documents": list(documents), "quote": quote}] if documents else []}
+    return _document(quote, f"```codd-behavior\n{yaml.safe_dump(data)}```\n")
+
+
+def _upstream_disagreement_project(tmp_path):
+    project = _project(tmp_path)
+    config = load_project_config(project)
+    reporter = config["wave_config"].pop("2")[0]
+    reporter["depends_on"] = ["design:import", "design:validation"]
+    config["wave_config"].update({
+        "2": [{"node_id": "design:validation", "output": PEER, "title": "Validation",
+               "behavior_owners": ["input-validation"]}],
+        "3": [{"node_id": "design:service", "output": DEPENDENT, "title": "Service",
+               "depends_on": ["design:validation"]}],
+        "4": [reporter],
+        "5": [{"node_id": "plan:implementation", "output": FOLLOW_UP, "title": "Implementation",
+               "depends_on": ["test:acceptance"]}],
+    })
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+    _write(project, OWNER, _declaration(LIMIT, spec=SPEC))
+    _write(project, PEER, _declaration(UNBOUNDED, spec="input-validation"))
+    _write(project, DEPENDENT, _declaration("The service delegates input validation."))
+    return project
+
+
+@pytest.mark.parametrize("entrypoint", ["generate", "greenfield", "single-wave"])
+@pytest.mark.parametrize("on_disk", [False, True])
+def test_reporter_reconciles_accepted_upstream_designs(tmp_path, monkeypatch, entrypoint, on_disk):
+    from codd.greenfield.pipeline import format_greenfield_result
+
+    project = _upstream_disagreement_project(tmp_path)
+    owner_before = (project / OWNER).read_bytes()
+    dependent_before = (project / DEPENDENT).read_bytes()
+    calls = []
+    if on_disk:
+        _write(project, CONSUMER, _declaration(DISPUTE, documents=(PEER, OWNER)))
+        if entrypoint != "single-wave":
+            _write(project, FOLLOW_UP, _declaration("The plan follows the acceptance criteria."))
+
+    def fake(command, prompt):
+        assert command == "fake-ai"
+        if "Node ID: design:validation" in prompt:
+            calls.append("rewrite")
+            assert all(value in prompt for value in (OWNER, LIMIT, PEER, UNBOUNDED, DISPUTE))
+            return _declaration(ALIGNED, spec="input-validation")
+        if "Node ID: test:acceptance" in prompt:
+            calls.append("reporter")
+            if ALIGNED not in prompt:
+                return _declaration(DISPUTE, documents=(PEER, OWNER))
+        else:
+            assert "Node ID: plan:implementation" in prompt
+            calls.append("later")
+        return _declaration("Files above 100 bytes are rejected.")
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake)
+    if entrypoint != "greenfield":
+        selection = ["--wave", "4"] if entrypoint == "single-wave" else ["--all-waves"]
+        result = CliRunner().invoke(main, [
+            "generate", *selection, "--no-contract-gate", "--path", str(project),
+        ])
+        output = result.output
+        assert result.exit_code == 0, output
+    else:
+        def stop_at_implementation(_project):
+            raise StageError("implementation reached")
+
+        from codd.greenfield.pipeline import new_session, save_session
+
+        session = new_session({"ai_command": "fake-ai"})
+        for stage in ("init", "elicit", "plan"):
+            session["stages"][stage]["status"] = "done"
+        if on_disk:
+            session["stages"]["generate"]["units"] = dict.fromkeys(map(str, range(1, 6)), "done")
+        save_session(project, session)
+        pipeline = GreenfieldPipeline(coverage_gate=False, task_lister=stop_at_implementation)
+        result = pipeline.run(project, resume=True)
+        output = format_greenfield_result(result, "text")
+        assert result.failed_stage == "implement", output
+
+    expected_calls = ["rewrite", "reporter"]
+    if not on_disk:
+        expected_calls.insert(0, "reporter")
+        if entrypoint != "single-wave":
+            expected_calls.append("later")
+    assert calls == expected_calls
+    assert (project / OWNER).read_bytes() == owner_before
+    assert (project / DEPENDENT).read_bytes() == dependent_before
+    assert ALIGNED in (project / PEER).read_text(encoding="utf-8")
+    if entrypoint != "single-wave":
+        assert (project / FOLLOW_UP).is_file()
+        enforce_design_consistency(project, load_project_config(project), complete=True)
+    assert RECONCILIATIONS in output
+    assert DEPENDENT in output
+    log = project / RECONCILIATIONS
+    before = log.read_bytes()
+    entries = [json.loads(line) for line in before.splitlines()]
+    assert len(entries) == 1
+    assert entries[0]["reporter"] == CONSUMER
+    assert set(entries[0]["documents"]) == {OWNER, PEER}
+    assert entries[0]["quote"] == DISPUTE
+    assert entries[0]["rewritten"] == PEER
+    assert ALIGNED in entries[0]["change"]
+    if entrypoint == "greenfield":
+        resumed = pipeline.run(project, resume=True)
+        assert resumed.failed_stage == "implement"
+        assert RECONCILIATIONS in format_greenfield_result(resumed, "text")
+        assert log.read_bytes() == before
+        assert calls == expected_calls
+
+
+@pytest.mark.parametrize("budget", [0, 2])
+def test_reporter_reconciliation_exhaustion_keeps_design_unresolved(tmp_path, monkeypatch, budget):
+    from codd.greenfield.pipeline import format_greenfield_result
+
+    project = _upstream_disagreement_project(tmp_path)
+    config = load_project_config(project)
+    config["generate"]["body_retry"]["max_retries"] = budget
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+    before = (project / PEER).read_bytes()
+    calls = []
+
+    def fake(_command, prompt):
+        if "Node ID: design:validation" in prompt:
+            calls.append("rewrite")
+            return _declaration(ALIGNED, spec="input-validation")
+        assert "Node ID: test:acceptance" in prompt
+        calls.append("reporter")
+        return _declaration(DISPUTE, documents=(OWNER, PEER))
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake)
+    result = _run_through_design_check(project)
+    assert result.failed_stage == "generate"
+    assert DISPUTE in result.error and "unresolved disagreement" in result.error
+    assert "codd generate --check-design" in result.inspect_command
+    assert "--resume" not in format_greenfield_result(result, "text")
+    assert calls == ["reporter"] + ["rewrite", "reporter"] * budget
+    assert (project / PEER).read_bytes() == before
+    assert not (project / CONSUMER).exists()
+    assert not (project / RECONCILIATIONS).exists()
+
+
+@pytest.mark.parametrize("failure", ["unchanged", "stale-dependent"])
+def test_reporter_cannot_clear_an_unreconciled_design(tmp_path, monkeypatch, failure):
+    project = _upstream_disagreement_project(tmp_path)
+    calls = []
+    if failure == "stale-dependent":
+        block = _block(UNBOUNDED, "accept").replace(SPEC, "input-validation")
+        _write(project, DEPENDENT, _document(UNBOUNDED, block))
+        repair = _block(ALIGNED, "reject", owner=True).replace(SPEC, "input-validation")
+        replacement = _document(ALIGNED, repair)
+    else:
+        replacement = _declaration(UNBOUNDED, spec="input-validation")
+
+    def fake(_command, prompt):
+        if "Node ID: design:validation" in prompt:
+            calls.append("rewrite")
+            return replacement
+        calls.append("reporter")
+        return _declaration(DISPUTE, documents=(OWNER, PEER))
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake)
+    before = (project / PEER).read_bytes()
+    with pytest.raises(ValueError, match="unresolved disagreement"):
+        generate_wave(project, 4)
+    assert calls == ["reporter", "rewrite"]
+    assert (project / PEER).read_bytes() == before
+    assert not (project / CONSUMER).exists()
+    assert not (project / RECONCILIATIONS).exists()
+
+
+def test_generation_without_reported_disagreement_keeps_one_call_per_new_document(tmp_path, monkeypatch):
+    project = _upstream_disagreement_project(tmp_path)
+    calls = []
+
+    def fake(_command, prompt):
+        calls.append(next(line for line in prompt.splitlines() if line.startswith("Node ID: ")))
+        return _declaration("Current behavior is documented.")
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake)
+    result = CliRunner().invoke(main, [
+        "generate", "--all-waves", "--no-contract-gate", "--path", str(project),
+    ])
+    assert result.exit_code == 0, result.output
+    assert calls == ["Node ID: test:acceptance", "Node ID: plan:implementation"]
+    assert RECONCILIATIONS not in result.output
+    assert not (project / RECONCILIATIONS).exists()
+
+
+def test_reconciliation_preserves_unrelated_prose_from_full_rewrite(tmp_path, monkeypatch):
+    project = _upstream_disagreement_project(tmp_path)
+    config = load_project_config(project)
+    config["generate"]["body_retry"]["max_retries"] = 2
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+    unrelated = "The original file name is retained in the import log."
+    paraphrase = "The import log keeps the source file name."
+
+    def with_log_note(document, note):
+        return document.replace("```codd-behavior", f"{note}\n\n```codd-behavior", 1)
+
+    before_body = with_log_note(_declaration(UNBOUNDED, spec="input-validation"), unrelated)
+    after = with_log_note(_declaration(ALIGNED, spec="input-validation"), unrelated)
+    boundary = "A 100 byte file is accepted and a 101 byte file is rejected."
+    after = after.replace(f"{ALIGNED}\n", f"{ALIGNED}\n{boundary}\n", 1)
+    frontmatter = "---\ncodd:\n  node_id: design:validation  # An existing comment.\n---\n\n"
+    before = frontmatter + before_body
+    peer = _write(project, PEER, before)
+    original_bytes = before.replace("\n", "\r\n").encode("utf-8")
+    peer.write_bytes(original_bytes)
+    calls = []
+
+    def fake(_command, prompt):
+        if "Select reconciliation edit locations" in prompt:
+            calls.append("scope")
+            assert DISPUTE in prompt and UNBOUNDED in prompt
+            allowed = [i for i, line in enumerate(before_body.splitlines(), 1) if UNBOUNDED in line]
+            return json.dumps({"replace_lines": allowed, "insert_after": allowed[:1]})
+        if "Node ID: design:validation" in prompt:
+            calls.append("rewrite")
+            if calls.count("rewrite") == 1:
+                return after.replace(unrelated, paraphrase)
+            assert "outside the approved edit scope" in prompt
+            assert peer.read_bytes() == original_bytes
+            assert not (project / RECONCILIATIONS).exists()
+            return after
+        assert "Node ID: test:acceptance" in prompt
+        if ALIGNED not in prompt:
+            return _declaration(DISPUTE, documents=(OWNER, PEER))
+        return _declaration("Files above 100 bytes are rejected.")
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake)
+    generate_wave(project, 4)
+
+    assert paraphrase not in peer.read_text(encoding="utf-8")
+    assert peer.read_bytes() == (frontmatter + after).replace("\n", "\r\n").encode("utf-8")
+    assert calls == ["scope", "rewrite", "rewrite"]
+    entry = json.loads((project / RECONCILIATIONS).read_text(encoding="utf-8"))
+    assert entry["quote"] == DISPUTE
+    assert entry["rewritten"] == PEER
+    assert f"-{UNBOUNDED}" in entry["change"]
+    assert f"+{ALIGNED}" in entry["change"]
+    assert f"+{boundary}" in entry["change"]
+    assert paraphrase not in entry["change"]
+
+
+@pytest.mark.parametrize("fault", ["insert_outside_scope", "unknown_line_number", "empty_scope"])
+def test_reconciliation_rejects_an_unusable_edit_scope_and_out_of_scope_insertions(tmp_path, monkeypatch, fault):
+    project = _upstream_disagreement_project(tmp_path)
+    config = load_project_config(project)
+    config["generate"]["body_retry"]["max_retries"] = 2
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+    unrelated = "The original file name is retained in the import log."
+
+    def with_log_note(document):
+        return document.replace("```codd-behavior", f"{unrelated}\n\n```codd-behavior", 1)
+
+    before = with_log_note(_declaration(UNBOUNDED, spec="input-validation"))
+    replaced = with_log_note(_declaration(ALIGNED, spec="input-validation"))
+    boundary = "A 100 byte file is accepted and a 101 byte file is rejected."
+    with_insertion = replaced.replace(f"{ALIGNED}\n", f"{ALIGNED}\n{boundary}\n", 1)
+    peer = _write(project, PEER, before)
+    target = [i for i, line in enumerate(before.splitlines(), 1) if UNBOUNDED in line]
+    calls = []
+
+    def fake(_command, prompt):
+        if "Select reconciliation edit locations" in prompt:
+            calls.append("scope")
+            if calls.count("scope") == 1 and fault == "unknown_line_number":
+                return json.dumps({"replace_lines": [len(before.splitlines()) + 50], "insert_after": []})
+            if calls.count("scope") == 1 and fault == "empty_scope":
+                return json.dumps({"replace_lines": [], "insert_after": []})
+            return json.dumps({"replace_lines": target, "insert_after": []})
+        if "Node ID: design:validation" in prompt:
+            calls.append("rewrite")
+            assert f"Reported disagreements:\n- {OWNER} and {PEER}: {DISPUTE}" in prompt
+            if fault == "insert_outside_scope" and calls.count("rewrite") == 1:
+                return with_insertion
+            return replaced
+        assert "Node ID: test:acceptance" in prompt
+        if ALIGNED not in prompt:
+            return _declaration(DISPUTE, documents=(OWNER, PEER))
+        return _declaration("Files above 100 bytes are rejected.")
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake)
+    generate_wave(project, 4)
+
+    text = peer.read_text(encoding="utf-8")
+    assert ALIGNED in text and UNBOUNDED not in text
+    assert boundary not in text
+    expected = ["scope", "rewrite", "rewrite"] if fault == "insert_outside_scope" else ["scope", "scope", "rewrite"]
+    assert calls == expected
+    entry = json.loads((project / RECONCILIATIONS).read_text(encoding="utf-8"))
+    assert entry["rewritten"] == PEER
+    assert boundary not in entry["change"]
