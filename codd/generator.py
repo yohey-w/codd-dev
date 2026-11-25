@@ -703,12 +703,66 @@ class DependencyDocument:
     content: str
 
 
+def _reconciliation_audit_excerpt(text: str) -> dict[str, Any]:
+    limit = 64 * 1024
+    length = len(text)
+    if length > limit:
+        marker = "\n[excerpt truncated]\n"
+        keep = (limit - len(marker)) // 2
+        text = text[:keep] + marker + text[-keep:]
+    return {"text": text, "original_chars": length, "truncated": length > limit}
+
+
+class _ReconciliationScopeError(ValueError):
+    def __init__(self, message: str, operation: str, original_line: int, proposal_line: int) -> None:
+        super().__init__(message)
+        self.operation = operation
+        self.original_line = original_line
+        self.proposal_line = proposal_line
+
+    def audit_excerpt(self, original: list[str], proposal: list[str]) -> dict[str, Any]:
+        focus = 0
+        if self.operation == "replacement":
+            before = original[self.original_line - 1]
+            after = proposal[self.proposal_line - 1]
+            focus = next((i for i, (left, right) in enumerate(zip(before, after)) if left != right),
+                         min(len(before), len(after)))
+
+        def excerpt(lines: list[str], position: int, *, gap: bool) -> dict[str, Any]:
+            number = min(max(1, position), len(lines))
+            line = lines[number - 1] if number else ""
+            limit = 512
+            start = max(0, min(focus - limit // 2, len(line) - limit))
+            details = {
+                "line": number or None, "start_char": start + 1, "text": line[start:start + limit],
+                "original_chars": len(line), "truncated": len(line) > limit,
+            }
+            if gap:
+                details["after_line"] = position
+            return details
+
+        return {
+            "operation": self.operation,
+            "original": excerpt(original, self.original_line, gap=self.operation == "insertion"),
+            "proposal": excerpt(proposal, self.proposal_line, gap=self.operation == "deletion"),
+        }
+
+
 @dataclass
 class _DesignRewrite:
     before: str
     reasons: str
     scope: tuple[set[int], set[int]] | None = None
     selecting_scope: bool = False
+    scope_response: dict[str, Any] | None = None
+    proposal: dict[str, Any] | None = None
+
+    def audit_details(self) -> dict[str, Any]:
+        scope = None
+        if self.scope is not None:
+            replace_lines, insert_after = self.scope
+            scope = {"replace_lines": sorted(replace_lines), "insert_after": sorted(insert_after)}
+        return {"scope": scope, "scope_response": self.scope_response, "proposal": self.proposal}
 
     def draft(
         self, artifact: WaveArtifact, dependencies: list[DependencyDocument],
@@ -716,10 +770,15 @@ class _DesignRewrite:
     ) -> str:
         body = parse_frontmatter(self.before).body
         start = len(body) - len(body.lstrip("\r\n"))
-        end = len(body.rstrip("\r\n"))
+        end = max(start, len(body.rstrip("\r\n")))
         prefix = self.before.removesuffix(body) + body[:start]
         source = body[start:end]
         lines = source.splitlines()
+        # The first trailing separator belongs to the last numbered line.
+        # Later separators are the document's trailing blank lines.
+        if lines and lines[-1] and source.endswith(lines[-1]) and end < len(body):
+            end += 2 if body.startswith("\r\n", end) else 1
+            source = body[start:end]
         numbered = "\n".join(f"{number}: {line}" for number, line in enumerate(lines, 1))
         context = "\n\n".join(f"{doc.path}:\n{doc.content}" for doc in dependencies)
         if self.scope is None:
@@ -742,10 +801,20 @@ class _DesignRewrite:
             f"Original body (numbered for reference):\n{numbered}",
             project_root,
         )
-        proposal = _invoke_ai_command(ai_command, prompt).strip("\r\n").splitlines()
-        updated = _apply_reconciliation_scope(artifact.output, source, proposal, self.scope)
+        response = _invoke_ai_command(ai_command, prompt)
+        proposal = response.strip("\r\n").splitlines()
+        self.proposal = _reconciliation_audit_excerpt(response)
+        if self.proposal["truncated"]:
+            change = "\n".join(unified_diff(lines, proposal, n=1, lineterm=""))
+            self.proposal["change"] = _reconciliation_audit_excerpt(change)
+        try:
+            updated = _apply_reconciliation_scope(artifact.output, source, proposal, self.scope, suffix=body[end:])
+        except _ReconciliationScopeError as exc:
+            if self.proposal["truncated"]:
+                self.proposal["violation"] = exc.audit_excerpt(lines, proposal)
+            raise
         _validate_generated_body(artifact.title, updated, output_path=artifact.output)
-        return prefix + updated + body[end:]
+        return prefix + updated
 
     def _select_scope(
         self, artifact: WaveArtifact, lines: list[str], line_offset: int, numbered: str, context: str, ai_command: str,
@@ -775,6 +844,7 @@ class _DesignRewrite:
             "allow insertion before line 1. Return locations only.\n\n"
             f"Original body:\n{numbered}"
         ))
+        self.scope_response = _reconciliation_audit_excerpt(response)
         try:
             from codd.llm.plan_deriver import strip_json_fence
 
@@ -794,28 +864,120 @@ class _DesignRewrite:
 
 
 def _apply_reconciliation_scope(
-    output: str, source: str, new: list[str], scope: tuple[set[int], set[int]],
+    output: str, source: str, new: list[str], scope: tuple[set[int], set[int]], *, suffix: str = "",
 ) -> str:
     """Apply the approved line edits to the snapshot, preserving untouched bytes."""
     replace_lines, insert_after = scope
-    raw = source.splitlines(keepends=True)
-    newline = "\r\n" if raw[0].endswith("\r\n") else "\n"
+    old = source.splitlines()
+    old_count, new_count = len(old), len(new)
+    required = [0] * (old_count + 1)
+    for number in range(old_count, 0, -1):
+        required[number - 1] = required[number] + (number not in replace_lines)
+    # A state counts consumed original and proposal lines. An insertion stays
+    # at the same original gap, while a deletion emits zero proposal lines.
+    pending = [(0, 0)]
+    parents: dict[tuple[int, int], tuple[int, int] | None] = {(0, 0): None}
+    goal = (old_count, new_count)
+    progress = (0, 0, 0)
+    while pending:
+        current = pending.pop()
+        if current == goal:
+            break
+        i, j = current
+        # Within equally long original prefixes, avoid consuming potential
+        # matches for the remaining protected lines at a legal insertion gap.
+        shortage = max(0, required[i] - (new_count - j))
+        progress = max(progress, (i, -shortage, j))
+        editable = i + 1 in replace_lines
+        candidates = []
+        if i < old_count and editable:
+            candidates.append((i + 1, j))
+        if j < new_count and i in insert_after:
+            candidates.append((i, j + 1))
+        if i < old_count and j < new_count and (editable or old[i] == new[j]):
+            candidates.append((i + 1, j + 1))
+        for candidate in candidates:
+            if candidate not in parents:
+                parents[candidate] = current
+                pending.append(candidate)
+    else:
+        i, _, j = progress
+        raise _reconciliation_scope_error(output, old[i:], new[j:], scope, original_offset=i, proposal_offset=j)
+
+    # Trace the accepted path back to learn which original line, if any,
+    # supplied each proposal line. Reuse that line's original separator.
+    original_indices = []
+    while (previous := parents[current]) is not None:
+        i, j = current
+        original, proposed = previous
+        if j != proposed:
+            original_indices.append(original if i != original else None)
+        current = previous
+    endings = [raw[len(line):] for raw, line in zip(source.splitlines(keepends=True), old)]
+    newline = next((ending for ending in endings if ending), "\n")
+    pieces = []
+    for j, (line, original) in enumerate(zip(new, reversed(original_indices))):
+        ending = endings[original] if original is not None else ""
+        if not ending:
+            if j + 1 < new_count or not line:
+                ending = newline
+            elif original is None and endings:
+                ending = endings[-1]
+        pieces.append((line + ending, original is None or original + 1 in replace_lines))
+
+    pieces.append((suffix, False))
     updated = []
-    for tag, start, end, new_start, new_end in SequenceMatcher(
-        None, source.splitlines(), new, autojunk=False,
-    ).get_opcodes():
+    previous_editable = False
+    for piece, editable in pieces:
+        # Prevent a standalone CR and a blank line's LF from merging. Adjust
+        # an editable side first. For two protected lines, add a CR at the
+        # edit boundary while retaining both original byte sequences.
+        if piece.startswith("\n") and updated and updated[-1].endswith("\r"):
+            if previous_editable:
+                updated[-1] += "\n"
+            else:
+                piece = "\r" + piece
+        updated.append(piece)
+        previous_editable = editable
+    return "".join(updated)
+
+
+def _reconciliation_scope_error(
+    output: str, old: list[str], new: list[str], scope: tuple[set[int], set[int]],
+    *, original_offset: int, proposal_offset: int,
+) -> _ReconciliationScopeError:
+    # Diagnose the remaining suffix after the furthest approved prefix. A
+    # full-document diff could report an earlier, already admissible edit.
+    replace_lines, insert_after = scope
+    violations: list[tuple[str, str, int, int]] = []
+    for tag, start, end, new_start, new_end in SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
         if tag == "equal":
-            updated.extend(raw[start:end])
-            if end == len(raw) and new_end < len(new):
-                updated.append(newline)
             continue
-        if not set(range(start + 1, end + 1)) <= replace_lines or (
-            new_end - new_start > end - start and not any(start <= i <= end for i in insert_after)
-        ):
-            raise ValueError(f"{output}: rewrite changes lines {start + 1}–{max(start + 1, end)} "
-                             "outside the approved edit scope; keep those lines unchanged")
-        updated.extend(line + newline for line in new[new_start:new_end])
-    return "".join(updated).rstrip("\r\n")
+        start += original_offset
+        end += original_offset
+        new_start += proposal_offset
+        new_end += proposal_offset
+        for number in range(start + 1, end + 1):
+            if number not in replace_lines:
+                proposed = new_start + number - start
+                if proposed <= new_end:
+                    violations.append((f"replacement at line {number}", "replacement", number, proposed))
+                else:
+                    violations.append((f"deletion at line {number}", "deletion", number, new_end))
+                break
+        if new_end - new_start > end - start and not any(i in insert_after for i in range(start, end + 1)):
+            location = f"after line {end}" if end else "before line 1 (position 0)"
+            violations.append((f"insertion {location}", "insertion", end, new_start + end - start + 1))
+        if violations:
+            break
+    descriptions = " and ".join(violation[0] for violation in violations)
+    _, operation, original_line, proposal_line = violations[0]
+    return _ReconciliationScopeError(
+        f"{output}: rewrite proposes {descriptions} outside the approved edit scope. "
+        f"Keep all other lines unchanged and use only replace_lines={sorted(replace_lines)} "
+        f"and insert_after={sorted(insert_after)}.",
+        operation, original_line, proposal_line,
+    )
 
 
 def generate_wave(
@@ -1056,6 +1218,7 @@ class _ReconciliationAttempt:
     stage: str
     document: str | None
     reason: str
+    rewrites: dict[str, dict[str, Any]]
 
 
 def _report_reconciliation_failure(
@@ -1197,6 +1360,7 @@ def _reconcile_upstream_design(
     last_error: OSError | ValueError = original
     for number in range(1, budget + 1):
         drafts = contents | dict.fromkeys(reporters)
+        attempt_rewrites: dict[str, _DesignRewrite] = {}
         try:
             changes = {}
             for output in targets:
@@ -1208,7 +1372,10 @@ def _reconcile_upstream_design(
                 attempted_rewrites[output] = [peer.output for peer in peers]
                 reasons = "\n".join(f"- {' and '.join(issue.documents)}: {issue.quote}" for issue in issues)
                 rewrite = scoped_rewrites.setdefault(output, _DesignRewrite(before, reasons))
+                attempt_rewrites[output] = rewrite
                 rewrite.selecting_scope = False
+                rewrite.scope_response = None
+                rewrite.proposal = None
                 generate_artifact(
                     artifact=by_output[output], drafts=drafts, context=peers, body_max_retries=0,
                     rewrite=rewrite,
@@ -1242,7 +1409,9 @@ def _reconcile_upstream_design(
         except (OSError, ValueError) as exc:
             if stage == "rewrite" and rewrite.selecting_scope:
                 stage = "select edit scope"
-            attempts.append(_ReconciliationAttempt(number, stage, document, str(exc)))
+            attempts.append(_ReconciliationAttempt(number, stage, document, str(exc), {
+                output: rewrite.audit_details() for output, rewrite in attempt_rewrites.items()
+            }))
             last_error = exc
             continue
 

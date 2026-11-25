@@ -8,7 +8,7 @@ from click.testing import CliRunner
 from codd.cli import main
 from codd.config import load_project_config
 from codd.design_consistency import enforce_design_consistency, without_behavior_contract
-from codd.generator import generate_wave, regenerate_artifact
+from codd.generator import WaveArtifact, _apply_reconciliation_scope, _DesignRewrite, generate_wave, regenerate_artifact
 from codd.greenfield.pipeline import GreenfieldPipeline, StageError
 from codd.planner import plan_init
 
@@ -1347,3 +1347,189 @@ def test_reconciliation_rejects_an_unusable_edit_scope_and_out_of_scope_insertio
     entry = json.loads((project / RECONCILIATIONS).read_text(encoding="utf-8"))
     assert entry["rewritten"] == PEER
     assert boundary not in entry["change"]
+
+
+@pytest.mark.parametrize(("proposal", "position"), [
+    ("P1\n\n### Heading\n\nP2\n\nAddition\n\nP3", 5),
+    ("P1\n\n### Heading\n\nP2\n\nAddition\n\nP3", 6),
+    ("P1\n\nAddition\n\n### Heading\n\nP2\n\nP3", 1),
+    ("P1\n\nAddition\n\n### Heading\n\nP2\n\nP3", 2),
+])
+def test_reconciliation_accepts_either_side_of_an_identical_blank_line(proposal, position):
+    source = "P1\n\n### Heading\n\nP2\n\nP3"
+
+    assert _apply_reconciliation_scope(PEER, source, proposal.splitlines(), (set(), {position})) == proposal
+
+
+@pytest.mark.parametrize(("position", "expected"), [
+    (1, "Start\r\nRepeat\r\nAdded\r\nRepeat\nRepeat\r\nEnd  "),
+    (2, "Start\r\nRepeat\nAdded\r\nRepeat\r\nRepeat\r\nEnd  "),
+])
+def test_reconciliation_preserves_the_in_scope_alignment_of_repeated_prose(position, expected):
+    source = "Start\r\nRepeat\nRepeat\r\nEnd  "
+    proposal = "Start\nRepeat\nAdded\nRepeat\nRepeat\nEnd  "
+
+    updated = _apply_reconciliation_scope(PEER, source, proposal.splitlines(), (set(), {position}))
+
+    assert updated == expected
+    assert updated.splitlines() == proposal.splitlines()
+
+
+@pytest.mark.parametrize(("source", "proposal", "scope", "operation"), [
+    ("P1\nP2\nP3", "P1\nParaphrase\nP3", ({1}, set()), "replacement at line 2"),
+    ("P1\nP2\nP3", "P1\nAdded\nP2\nP3", (set(), {2}), "insertion after line 1"),
+    ("P1\nP2\nP3", "P1\nP3", (set(), {1}), "deletion at line 2"),
+    ("P1\nP2\nP3", "P1\nChanged\nAdded\nP3", ({2}, set()), "insertion after line 2"),
+    ("P1\nP2\nP3", "P1\nP3\nP2", (set(), set()), "insertion after line 1"),
+    ("P1\n\n### Heading\n\nP2\n\nP3\nKeep this", "P1\n\n### Heading\n\nP2\n\nAddition\n\nP3\nParaphrased",
+     (set(), {5}), "replacement at line 8"),
+    ("P1\n\n### Heading\n\nP2\n\nP3\nKeep this\nTail", "P1\n\n### Heading\n\nP2\n\nAddition\n\nP3\nTail",
+     (set(), {5}), "deletion at line 8"),
+])
+def test_reconciliation_explains_which_edit_exceeds_the_scope(source, proposal, scope, operation):
+    with pytest.raises(ValueError) as failed:
+        _apply_reconciliation_scope(PEER, source, proposal.splitlines(), scope)
+
+    reason = str(failed.value)
+    assert "outside the approved edit scope" in reason
+    assert operation in reason
+    assert f"replace_lines={sorted(scope[0])}" in reason
+    assert f"insert_after={sorted(scope[1])}" in reason
+
+
+def test_reconciliation_removes_an_approved_line_between_untouched_lines():
+    source = "Start  \r\nDelete me\nKeep me\r\nEnd\t"
+
+    assert _apply_reconciliation_scope(PEER, source, ["Start  ", "Keep me", "End\t"], ({2}, set())) == (
+        "Start  \r\nKeep me\r\nEnd\t"
+    )
+
+
+@pytest.mark.parametrize(("replace_lines", "updated"), [
+    ({1, 2}, "A\r\n\nA"),
+    ({2}, "A\r\r\nA"),
+])
+def test_reconciliation_preserves_protected_bytes_when_cr_and_lf_meet(replace_lines, updated):
+    proposal = ["A", "", "A"]
+
+    result = _apply_reconciliation_scope(PEER, "A\rA\n\nA", proposal, (replace_lines, set()))
+
+    assert result == updated
+    assert result.splitlines() == proposal
+
+
+@pytest.mark.parametrize(("body", "proposal", "scope", "updated"), [
+    ("## Overview\r\nKeep  \nRemove\r\n\r\n", "## Overview\nKeep  \n", ({3}, set()),
+     "## Overview\r\nKeep  \n\r\n"),
+    ("## Overview\r\nKeep  \n\r\n", "## Overview\nKeep  \nAdded\n", (set(), {2}),
+     "## Overview\r\nKeep  \nAdded\n\r\n"),
+])
+def test_reconciliation_draft_preserves_mixed_line_endings_at_the_body_boundary(
+    tmp_path, monkeypatch, body, proposal, scope, updated,
+):
+    prefix = "---\r\ndescription: Example\n---\r\n\n"
+    artifact = WaveArtifact(1, "design:example", PEER, "Example", [], [])
+    rewrite = _DesignRewrite(prefix + body, "Example change", scope)
+    monkeypatch.setattr("codd.generator._invoke_ai_command", lambda _command, _prompt: proposal)
+
+    assert rewrite.draft(artifact, [], "fake-ai", None, tmp_path) == prefix + updated
+
+
+@pytest.mark.parametrize("padding", [0, 4096])
+def test_reconciliation_audits_each_proposal_and_frozen_scope_after_multi_target_failures(tmp_path, monkeypatch, padding):
+    project = _upstream_disagreement_project(tmp_path)
+    config = load_project_config(project)
+    config["generate"]["body_retry"]["max_retries"] = 2
+    config["wave_config"]["3"][0]["behavior_owners"] = ["service"]
+    config["wave_config"]["4"][0]["depends_on"].append("design:service")
+    _write(project, "codd/codd.yaml", yaml.safe_dump(config))
+
+    note = "p" * padding + "Keep the existing audit entry." + "q" * padding
+    changed_note = note.replace("Keep", "Discard")
+    other_claim = "The service accepts any file size."
+    other_repair = "The service applies the 100 byte limit."
+
+    def with_notes(document, *notes):
+        return document.replace("```codd-behavior", "\n".join(notes) + "\n\n```codd-behavior", 1)
+
+    originals = {
+        PEER: with_notes(_declaration(UNBOUNDED, spec="input-validation"), "Keep the design log."),
+        DEPENDENT: with_notes(_declaration(other_claim, spec="service"), "a" * 35000, note, "b" * 35000),
+    }
+    for output, old in originals.items():
+        _write(project, output, old)
+
+    scopes = {
+        output: {"replace_lines": [i for i, line in enumerate(old.splitlines(), 1) if claim in line],
+                 "insert_after": []}
+        for output, old, claim in [(PEER, originals[PEER], UNBOUNDED), (DEPENDENT, originals[DEPENDENT], other_claim)]
+    }
+    note_line = originals[DEPENDENT].splitlines().index(note) + 1
+    scopes[DEPENDENT]["replace_lines"] = sorted(scopes[DEPENDENT]["replace_lines"] + [note_line - 1, note_line + 1])
+    proposals = {
+        PEER: [with_notes(_declaration(claim, spec="input-validation"), "Keep the design log.") for claim in (
+            ALIGNED, "Input validation applies the same 100 byte limit as the importer.",
+        )],
+        DEPENDENT: [
+            with_notes(_declaration(other_repair, spec="service"), "c" * 70000, changed_note, "d" * 70000),
+            with_notes(_declaration(other_repair, spec="service"), "First note.", note, "Last note."),
+        ],
+    }
+    still_disputed = f"# Import\n\n## Overview\n\n{DISPUTE}\n\n```codd-behavior\n" + yaml.safe_dump({
+        "owns": {}, "cases": [], "unresolved": [
+            {"documents": [OWNER, PEER], "quote": DISPUTE},
+            {"documents": [OWNER, DEPENDENT], "quote": DISPUTE},
+        ],
+    }) + "```\n"
+    calls = []
+
+    def fake(_command, prompt):
+        if prompt.startswith("Select reconciliation edit locations"):
+            output = next(output for output in scopes if prompt.startswith(f"Select reconciliation edit locations in {output}."))
+            calls.append(("scope", output))
+            return json.dumps(scopes[output])
+        for node, output in [("design:validation", PEER), ("design:service", DEPENDENT)]:
+            if f"Node ID: {node}" in prompt:
+                call = ("rewrite", output)
+                if call in calls:
+                    assert f"Lines allowed to be replaced or removed: {scopes[output]['replace_lines']}" in prompt
+                    assert "outside the approved edit scope" in prompt
+                proposal = proposals[output][calls.count(call)]
+                calls.append(call)
+                return proposal
+        assert "Node ID: test:acceptance" in prompt
+        calls.append(("reporter", CONSUMER))
+        return still_disputed
+
+    monkeypatch.setattr("codd.generator._invoke_ai_command", fake)
+    with pytest.raises(ValueError, match="unresolved disagreement"):
+        generate_wave(project, 4)
+
+    assert calls == [
+        ("reporter", CONSUMER), ("scope", PEER), ("rewrite", PEER), ("scope", DEPENDENT),
+        ("rewrite", DEPENDENT), ("rewrite", PEER), ("rewrite", DEPENDENT), ("reporter", CONSUMER),
+    ]
+    entry = json.loads((project / RECONCILIATION_FAILURES).read_text(encoding="utf-8"))
+    assert [attempt["stage"] for attempt in entry["attempts"]] == ["rewrite", "regenerate reporter"]
+    for index, attempt in enumerate(entry["attempts"]):
+        assert set(attempt["rewrites"]) == set(proposals)
+        for output, rewrite in attempt["rewrites"].items():
+            assert rewrite["scope"] == scopes[output]
+            proposal = rewrite["proposal"]
+            assert proposal["original_chars"] == len(proposals[output][index])
+            if output == DEPENDENT and index == 0:
+                assert proposal["truncated"] and len(proposal["text"]) <= 65536
+                assert "Discard the existing audit entry." not in proposal["text"]
+                assert "Discard the existing audit entry." not in proposal["change"]["text"]
+                violation = proposal["violation"]
+                assert violation["operation"] == "replacement"
+                assert violation["original"]["line"] == violation["proposal"]["line"] == note_line
+                assert "Keep the existing audit entry." in violation["original"]["text"]
+                assert "Discard the existing audit entry." in violation["proposal"]["text"]
+                assert all(len(violation[side]["text"]) <= 512 for side in ("original", "proposal"))
+                assert all(violation[side]["truncated"] == bool(padding) for side in ("original", "proposal"))
+            else:
+                assert not proposal["truncated"] and proposal["text"] == proposals[output][index]
+    assert all((project / output).read_text(encoding="utf-8") == old for output, old in originals.items())
+    assert not (project / CONSUMER).exists()
+    assert not (project / RECONCILIATIONS).exists()
