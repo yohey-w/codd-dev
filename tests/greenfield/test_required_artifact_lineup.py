@@ -145,7 +145,13 @@ def test_opted_in_greenfield_reuses_the_saved_accounted_empty_selection(greenfie
     def plan_ai(command, prompt):
         assert command == "mock-ai" and "No documents are selected for generation" in prompt
         planning_calls.append(prompt)
-        return "{}"
+        return yaml.safe_dump({
+            "wave_config": {},
+            "ownership_not_applicable": {
+                "owns_operation_flow": "Existing operations need no new design.",
+                "owns_actor_facing": "Existing surfaces need no new design.",
+            },
+        })
 
     monkeypatch.setattr("codd.generator._invoke_ai_command", plan_ai)
     result = project.invoke("--use-required-artifacts")
@@ -170,13 +176,17 @@ def test_greenfield_passes_the_selected_rows_to_planning_and_generation(greenfie
         if prompt.startswith("## Project Lexicon") and "Saved scope for" in prompt:
             return "## Overview\n\nDefine the digest rules here.\n\n```codd-behavior\nowns: {}\ncases: []\n```"
         return yaml.safe_dump({
-            "1": [{
+            "wave_config": {"1": [{
                 "node_id": "design:digest",
                 "output": "docs/design/digest.md",
                 "title": ARTIFACT["title"],
                 "required_artifact_id": ARTIFACT_ID,
                 "depends_on": [{"id": "req:stub-app-requirements", "relation": "derives_from"}],
-            }]
+            }]},
+            "ownership_not_applicable": {
+                "owns_operation_flow": "The digest operation only transforms its inputs.",
+                "owns_actor_facing": "The plan adds no actor-facing surface or copy.",
+            },
         })
 
     monkeypatch.setattr("codd.generator._invoke_ai_command", plan_ai)

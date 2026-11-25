@@ -115,8 +115,10 @@ def _optional_file_bytes(path: Path) -> bytes | None:
         return None
 
 
-def _write_accounted_lexicon(path: Path, original: bytes | None, content: str) -> None:
-    """Write the selection and its evidence together, guarding concurrent derivations."""
+def _write_accounted_lexicon(
+    path: Path, original: bytes | None, content: str, *, operation: str = "derivation",
+) -> None:
+    """Replace the lexicon atomically if it still matches the bytes we read."""
     from stat import S_IMODE
     from tempfile import NamedTemporaryFile
 
@@ -132,7 +134,7 @@ def _write_accounted_lexicon(path: Path, original: bytes | None, content: str) -
                 raise ValueError(f"Another derivation is writing {LEXICON_FILENAME}. Retry the command.") from exc
             try:
                 if _optional_file_bytes(path) != original:
-                    raise ValueError(f"{LEXICON_FILENAME} changed during derivation. Retry the command.")
+                    raise ValueError(f"{LEXICON_FILENAME} changed during {operation}. Retry the command.")
                 if original is not None:
                     temp_path.chmod(S_IMODE(path.stat().st_mode))
                 temp_path.replace(path)

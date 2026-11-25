@@ -91,6 +91,15 @@ def _entry(row=PRIMARY, node="design:rules", output="docs/design/rules.md", *dep
     }
 
 
+def _saved_plan(waves, reasons=None):
+    if reasons is None:
+        reasons = {
+            "owns_operation_flow": "Normalization is a pure transformation.",
+            "owns_actor_facing": "The requirements specify no actor-facing surface.",
+        }
+    return {"wave_config": waves, "ownership_not_applicable": reasons}
+
+
 def _replies(monkeypatch, *responses):
     prompts = []
     replies = iter(responses)
@@ -120,7 +129,7 @@ def test_saved_lineup_rejects_reselection_during_planning(tmp_path, monkeypatch)
     def invoke(command, prompt):
         assert command == "mock-ai"
         _select(tmp_path, monkeypatch, catalog, {replacement}, rederive=True)
-        return yaml.safe_dump({"1": [_entry()]})
+        return yaml.safe_dump(_saved_plan({"1": [_entry()]}))
 
     monkeypatch.setattr(generator, "_invoke_ai_command", invoke)
     result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
@@ -169,7 +178,10 @@ def test_saved_lineup_retries_with_specific_feedback(tmp_path, monkeypatch, prob
             ("duplicate", "1"),
         ),
     }[problem]
-    prompts = _replies(monkeypatch, {"1": invalid} if isinstance(invalid, list) else invalid, {"1": correct})
+    prompts = _replies(
+        monkeypatch, _saved_plan({"1": invalid}) if isinstance(invalid, list) else invalid,
+        _saved_plan({"1": correct}),
+    )
 
     result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
 
@@ -185,7 +197,7 @@ def test_saved_lineup_retry_exhaustion_preserves_config(tmp_path, monkeypatch):
     config_path = _project(tmp_path, catalog)
     _select(tmp_path, monkeypatch, catalog, {PRIMARY})
     original = config_path.read_bytes()
-    invalid = {"1": [_entry("design:extra")]}
+    invalid = _saved_plan({"1": [_entry("design:extra")]})
     prompts = _replies(monkeypatch, invalid, invalid)
 
     result = _cli(tmp_path, "--init", "--use-required-artifacts")
@@ -205,7 +217,7 @@ def test_bundled_lineup_uses_existing_requirements_and_reports_registry(tmp_path
         _entry(row["id"], row["id"].replace("_", "-"), f"docs/design/{row['id'].split(':')[1]}.md")
         for row in catalog if row["id"] in chosen - {"design:requirements"}
     ]
-    prompts = _replies(monkeypatch, {"1": docs})
+    prompts = _replies(monkeypatch, _saved_plan({"1": docs}))
 
     result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
 
@@ -224,7 +236,8 @@ def test_saved_lineup_replans_the_previously_pinned_canonical_registry(tmp_path,
     catalog = [_catalog_row(PRIMARY, CATALOG_SCOPE)]
     config_path = _project(tmp_path, catalog)
     _select(tmp_path, monkeypatch, catalog, {PRIMARY})
-    _replies(monkeypatch, {"1": [_entry()]}, {"1": [_entry()]})
+    response = _saved_plan({"1": [_entry()]})
+    _replies(monkeypatch, response, response)
 
     first = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
     second = _cli(tmp_path, "--init", "--force", "--use-required-artifacts", "--no-contract-gate")
@@ -243,7 +256,7 @@ def test_generate_all_waves_preserves_an_intentionally_empty_saved_lineup(tmp_pa
     config["test_coverage"] = {"gate": False}
     path.write_text(yaml.safe_dump(config))
     _select(tmp_path, monkeypatch, catalog, set())
-    prompts = _replies(monkeypatch, "{}")
+    prompts = _replies(monkeypatch, _saved_plan({}))
     planned = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
     assert planned.exit_code == 0, planned.output
 
@@ -273,7 +286,7 @@ def test_custom_lineup_registry_and_scope_survive_catalog_edits(tmp_path, monkey
         "2": [_entry(registry_id, "test:test-strategy", "docs/test/test_strategy.md", "design:rules")],
     }
     prompts = _replies(
-        monkeypatch, docs,
+        monkeypatch, _saved_plan(docs),
         "## Overview\n\nNormalize records.\n\n```codd-behavior\nowns: {}\ncases: []\n```",
     )
 
@@ -335,8 +348,8 @@ def test_lineup_keeps_the_planned_roles_with_their_own_documents(tmp_path, monke
     surfaces["owns_actor_facing"] = True
     _replies(
         monkeypatch,
-        {"1": [model, surfaces | {"owns_operation_flow": True}]},
-        {"1": [model], "2": [surfaces]},
+        _saved_plan({"1": [model, surfaces | {"owns_operation_flow": True}]}, {}),
+        _saved_plan({"1": [model], "2": [surfaces]}, {}),
     )
 
     result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
@@ -364,7 +377,7 @@ def test_accounted_lineup_discovers_requirements_from_the_configured_scan(tmp_pa
     requirement.rename(custom_dir / "spec.md")
 
     _select(tmp_path, monkeypatch, catalog, {PRIMARY})
-    _replies(monkeypatch, {"1": [_entry()]})
+    _replies(monkeypatch, _saved_plan({"1": [_entry()]}))
 
     result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
     assert result.exit_code == 0, result.output
@@ -399,7 +412,7 @@ def test_saved_lineup_only_prompts_the_flow_owner_to_define_the_model(tmp_path, 
     behavior = "\n\n```codd-behavior\nowns: {}\ncases: []\n```"
     prompts = _replies(
         monkeypatch,
-        {"1": [owner], "2": [consumer]},
+        _saved_plan({"1": [owner], "2": [consumer]}, {"owns_actor_facing": "There is no actor-facing surface."}),
         "## Overview\n\nNormalize records." + behavior
         + "\n\n```yaml\noperation_flow:\n  operations:\n    - id: normalize-record\n```",
         "## Overview\n\nApply normalize-record from docs/design/rules.md." + behavior,
@@ -424,7 +437,7 @@ def test_saved_lineup_retries_when_the_selected_registry_is_not_canonical(tmp_pa
     _select(tmp_path, monkeypatch, catalog, {REGISTRY})
     invalid = _entry(REGISTRY, "test:verification", "docs/test/verification.md")
     canonical = _entry(REGISTRY, "test:test-strategy", "docs/test/test_strategy.md")
-    prompts = _replies(monkeypatch, {"1": [invalid]}, {"1": [canonical]})
+    prompts = _replies(monkeypatch, _saved_plan({"1": [invalid]}), _saved_plan({"1": [canonical]}))
 
     result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
 
@@ -448,10 +461,11 @@ def test_saved_lineup_retries_when_two_documents_claim_actor_facing_ownership(tm
     _select(tmp_path, monkeypatch, catalog, {PRIMARY, consumer_id})
     owner = _entry() | {"owns_actor_facing": True}
     consumer = _entry(consumer_id, "design:boundaries", "docs/design/boundaries.md")
+    reasons = {"owns_operation_flow": "Normalization is a pure transformation."}
     prompts = _replies(
         monkeypatch,
-        {"1": [owner, consumer | {"owns_actor_facing": True}]},
-        {"1": [owner, consumer]},
+        _saved_plan({"1": [owner, consumer | {"owns_actor_facing": True}]}, reasons),
+        _saved_plan({"1": [owner, consumer]}, reasons),
     )
 
     result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
@@ -463,3 +477,179 @@ def test_saved_lineup_retries_when_two_documents_claim_actor_facing_ownership(tm
     assert f"multiple actor-facing surface/copy owners: {owner['output']}, {consumer['output']}" in retry_prompt
     owners = [entry["output"] for entry in _entries(config_path) if entry.get("owns_actor_facing")]
     assert owners == [owner["output"]]
+
+
+@pytest.mark.parametrize("custom_vocabulary", [False, True])
+def test_saved_lineup_fills_missing_lexicon_sections_before_plan_and_generate(tmp_path, monkeypatch, custom_vocabulary):
+    catalog = [_catalog_row(PRIMARY, CATALOG_SCOPE)]
+    _project(tmp_path, catalog)
+    lexicon_path = tmp_path / "project_lexicon.yaml"
+    custom = {"id": "record_rule", "description": "A human-authored vocabulary entry."}
+    if custom_vocabulary:
+        lexicon_path.write_text(yaml.safe_dump({"node_vocabulary": [custom], "project_id": "my-project"}))
+    _select(tmp_path, monkeypatch, catalog, {PRIMARY})
+    saved = yaml.safe_load(lexicon_path.read_bytes())
+    prompts = _replies(
+        monkeypatch, _saved_plan({"1": [_entry()]}),
+        "## Overview\n\nNormalize records.\n\n```codd-behavior\nowns: {}\ncases: []\n```",
+    )
+
+    planned = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
+    assert planned.exit_code == 0, planned.output
+    generated, = generator.generate_wave(tmp_path, 1, ai_command="mock-ai")
+
+    assert generated.status == "generated"
+    filled = yaml.safe_load(lexicon_path.read_bytes())
+    for key in ("required_artifacts", "required_artifact_decisions", "required_artifact_snapshot"):
+        assert filled[key] == saved[key]
+    if custom_vocabulary:
+        assert filled["node_vocabulary"] == [custom]
+        assert filled["project_id"] == "my-project"
+    else:
+        assert len(filled["node_vocabulary"]) == 7
+    assert len(filled["naming_conventions"]) == 4
+    assert len(filled["design_principles"]) == 3
+    assert len(filled["failure_modes"]) == 3
+    assert len(prompts) == 2
+    for prompt in prompts:
+        assert (custom["description"] if custom_vocabulary else "Persistent database table") in prompt
+        assert "Use one canonical name for the same domain concept" in prompt
+
+
+def test_saved_lineup_retries_when_required_roles_are_unassigned(tmp_path, monkeypatch):
+    catalog = [_catalog_row(PRIMARY, CATALOG_SCOPE)]
+    config_path = _project(tmp_path, catalog)
+    _select(tmp_path, monkeypatch, catalog, {PRIMARY})
+    unassigned = _entry()
+    del unassigned["owns_operation_flow"]
+    owner = unassigned | {"owns_operation_flow": True, "owns_actor_facing": True}
+    prompts = _replies(monkeypatch, _saved_plan({"1": [unassigned]}, {}), _saved_plan({"1": [owner]}, {}))
+
+    result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
+
+    assert result.exit_code == 0, result.output
+    assert len(prompts) == 2
+    feedback = prompts[1].split("PREVIOUS RESPONSE WAS REJECTED", 1)[1]
+    assert "owns_operation_flow" in feedback and "owns_actor_facing" in feedback
+    assert "ownership_not_applicable" in feedback
+    planned = _entries(config_path)[0]
+    assert planned["owns_operation_flow"] is planned["owns_actor_facing"] is True
+
+
+@pytest.mark.parametrize("requirement_text", [
+    "- Expose a pure function that normalizes records.",
+    "| Excluded features |\n| --- |\n| state transitions, access control and UI screens |",
+    "## 対象外\n\n- 状態遷移、永続化、画面と表示文言",
+    "- La bibliothèque transforme les données sans interaction.",
+])
+def test_saved_lineup_stateless_library_does_not_need_roles(tmp_path, monkeypatch, requirement_text):
+    catalog = [_catalog_row(PRIMARY, CATALOG_SCOPE)]
+    _project(tmp_path, catalog)
+    requirement = tmp_path / REQUIREMENT
+    requirement.write_text(requirement.read_text().replace("- Normalize imported records.", requirement_text))
+    _select(tmp_path, monkeypatch, catalog, {PRIMARY})
+    reasons = {
+        "owns_operation_flow": "The library only transforms its inputs.",
+        "owns_actor_facing": "The library exposes a programming interface only.",
+    }
+    prompts = _replies(
+        monkeypatch, {"wave_config": {"1": [_entry()]}, "ownership_not_applicable": reasons},
+        "## Overview\n\nNormalize records.\n\n```codd-behavior\nowns: {}\ncases: []\n```",
+        "## Overview\n\nVerify normalization.\n\n```codd-behavior\nowns: {}\ncases: []\n```",
+    )
+
+    result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
+    assert result.exit_code == 0, result.output
+    for reason in reasons.values():
+        assert f"Not applicable: {reason}" in result.output
+    for wave in (1, 2):
+        generated, = generator.generate_wave(tmp_path, wave, ai_command="mock-ai")
+        assert generated.status == "generated"
+
+    assert len(prompts) == 3
+    for prompt in prompts[1:]:
+        assert "Operational Behavior Model (DESIGN-TIME" not in prompt
+        assert "Actor-Facing Surface/Copy Obligations (DESIGN-TIME" not in prompt
+
+
+@pytest.mark.parametrize("source", [
+    "config", "config_consistency_disabled", "frontmatter", "codd_frontmatter", "body", "body_ui_pattern",
+])
+def test_saved_lineup_retries_when_declared_operation_flow_is_marked_unnecessary(tmp_path, monkeypatch, source):
+    catalog = [_catalog_row(PRIMARY, CATALOG_SCOPE)]
+    config_path = _project(tmp_path, catalog)
+    requirement = tmp_path / REQUIREMENT
+    flow = {"operations": [{"id": "normalize"}]}
+    if source == "body_ui_pattern":
+        flow["operations"][0]["ui_pattern"] = "single_form"
+    declaration = yaml.safe_dump({"operation_flow": flow})
+    if source.startswith("config"):
+        config = yaml.safe_load(config_path.read_bytes())
+        if source == "config_consistency_disabled":
+            config["generate"] = {"design_consistency": False}
+        config_path.write_text(yaml.safe_dump(config | {"operation_flow": flow}))
+    elif source == "frontmatter":
+        requirement.write_text(requirement.read_text().replace("codd:\n", declaration + "codd:\n", 1))
+    elif source == "codd_frontmatter":
+        addition = "".join(f"  {line}\n" for line in declaration.splitlines())
+        requirement.write_text(requirement.read_text().replace("codd:\n", "codd:\n" + addition, 1))
+    else:
+        requirement.write_text(requirement.read_text().replace(
+            "- Normalize imported records.", f"```yaml\n{declaration}```",
+        ))
+    _select(tmp_path, monkeypatch, catalog, {PRIMARY})
+    actor_reason = {"owns_actor_facing": "There is no actor-facing surface."}
+    owner = _entry() | {"owns_operation_flow": True}
+    if source == "body_ui_pattern":
+        owner["owns_actor_facing"] = True
+    prompts = _replies(
+        monkeypatch,
+        _saved_plan({"1": [_entry()]}, actor_reason | {
+            "owns_operation_flow": "No model needed.",
+        }),
+        _saved_plan({"1": [owner]}, {} if source == "body_ui_pattern" else actor_reason),
+        "## Overview\n\nNormalize records.\n\n```yaml\noperation_flow:\n  operations:\n  - id: normalize\n```",
+    )
+
+    result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
+
+    assert result.exit_code == 0, result.output
+    assert len(prompts) == 2
+    feedback = prompts[1].split("PREVIOUS RESPONSE WAS REJECTED", 1)[1]
+    assert ("codd.yaml" if source.startswith("config") else REQUIREMENT) in feedback
+    assert "declares operation_flow" in feedback
+    assert _entries(config_path)[0]["owns_operation_flow"] is True
+    assert f"Operational model — {owner['output']}" in result.output
+    if source == "body_ui_pattern":
+        assert "declares operation_flow with ui_pattern" in feedback
+        assert f"Actor-facing surfaces and copy — {owner['output']}" in result.output
+    if source == "config_consistency_disabled":
+        generated, = generator.generate_wave(tmp_path, 1, ai_command="mock-ai")
+        assert generated.status == "generated"
+        assert "Operational Behavior Model (DESIGN-TIME" in prompts[2]
+
+
+@pytest.mark.parametrize("problem", ["both", "blank_reason", "unknown_owner", "unknown_role"])
+def test_saved_lineup_retries_invalid_ownership_decisions(tmp_path, monkeypatch, problem):
+    catalog = [_catalog_row(PRIMARY, CATALOG_SCOPE)]
+    _project(tmp_path, catalog)
+    _select(tmp_path, monkeypatch, catalog, {PRIMARY})
+    actor_reason = {"owns_actor_facing": "There is no actor-facing surface."}
+    owner = _entry() | {"owns_operation_flow": True}
+    entry, reasons, evidence = {
+        "both": (owner, actor_reason | {"owns_operation_flow": "No model needed."}, "both"),
+        "blank_reason": (_entry(), actor_reason | {"owns_operation_flow": " "}, "non-blank reason"),
+        "unknown_owner": (owner | {"required_artifact_id": "design:absent"}, actor_reason, "design:absent"),
+        "unknown_role": (owner, actor_reason | {"owns_everything": "Not a role."}, "owns_everything"),
+    }[problem]
+    prompts = _replies(
+        monkeypatch,
+        {"wave_config": {"1": [entry]}, "ownership_not_applicable": reasons},
+        {"wave_config": {"1": [owner]}, "ownership_not_applicable": actor_reason},
+    )
+
+    result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
+
+    assert result.exit_code == 0, result.output
+    assert len(prompts) == 2
+    assert evidence in prompts[1].split("PREVIOUS RESPONSE WAS REJECTED", 1)[1]

@@ -433,17 +433,32 @@ def plan_init(
     include_behavior_ownership = not design_consistency_disabled(config)
     assign_behavior_ownership = bool(requirement_documents) and include_behavior_ownership
     lineup = None
+    draft_lexicon = None
+    not_applicable: dict[str, str] = {}
     if use_required_artifacts:
-        from codd.planned_required_artifacts import load_required_artifact_lineup
+        from codd.lexicon import ProjectLexicon
+        from codd.planned_required_artifacts import load_required_artifact_lineup, structured_ownership_requirements
+        from codd.required_artifacts_deriver import (
+            _write_accounted_lexicon,
+            accounted_lexicon_path,
+            lexicon_data_from_yaml,
+        )
 
         lineup = load_required_artifact_lineup(project_root, requirement_documents)
         if not requirement_documents:
             raise ValueError("Planning from a saved selection requires requirement documents with CoDD frontmatter.")
+        required_owners = structured_ownership_requirements(config, requirement_documents)
+        lexicon_path = accounted_lexicon_path(project_root)
+        original_lexicon = lexicon_path.read_bytes()
+        saved_lexicon = lexicon_data_from_yaml(original_lexicon.decode("utf-8"))
+        draft_lexicon = _fill_empty_lexicon_sections(project_root, saved_lexicon)
 
     if requirement_documents:
         # Greenfield: use requirements
         resolved_ai_command = generator_module._resolve_ai_command(config, ai_command, command_name="plan_init")
-        prompt = _build_plan_init_prompt(config, requirement_documents, capabilities)
+        prompt = _build_plan_init_prompt(
+            config, requirement_documents, capabilities, use_required_artifacts=use_required_artifacts,
+        )
     else:
         # Brownfield: try extracted docs
         extracted_documents = _load_extracted_documents(project_root, config)
@@ -456,16 +471,21 @@ def plan_init(
         resolved_ai_command = generator_module._resolve_ai_command(config, ai_command, command_name="plan_init")
         prompt = _build_brownfield_plan_init_prompt(config, extracted_documents, capabilities)
 
-    def validate(waves: dict[str, list[dict[str, Any]]]) -> None:
+    def validate(waves: dict[str, list[dict[str, Any]]], ownership_reasons: Any) -> None:
+        nonlocal not_applicable
         if lineup is not None:
-            lineup.validate(waves)
-        if assign_behavior_ownership and (lineup is None or waves):
-            _validate_behavior_wave_config(waves, requirement_documents)
+            lineup.validate(waves, not_applicable=ownership_reasons, required_owners=required_owners)
+        if lineup is None or waves:
+            _validate_behavior_wave_config(waves, requirement_documents, warn_missing_flow_owner=lineup is None)
+        not_applicable = ownership_reasons
 
     if lineup is not None:
-        prompt += lineup.prompt(assign_owners=assign_behavior_ownership, user_interface=capabilities.user_interface)
+        prompt += lineup.prompt(required_owners=required_owners)
 
-    prompt = generator_module._inject_lexicon(prompt, project_root)
+    if draft_lexicon is None:
+        prompt = generator_module._inject_lexicon(prompt, project_root)
+    else:
+        prompt = generator_module._inject_lexicon(prompt, project_root, lexicon=ProjectLexicon(draft_lexicon))
     wave_config = _invoke_and_parse_wave_config(
         resolved_ai_command, prompt, max_retries=_plan_init_max_retries(config),
         include_behavior_ownership=include_behavior_ownership,
@@ -498,7 +518,13 @@ def plan_init(
                 "The saved artifact selection changed during planning. "
                 "Retry 'codd plan --init --use-required-artifacts'."
             )
-        required_artifact_report = lineup.annotate_and_report(wave_config)
+        required_artifact_report = lineup.annotate_and_report(wave_config, not_applicable=not_applicable)
+        if wave_config and draft_lexicon is not None:
+            _write_accounted_lexicon(
+                lexicon_path, original_lexicon, yaml.safe_dump(draft_lexicon, sort_keys=False, allow_unicode=True),
+                operation="planning",
+            )
+            print(f"Filled empty sections in {lexicon_path.name} with an inferred draft. Please review and update.")
 
     from codd.config import find_codd_dir
     config["wave_config"] = wave_config
@@ -526,6 +552,8 @@ def plan_init(
 def _validate_behavior_wave_config(
     wave_config: dict[str, list[dict[str, Any]]],
     requirements: list[RequirementDocument],
+    *,
+    warn_missing_flow_owner: bool = True,
 ) -> None:
     artifacts = _load_wave_artifacts({"wave_config": wave_config})
     planned_specs: dict[str, str] = {}
@@ -552,7 +580,7 @@ def _validate_behavior_wave_config(
             owner = dependency["id"]
             if owner_positions.get(owner, -1) >= position:
                 raise ValueError(f"{artifact.output}: place behavior owner {owner!r} before its dependent")
-    if requirements and not flow_owner:
+    if warn_missing_flow_owner and requirements and not flow_owner:
         print("Warning: No design artifact is assigned as the operation_flow owner.", file=sys.stderr, flush=True)
 
 
@@ -923,23 +951,42 @@ def _ensure_lexicon(project_root: Path) -> None:
     if lexicon_path.exists():
         return
 
+    draft = _infer_lexicon_draft(project_root)
+    lexicon_path.write_text(
+        yaml.safe_dump(draft, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    context_label = ", ".join(draft["draft_context"]["detected_context"]) or "unknown"
+    print(f"Created draft {LEXICON_FILENAME} (detected_context={context_label}). Please review and update.")
+
+
+def _fill_empty_lexicon_sections(project_root: Path, saved: dict[str, Any]) -> dict[str, Any] | None:
+    """Draft missing lexicon sections without replacing saved values."""
+    sections = ("node_vocabulary", "naming_conventions", "design_principles", "failure_modes")
+    empty_sections = [key for key in sections if not saved.get(key)]
+    if not empty_sections:
+        return None
+
+    draft = _infer_lexicon_draft(project_root)
+    merged = {**draft, **saved} if len(empty_sections) == len(sections) else saved.copy()
+    if "node_vocabulary" in empty_sections:
+        merged.setdefault("extractor_registry", draft["extractor_registry"])
+    merged.update({key: draft[key] for key in empty_sections})
+    return merged
+
+
+def _infer_lexicon_draft(project_root: Path) -> dict[str, Any]:
     questions_text = _read_lexicon_questions()
     detected_context = _detect_lexicon_context(project_root)
     design_md_suggestion = _suggest_design_md_for_ui(project_root, detected_context)
     fetched_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-    draft = _build_lexicon_draft(
+    return _build_lexicon_draft(
         project_root=project_root,
         questions_text=questions_text,
         detected_context=detected_context,
         design_md_suggestion=design_md_suggestion,
         fetched_at=fetched_at,
     )
-    lexicon_path.write_text(
-        yaml.safe_dump(draft, sort_keys=False, allow_unicode=True),
-        encoding="utf-8",
-    )
-    context_label = ", ".join(detected_context) if detected_context else "unknown"
-    print(f"Created draft {LEXICON_FILENAME} (detected_context={context_label}). Please review and update.")
 
 
 def _read_lexicon_questions() -> str:
@@ -1271,6 +1318,8 @@ def _build_plan_init_prompt(
     config: dict[str, Any],
     requirement_documents: list[RequirementDocument],
     capabilities: ProjectCapabilities | None = None,
+    *,
+    use_required_artifacts: bool = False,
 ) -> str:
     if capabilities is None:
         capabilities = generator_module.WEB_FALLBACK_CAPABILITIES
@@ -1302,8 +1351,13 @@ def _build_plan_init_prompt(
         *([
             "- Give each behavior specification shared across documents one owning design artifact. Put its stable id in that artifact's behavior_owners list. Use an empty list for documents that only apply or verify decisions. Use earlier owner artifacts as dependencies of their consumers, including test documents.",
         ] if assign_behavior_ownership else []),
-        "- Output ONLY YAML for the wave_config mapping. Do not emit prose or Markdown fences.",
-        "- Use string wave numbers as the top-level keys.",
+        (
+            "- Output ONLY YAML for the saved artifact plan specified below. Do not emit prose or Markdown fences."
+            if use_required_artifacts else
+            "- Output ONLY YAML for the wave_config mapping. Do not emit prose or Markdown fences."
+        ),
+        "- Use string wave numbers as keys inside wave_config." if use_required_artifacts
+        else "- Use string wave numbers as the top-level keys.",
         "- Each artifact entry must include node_id, output, title, depends_on, and conventions.",
         "- Each artifact entry must also include a `modules` list naming the source modules the document covers (e.g., ['auth', 'users']). This links design docs to source code for traceability.",
         (
@@ -1340,7 +1394,7 @@ def _build_plan_init_prompt(
         "- Set dependencies so earlier waves unlock later waves in a realistic order.",
         "- Do not emit explanatory headings or summaries such as 'Key conventions extracted:' or 'Notes:' before the YAML.",
         "",
-        "Required schema (JSON notation):",
+        "Required wave_config value (JSON notation):" if use_required_artifacts else "Required schema (JSON notation):",
         "{",
         '  "<wave-number>": [',
         "    {",
@@ -1358,6 +1412,8 @@ def _build_plan_init_prompt(
         "  ]",
         "}",
         "",
+        "Example wave_config value (place this mapping under the top-level wave_config key):"
+        if use_required_artifacts else
         "Example output shape (YAML mapping only; do not wrap it in a top-level wave_config key):",
         '"1":',
         '  - node_id: "design:acceptance-criteria"',
@@ -1585,18 +1641,21 @@ def _plan_init_max_retries(config: dict[str, Any]) -> int:
 
 def _append_wave_config_retry_feedback(
     prompt: str, error: str, *, behavior_validation: bool = False,
+    include_required_artifact_mapping: bool = False,
 ) -> str:
     """Include the rejection reason and re-state the strict-YAML contract."""
     rejection = "it could not be parsed as valid wave_config YAML"
     if behavior_validation:
         rejection = "fix this wave_config issue"
+    response = "saved artifact plan" if include_required_artifact_mapping else "wave_config mapping"
+    complete = "saved artifact plan, including ownership decisions" if include_required_artifact_mapping else "wave_config"
     note = (
         "\n\n---\n"
         f"YOUR PREVIOUS RESPONSE WAS REJECTED: {rejection} "
-        f"({error}). Output ONLY the wave_config mapping as STRICT, valid YAML — no "
+        f"({error}). Output ONLY the {response} as STRICT, valid YAML — no "
         "prose, no Markdown fences, no arrows (`->`) or annotations. Every key must be "
         "followed by a colon and a value, and every list item must start with `- `. "
-        "Re-emit the COMPLETE wave_config now."
+        f"Re-emit the COMPLETE {complete} now."
     )
     return prompt + note
 
@@ -1605,7 +1664,7 @@ def _invoke_and_parse_wave_config(
     ai_command: str, base_prompt: str, *, max_retries: int = DEFAULT_PLAN_INIT_MAX_RETRIES,
     include_behavior_ownership: bool = True,
     include_required_artifact_mapping: bool = False,
-    validate: Callable[[dict[str, list[dict[str, Any]]]], None] | None = None,
+    validate: Callable[[dict[str, list[dict[str, Any]]], Any], None] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Invoke the AI for a wave_config with a bounded parse-feedback retry loop.
 
@@ -1625,16 +1684,15 @@ def _invoke_and_parse_wave_config(
         if feedback is not None:
             prompt = _append_wave_config_retry_feedback(
                 base_prompt, feedback, behavior_validation=validate is not None,
+                include_required_artifact_mapping=include_required_artifact_mapping,
             )
         try:
             raw = generator_module._invoke_ai_command(ai_command, prompt)
-            wave_config = _parse_wave_config_output(
+            return _parse_wave_config_output(
                 raw, include_behavior_ownership=include_behavior_ownership,
                 include_required_artifact_mapping=include_required_artifact_mapping,
+                validate=validate,
             )
-            if validate is not None:
-                validate(wave_config)
-            return wave_config
         except ValueError as exc:
             if str(exc).startswith("AI command failed"):
                 raise  # infra failure: retrying the same broken command cannot help
@@ -1655,6 +1713,7 @@ class _UnambiguousWaveConfigLoader(yaml.SafeLoader):
 def _parse_wave_config_output(
     raw_output: str, *, include_behavior_ownership: bool = True,
     include_required_artifact_mapping: bool = False,
+    validate: Callable[[dict[str, list[dict[str, Any]]], Any], None] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Parse an AI command's stdout into a validated wave_config mapping.
 
@@ -1680,7 +1739,15 @@ def _parse_wave_config_output(
             last_error = exc
             continue
 
-        if isinstance(payload, dict) and isinstance(payload.get("wave_config"), dict):
+        ownership_reasons: Any = {}
+        if include_required_artifact_mapping and isinstance(payload, dict) and "ownership_not_applicable" in payload:
+            if payload.keys() != {"wave_config", "ownership_not_applicable"} or not isinstance(
+                payload["wave_config"], dict,
+            ):
+                raise ValueError("Return a wave_config mapping alongside ownership_not_applicable")
+            ownership_reasons = payload["ownership_not_applicable"]
+            payload = payload["wave_config"]
+        elif isinstance(payload, dict) and isinstance(payload.get("wave_config"), dict):
             if include_required_artifact_mapping and len(payload) != 1:
                 raise ValueError("The wave_config wrapper cannot contain additional keys")
             payload = payload["wave_config"]
@@ -1692,18 +1759,20 @@ def _parse_wave_config_output(
             continue
 
         if include_required_artifact_mapping and not payload:
-            return {}
-
-        try:
-            artifacts = _load_wave_artifacts(
-                {"wave_config": payload}, include_behavior_ownership=include_behavior_ownership,
-                include_required_artifact_mapping=include_required_artifact_mapping,
-            )
-        except ValueError as exc:
-            last_error = exc
-            continue
-
-        return _serialize_wave_config(artifacts)
+            waves = {}
+        else:
+            try:
+                artifacts = _load_wave_artifacts(
+                    {"wave_config": payload}, include_behavior_ownership=include_behavior_ownership,
+                    include_required_artifact_mapping=include_required_artifact_mapping,
+                )
+            except ValueError as exc:
+                last_error = exc
+                continue
+            waves = _serialize_wave_config(artifacts)
+        if validate is not None:
+            validate(waves, ownership_reasons)
+        return waves
 
     if isinstance(last_error, yaml.YAMLError):
         raise ValueError(f"AI command returned invalid wave_config YAML: {last_error}") from last_error

@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess  # noqa: F401 — kept: tests monkeypatch ``generator.subprocess.run``
 from tempfile import NamedTemporaryFile
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import yaml
 
@@ -55,6 +55,9 @@ from codd.project_types import (
 )
 from codd.requirements_meta import normalize_operation_flow
 from codd.verifiable_behavior_audit import VB_BLOCKER_SCOPE_GUIDANCE
+
+if TYPE_CHECKING:
+    from codd.lexicon import ProjectLexicon
 
 
 # Full-capability profile used as the backward-compatible default when a project
@@ -1457,6 +1460,11 @@ def _load_wave_artifacts(
                     or len(set(owners)) != len(owners)
                 ):
                     raise ValueError(f"{entry['output']}: behavior_owners must be a list of unique ids")
+
+            # The saved selection assigns the model independently of behavior consistency.
+            if include_behavior_ownership or (
+                include_required_artifact_mapping and entry.get("required_artifact_id") is not None
+            ):
                 owns_operation_flow = entry.get("owns_operation_flow")
                 if "owns_operation_flow" in entry and not isinstance(owns_operation_flow, bool):
                     raise ValueError(f"{entry['output']}: owns_operation_flow must be true or false")
@@ -1764,13 +1772,14 @@ def _load_dependency_documents(
     return documents
 
 
-def _inject_lexicon(base_prompt: str, project_root: str | Path | None) -> str:
-    """Prepend project lexicon context to a prompt if project_lexicon.yaml exists."""
-    if project_root is None:
-        return base_prompt
-    from codd.lexicon import load_lexicon
+def _inject_lexicon(
+    base_prompt: str, project_root: str | Path | None, *, lexicon: ProjectLexicon | None = None,
+) -> str:
+    """Prepend project lexicon context, using a supplied draft when available."""
+    if lexicon is None and project_root is not None:
+        from codd.lexicon import load_lexicon
 
-    lexicon = load_lexicon(project_root)
+        lexicon = load_lexicon(project_root)
     if lexicon is None:
         return base_prompt
     return lexicon.as_context_string() + "\n\n---\n\n" + base_prompt
