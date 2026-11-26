@@ -170,6 +170,9 @@ implement:
   # stays the existing verify-stage coherence gates). Set false to opt out (this
   # re-opens the false-green window the gate closes). Greenfield-only.
   implement_oracle: true
+  # Before a full oracle retry or marker-authenticity rework, try the declared
+  # owners in a disposable project copy. Only a validated repair is published.
+  # owner_first_retry_on_copy: true
   # Total implement-oracle attempts: one initial check + bounded corrective
   # retries that re-run implementation with normalized oracle feedback. Default 5,
   # sized to the escalation LADDER so every rung can be reached: initial(1) +

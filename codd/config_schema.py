@@ -128,6 +128,7 @@ _CODE_READ_TOP_LEVEL_KEYS: tuple[str, ...] = (
 #: Nested keys the CODE reads inside sections that defaults.yaml DOES declare
 #: (so the section is closed) but whose defaults entry omits them.
 _CODE_READ_NESTED_KEYS: tuple[tuple[str, ...], ...] = (
+    ("implement", "owner_first_retry_on_copy"),
     ("scan", "common_node_patterns"),          # dag/builder.py (nested form)
     ("coherence", "capability_requirements"),  # capability completeness reader
     ("coherence", "runtime_capability_inference"),

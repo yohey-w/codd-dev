@@ -1658,11 +1658,12 @@ class PythonCompositeOracleAdapter:
             _run_python_first_party_import_layer(
                 project_root, source_root, package_root, test_root, scope, all_files
             ),
-            _run_python_pytest_collect_layer(
-                project_root, source_root, package_root, test_root, scope, config,
-                profile=ctx.language_profile,
-            ),
         ]
+        collection = _run_python_pytest_collect_layer(
+            project_root, source_root, package_root, test_root, scope, config,
+            profile=ctx.language_profile,
+        )
+        tools.append(collection)
         lint_mode = _python_lint_mode(config)
         if lint_mode != "off":
             tools.append(
@@ -1684,6 +1685,12 @@ class PythonCompositeOracleAdapter:
         findings.extend(_certify_python_tool_observability(scope, tools))
 
         passed = not findings
+        implement = config.get("implement") if isinstance(config, Mapping) else None
+        observed_failure_paths = (
+            collection.observed_files
+            if isinstance(implement, Mapping) and implement.get("owner_first_retry_on_copy") is True
+            else ()
+        )
         return ImplementOracleResult(
             passed=passed,
             executed=True,
@@ -1697,6 +1704,7 @@ class PythonCompositeOracleAdapter:
             ),
             raw_output="\n\n".join(raw_parts),
             diagnostics=[],
+            observed_failure_paths=observed_failure_paths,
         )
 
     def normalize_command_result(

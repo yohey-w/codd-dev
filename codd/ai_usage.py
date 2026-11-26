@@ -41,6 +41,12 @@ _session: ContextVar[_Session | None] = ContextVar("ai_usage_session", default=N
 _trial: ContextVar[_Trial | None] = ContextVar("ai_usage_trial", default=None)
 
 
+def active_usage_log() -> Path | None:
+    """The outer invocation's destination, including when the project cwd changes."""
+    session = _session.get()
+    return session.path if session else None
+
+
 def resolve_usage_log(config: Mapping[str, Any] | None = None, project_root=None) -> Path | None:
     """Resolve env before config (an empty env value disables logging).
 

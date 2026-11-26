@@ -1610,6 +1610,7 @@ def _with_implement_oracle(
 #: to broad, preserving back-compat for any plain ``Callable[[str], None]`` only
 #: if it accepts the extra arg; the pipeline's callback consumes the scope.
 OracleRerunCallback = Callable[[str, "Any"], None]
+OracleOwnerFirstCallback = Callable[[str, str, Callable[[Path, Mapping[str, Any]], bool]], bool]
 
 
 def run_implement_oracle_gate(
@@ -1626,6 +1627,8 @@ def run_implement_oracle_gate(
     scope_index: Any = None,
     structured_source: Any = None,
     manifest_paths: Any = None,
+    owner_first: OracleOwnerFirstCallback | None = None,
+    strict_observation: bool = False,
 ) -> ImplementOracleResult:
     """Run the implement-time native-oracle gate (stage-level, once).
 
@@ -1660,6 +1663,11 @@ def run_implement_oracle_gate(
     The caller (greenfield ``_stage_implement``) turns a non-passing result into
     a :class:`StageError`. ``OracleScopeError`` propagates (it is a hard
     configuration failure, distinct from a curable incoherence).
+
+    ``owner_first`` can try a single attributed file before the first broad
+    rerun. Its validator checks the original oracle on a separate project copy.
+    ``strict_observation`` requires the supported oracle and its configured
+    ownership checks to complete when judging a proposed replacement.
     """
     root = Path(project_root)
     resolved = resolve_implement_oracle(
@@ -1744,6 +1752,8 @@ def run_implement_oracle_gate(
             detail=f"no language declared — implement-time oracle skipped (fallback) [{language!r}]",
         )
     profile, spec = resolved
+    if strict_observation and scope_index is None:
+        raise OracleScopeError("replacement judgment has no native-oracle ownership index")
 
     # 2. Certify scope — HARD FAIL on an uncertifiable scope (raises). Scope
     # certification reads files from disk (tsconfig.json / go.mod / the .py list); it
@@ -1759,6 +1769,8 @@ def run_implement_oracle_gate(
     # 3. Run + bounded retry-with-feedback, escalating the rerun scope.
     max_attempts = _oracle_max_attempts(config)
     result = _run_oracle_command(root, profile, spec, config)
+    if strict_observation and not result.executed:
+        raise OracleScopeError("replacement judgment did not execute the native oracle")
     # NOTE(v3.22.1): no import-topology gate runs here. v3.22.0's Increment 1 proved
     # source imports against the owning doc's transitive `depends_on` closure and was
     # reverted: frontmatter `depends_on` is an OPEN-WORLD ordering/context declaration
@@ -1872,6 +1884,34 @@ def run_implement_oracle_gate(
             attempt += 1
             continue
 
+        feedback = None
+        if owner_first is not None and attempt == 1 and scope is None and scope_index is not None:
+            try:
+                target = _owner_first_failure_path(result, root)
+            except Exception:  # Attribution is optional; keep the original rerun.
+                target = None
+            if target is not None:
+                feedback = build_contract_feedback(result, project_root=root, scope=scope)
+                judged = None
+                judge_messages: list[str] = []
+
+                def validate(judge_root: Path, judge_config: Mapping[str, Any]) -> bool:
+                    nonlocal judged
+                    certify_oracle_scope(judge_root, profile, spec)
+                    checked = _run_oracle_command(judge_root, profile, spec, judge_config)
+                    judged = _apply_orphan_artifact_gate(
+                        checked, project_root=judge_root, scope_index=scope_index,
+                        manifest_paths=manifest_paths, config=judge_config, echo=judge_messages.append,
+                        strict_observation=True,
+                    )
+                    return judged.passed and judged.executed
+
+                if owner_first(target, feedback, validate) and judged is not None:
+                    echo(f"[greenfield] implement-oracle: {judged.detail}")
+                    for message in judge_messages:
+                        echo(message)
+                    return judged
+
         scope_label = (
             "broad" if scope is None or getattr(scope, "is_broad", lambda: False)() else getattr(scope, "rung", rung)
         )
@@ -1881,7 +1921,8 @@ def run_implement_oracle_gate(
             f"(attempt {attempt}/{max_attempts - 1}, scope={scope_label}) — "
             f"categories {result.category_counts()}"
         )
-        feedback = build_contract_feedback(result, project_root=root, scope=scope)
+        if feedback is None:
+            feedback = build_contract_feedback(result, project_root=root, scope=scope)
         _invoke_rerun(rerun, feedback, scope)
         attempt += 1
         result = _run_oracle_command(root, profile, spec, config)
@@ -1898,10 +1939,67 @@ def run_implement_oracle_gate(
     # that every generated source artifact has an owning task. Default WARN
     # (observe + record on the result, never block); ENFORCE turns an orphan into a
     # failure. Only runs with a scope index (the owner map) and a real oracle.
+    observation_args = {"strict_observation": True} if strict_observation else {}
     result = _apply_orphan_artifact_gate(
-        result, project_root=root, scope_index=scope_index, manifest_paths=manifest_paths, config=config, echo=echo
+        result, project_root=root, scope_index=scope_index, manifest_paths=manifest_paths,
+        config=config, echo=echo, **observation_args,
     )
     return result
+
+
+def _owner_first_failure_path(result: ImplementOracleResult, root: Path) -> str | None:
+    """Require one project file across the oracle's evidence and command attribution."""
+    from codd.repair.test_failure_attribution import attribute_command_failure
+
+    if len(result.findings) != 1 or len(result.diagnostics) > 1:
+        return None
+    finding = result.findings[0]
+    if finding.category not in {
+        EVIDENCE_MISSING_SYMBOL, EVIDENCE_MODULE_RESOLUTION, EVIDENCE_OTHER,
+        EVIDENCE_TEST_NOT_COLLECTED,
+    }:
+        return None
+    paths = [
+        *result.failed_paths,
+        *result.observed_failure_paths,
+    ]
+    if finding.path:
+        paths.append(finding.path)
+    diagnostic_paths = [getattr(diagnostic, "primary_path", None) for diagnostic in result.diagnostics]
+    if not all(diagnostic_paths):
+        return None
+    paths.extend(diagnostic_paths)
+
+    attribution = attribute_command_failure(
+        command=result.command, output=result.raw_output, project_root=root, check_name="implement_oracle",
+    )
+    if attribution is not None:
+        if attribution.failure_class == EVIDENCE_ENVIRONMENT_BUILD or (
+            attribution.attributed and not attribution.code_addressable
+        ):
+            return None
+        paths.extend(item.path for item in attribution.attributed)
+
+    if not finding.path:
+        if finding.category != EVIDENCE_TEST_NOT_COLLECTED:
+            return None
+        if attribution is None or not attribution.code_addressable or not result.observed_failure_paths:
+            return None
+
+    root = root.resolve()
+    relative_paths = set()
+    for raw_path in paths:
+        path = Path(raw_path)
+        if path.is_absolute():
+            if not path.is_relative_to(root):
+                return None
+            path = path.relative_to(root)
+        if not path.parts or ".." in path.parts:
+            return None
+        relative_paths.add(path.as_posix())
+    if len(relative_paths) != 1:
+        return None
+    return relative_paths.pop()
 
 
 def _apply_orphan_artifact_gate(
@@ -1912,6 +2010,7 @@ def _apply_orphan_artifact_gate(
     manifest_paths: Any,
     config: Mapping[str, Any] | None,
     echo: Callable[[str], None],
+    strict_observation: bool = False,
 ) -> ImplementOracleResult:
     """Run the global orphan-artifact gate; return the (possibly failed) result.
 
@@ -1920,8 +2019,8 @@ def _apply_orphan_artifact_gate(
     logs them. ENFORCE additionally flips a passing result to a HARD failure (an
     orphan artifact is an out-of-contract file the SUT can mutate invisibly). The
     manifest/profile-owned files are treated as legitimately owned (the contract
-    escape hatch). Best-effort: any failure to compute orphans is swallowed (the
-    gate must never crash a build it was only observing).
+    escape hatch). During the normal gate, a failure to compute orphans is
+    best-effort. The copy judge propagates it to discard an incomplete trial.
     """
     if scope_index is None:
         return result
@@ -1935,6 +2034,8 @@ def _apply_orphan_artifact_gate(
             scope_index, project_root, extra_owned=tuple(manifest_paths or ())
         )
     except Exception as exc:  # noqa: BLE001 — observation must not break the build.
+        if strict_observation:
+            raise
         echo(f"[greenfield] implement-oracle: orphan-artifact gate skipped ({exc}).")
         return result
     if not orphans:

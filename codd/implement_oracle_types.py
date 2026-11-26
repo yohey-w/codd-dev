@@ -108,6 +108,9 @@ class ImplementOracleResult:
     #: fail) and ENFORCE mode (the gate fails). Empty when the gate is off / no
     #: scope index / no orphans. Project-relative paths, for the report + dashboard.
     orphan_artifacts: list[str] = field(default_factory=list)
+    #: Additional locations observed by a failing check for the copy retry.
+    #: Kept separate from the diagnostic paths used by ordinary reruns.
+    observed_failure_paths: tuple[str, ...] = field(default=(), repr=False, compare=False, kw_only=True)
 
     def category_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
