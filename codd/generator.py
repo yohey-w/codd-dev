@@ -45,7 +45,7 @@ from codd.project_types import (
     resolve_layout_profile,
     resolve_project_type,
 )
-from codd.requirements_meta import normalize_operation_flow
+from codd.requirements_meta import normalize_operation_flow, ui_pattern_choices
 from codd.verifiable_behavior_audit import VB_BLOCKER_SCOPE_GUIDANCE
 
 
@@ -820,7 +820,7 @@ def _generate_one_artifact(
         capabilities=capabilities,
         project_language=project_language,
         layout_placement=layout_placement,
-        behavior_contract=managed,
+        behavior_contract=managed, contract_is_required=lambda: validate_contract,
         validate_body=check_candidate if managed or check_emitted_contract else None,
         operation_flow_owner_elsewhere=operation_flow_owner_elsewhere,
     )
@@ -1416,6 +1416,7 @@ def _generate_document_body(
     behavior_contract: bool = False,
     validate_body: Callable[[str], None] | None = None,
     operation_flow_owner_elsewhere: bool = False,
+    contract_is_required: Callable[[], bool] | None = None,
 ) -> str:
     """Generate one document body with a bounded validation-feedback retry loop.
 
@@ -1436,6 +1437,8 @@ def _generate_document_body(
             layout_placement=layout_placement,
             behavior_contract=behavior_contract,
             operation_flow_owner_elsewhere=operation_flow_owner_elsewhere,
+            # A declaration in a generated body can make subsequent attempts strict.
+            strict_operation_flow=contract_is_required() if contract_is_required else False,
         )
         prompt = _inject_lexicon(prompt, project_root)
         try:
@@ -1498,9 +1501,12 @@ def _build_generation_prompt(
     layout_placement: str = "",
     behavior_contract: bool = False,
     operation_flow_owner_elsewhere: bool = False,
+    strict_operation_flow: bool | None = None,
 ) -> str:
     if capabilities is None:
         capabilities = WEB_FALLBACK_CAPABILITIES
+    if strict_operation_flow is None:
+        strict_operation_flow = behavior_contract
     # Test code generation mode: output executable test code, not a Markdown document
     if _is_test_code_output(artifact.output):
         return _build_test_code_prompt(
@@ -1608,8 +1614,19 @@ def _build_generation_prompt(
     reference_operation_flow = (
         behavior_contract and artifact.owns_operation_flow is False and operation_flow_owner_elsewhere
     )
+    operation_model = []
     if doc_type == "design" and not reference_operation_flow:
-        lines.extend(build_operational_behavior_model_block(capabilities))
+        operation_model = build_operational_behavior_model_block(capabilities)
+        lines.extend(operation_model)
+    # A dependency can name the field even when the model block is absent.
+    if strict_operation_flow and (
+        any("`ui_pattern`" in line for line in operation_model)
+        or any("`ui_pattern`" in document.content for document in dependency_documents)
+    ):
+        lines.append(
+            f"When specifying `ui_pattern`, choose one of {ui_pattern_choices()}. "
+            "Omit `ui_pattern` if none fits."
+        )
     if behavior_contract and artifact.owns_operation_flow is True:
         lines.append("You own the assigned operational model. Emit operation_flow for the operations assigned here.")
     elif reference_operation_flow:
