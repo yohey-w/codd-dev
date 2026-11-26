@@ -34,6 +34,7 @@ from codd.capability_completeness import (
 from codd.config import find_codd_dir, load_project_config
 from codd.dag import result_status as _result_status
 from codd.frontmatter import frontmatter_or_yaml_payload as _frontmatter_or_yaml_payload
+from codd.requirement_appendix import APPENDIX_GUIDANCE
 from codd.requirement_reconciliation import (
     discover_requirement_docs,
     requirement_reconciliation_warnings,
@@ -4441,6 +4442,11 @@ def _run_require_check(project_root: Path) -> None:
 @main.group(invoke_without_command=True)
 @click.option("--interactive", is_flag=True, default=False, help="Review findings inline and save approved items.")
 @click.option(
+    "--provisional-decisions",
+    is_flag=True,
+    help=f"Decide open requirements provisionally and leave unresolved findings for review. {APPENDIX_GUIDANCE}",
+)
+@click.option(
     "--format",
     "output_format",
     type=click.Choice(["json", "md"]),
@@ -4459,6 +4465,7 @@ def _run_require_check(project_root: Path) -> None:
 def elicit(
     ctx: click.Context,
     interactive: bool,
+    provisional_decisions: bool,
     output_format: str,
     lexicon_path: str | None,
     project_path: str,
@@ -4467,6 +4474,8 @@ def elicit(
     """Discover and apply coverage/specification findings."""
     if ctx.invoked_subcommand is not None:
         return
+    if interactive and provisional_decisions:
+        raise click.UsageError("--interactive and --provisional-decisions cannot be combined.")
     from codd.elicit.apply import ElicitApplyEngine
     from codd.elicit.engine import ElicitEngine
     from codd.elicit.formatters.interactive import InteractiveFormatter
@@ -4476,7 +4485,23 @@ def elicit(
     project_root = Path(project_path).resolve()
     try:
         lexicon_config = _load_elicit_lexicon_configs(project_root, lexicon_path)
-        elicit_result = ElicitEngine(ai_command=ai_cmd).run(project_root, lexicon_config=lexicon_config)
+        engine = ElicitEngine(ai_command=ai_cmd)
+        if provisional_decisions:
+            from codd.elicit.workflow import (
+                provisional_detail_lines,
+                provisional_summary,
+                run_provisional_elicit,
+            )
+
+            elicit_result, decisions = run_provisional_elicit(
+                project_root, engine, lexicon_config, write_markdown=output_format == "md"
+            )
+            if output_format == "md":
+                click.echo(f"Elicit {provisional_summary(decisions)}")
+                for line in provisional_detail_lines(decisions):
+                    click.echo(line)
+        else:
+            elicit_result = engine.run(project_root, lexicon_config=lexicon_config)
     except (OSError, ValueError, json.JSONDecodeError, yaml.YAMLError) as exc:
         click.echo(f"Error: {exc}")
         raise SystemExit(1)
@@ -4502,7 +4527,8 @@ def elicit(
         return
 
     output_path = project_root / "findings.md"
-    output_path.write_text(MdFormatter().format(elicit_result), encoding="utf-8")
+    if not provisional_decisions:
+        output_path.write_text(MdFormatter().format(elicit_result), encoding="utf-8")
     coverage_summary = ""
     if elicit_result.lexicon_coverage_report:
         gap_count = sum(
@@ -4710,6 +4736,12 @@ def brownfield_cmd(
     help="Run the advisory elicit+apply stage (default: greenfield.elicit config, true)",
 )
 @click.option(
+    "--provisional-decisions",
+    is_flag=True,
+    default=None,
+    help=f"Decide open requirements provisionally in the advisory elicit stage. {APPENDIX_GUIDANCE}",
+)
+@click.option(
     "--max-repair-attempts",
     default=None,
     type=click.IntRange(min=1),
@@ -4750,6 +4782,7 @@ def greenfield_cmd(
     project_type: str | None,
     ai_cmd: str | None,
     elicit_enabled: bool | None,
+    provisional_decisions: bool | None,
     max_repair_attempts: int | None,
     no_coverage_gate: bool,
     resume: bool,
@@ -4781,6 +4814,7 @@ def greenfield_cmd(
         project_type=project_type,
         ai_command=ai_cmd,
         elicit=elicit_enabled,
+        provisional_decisions=provisional_decisions,
         max_repair_attempts=max_repair_attempts,
         coverage_gate=False if no_coverage_gate else None,
         ntfy_topic=ntfy_topic,

@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+import stat
+import tempfile
 from typing import Any
 
 import yaml
 
 from codd.elicit.finding import Finding
+from codd.path_safety import resolve_project_path
 
 
 class ElicitPersistence:
@@ -53,6 +58,35 @@ class ElicitPersistence:
             for finding in findings
         ]
         _write_yaml(self.pending_path, {"pending": entries})
+
+    def reconcile_pending(self, findings: list[Finding], *, resolved_ids: set[str]) -> None:
+        """Update unresolved findings while retaining prior review metadata."""
+        path = resolve_project_path(self.project_root, self.pending_path.absolute())
+        if path is None:
+            raise OSError(f"Pending findings path is outside the project: {self.pending_path}")
+        payload = _read_yaml_mapping(path, default_key="pending")
+        entries = _list_value(payload, "pending")
+        updates = {finding.id: finding.to_dict() for finding in findings}
+        remaining = []
+        for entry in entries:
+            finding_id = _finding_id_from_entry(entry)
+            if finding_id in resolved_ids:
+                continue
+            if finding_id in updates and isinstance(entry, dict):
+                update = updates.pop(finding_id)
+                entry = {**entry, "finding": update} if "finding" in entry else {**entry, **update}
+            remaining.append(entry)
+
+        if updates:
+            timestamp = _utc_timestamp()
+            remaining.extend(
+                {"finding": finding, "discovered_at": timestamp, "last_review_at": None}
+                for finding in updates.values()
+            )
+        if remaining != entries:
+            payload["pending"] = remaining
+            with staged_replacement(path) as temporary:
+                _write_yaml(temporary, payload)
 
     def append_history(self, session_record: dict[str, Any]) -> None:
         payload = _read_yaml_mapping(self.history_path, default_key="sessions")
@@ -103,6 +137,21 @@ def _write_yaml(path: Path, payload: dict[str, Any]) -> None:
         yaml.safe_dump(payload, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
+
+
+@contextmanager
+def staged_replacement(path: Path) -> Iterator[Path]:
+    """Replace a file only after its sibling temporary file is complete."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False) as file:
+        temporary = Path(file.name)
+    try:
+        yield temporary
+        if path.exists():
+            temporary.chmod(stat.S_IMODE(path.stat().st_mode))
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _list_value(payload: dict[str, Any], key: str) -> list[Any]:

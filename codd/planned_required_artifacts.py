@@ -298,7 +298,7 @@ def load_required_artifact_lineup(
     changed = sorted(path for path in current.keys() | fingerprints.keys() if current.get(path) != fingerprints.get(path))
     if changed:
         raise ValueError(f"Requirements differ from the saved artifact selection ({', '.join(changed)}). {_REDERIVE}")
-    requirement_paths = {doc.node_id: doc.path for doc in requirements}
+    requirement_paths = {doc.node_id: doc.path for doc in requirements if doc.node_id is not None}
     rows = {row["id"]: row for row in artifacts}
     candidate_outputs = {
         artifact_id: output for artifact_id, candidate in candidates.items()

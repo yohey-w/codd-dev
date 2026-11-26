@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from hashlib import sha256
 import json
+from pathlib import Path
 import re
 import subprocess
 
@@ -13,7 +14,9 @@ import pytest
 import yaml
 
 from codd.cli import main
+from codd.greenfield.pipeline import new_session, save_session
 from codd.lexicon import AskItem, AskOption, load_lexicon
+from codd.requirement_appendix import DECISION_LOCK_PATH, PROVISIONAL_DECISIONS_PATH
 from codd.required_artifact_requirements import number_requirements
 import codd.required_artifacts_deriver as deriver_module
 from codd.required_artifacts_deriver import DEFAULTS_DIR, RequiredArtifactsDeriver
@@ -125,6 +128,53 @@ def _plan(root, *flags, output_format="json"):
 
 def _assert_prompt_item(prompt, requirement_id, fragment):
     assert re.search(rf"\b{requirement_id}\b[^\n]*{re.escape(fragment)}", prompt)
+
+
+@pytest.mark.parametrize("flags", [(), ("--account-decisions",)], ids=["derive", "accounted"])
+@pytest.mark.parametrize("usage", ["unused", "managed-lock", "saved-opt-in"])
+def test_plan_derive_with_unreadable_appendix_candidate(tmp_path, monkeypatch, fake_ai, flags, usage):
+    _project(tmp_path)
+    primary = "docs/requirements/requirements.md"
+    _requirement(tmp_path, primary, "Keep a local log.\n")
+    (tmp_path / "project_lexicon.yaml").write_text(
+        yaml.safe_dump({"requirement_docs": [primary]}), encoding="utf-8",
+    )
+    appendix = tmp_path / PROVISIONAL_DECISIONS_PATH
+    appendix.write_text("Private memo.\n", encoding="utf-8")
+    if usage == "managed-lock":
+        lock = tmp_path / DECISION_LOCK_PATH
+        lock.parent.mkdir()
+        lock.write_bytes(b"\n")
+    elif usage == "saved-opt-in":
+        save_session(tmp_path, new_session({"provisional_decisions": True}))
+
+    # Simulate mode 000 even on systems where the test user can read any file.
+    original_open = Path.open
+    denied = f"Permission denied: {appendix}"
+
+    def open_path(path, *args, **kwargs):
+        if path == appendix:
+            raise PermissionError(denied)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_path)
+    prompts, responses = fake_ai
+    response = _generic_response()
+    expected = _legacy_artifacts(response)
+    responses.append(response if flags else {"required_artifacts": expected})
+    result = CliRunner().invoke(
+        main, ["plan", "--path", str(tmp_path), "--derive", "--ai-cmd", "mock-ai", *flags],
+    )
+
+    if usage == "unused":
+        assert result.exit_code == 0, result.output + repr(result.exception)
+        assert len(prompts) == 1
+        assert "Keep a local log." in prompts[0] and "Private memo." not in prompts[0]
+        assert load_lexicon(tmp_path).required_artifacts == expected
+    else:
+        assert result.exit_code == 1
+        assert denied in result.output + str(result.exception)
+        assert prompts == []
 
 
 def test_cli_accounts_for_shipped_candidates_and_preserves_legacy_artifact_shape(tmp_path, fake_ai):

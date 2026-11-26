@@ -28,6 +28,7 @@ from codd.project_types import (
     resolve_project_type,
     supported_project_types,
 )
+from codd.requirement_appendix import PROVISIONAL_DECISIONS_PATH, is_managed_appendix, read_requirement_appendix
 from codd.required_artifact_requirements import number_requirements, read_requirement_snapshot
 
 
@@ -407,6 +408,28 @@ class RequiredArtifactsDeriver:
         if not paths:
             raise FileNotFoundError("No requirement documents found")
 
+        try:
+            has_appendix = read_requirement_appendix(self.project_root) is not None
+        except OSError:
+            from codd.greenfield.pipeline import load_session
+
+            # The management lock can identify the appendix without its contents.
+            if is_managed_appendix(self.project_root, b""):
+                raise
+            # Greenfield saves its opt-in before entering the plan stage.
+            try:
+                session = load_session(self.project_root) or {}
+            except UnicodeDecodeError:
+                session = {}
+            options = session.get("options")
+            if isinstance(options, dict) and options.get("provisional_decisions") is True:
+                raise
+            return paths  # Explicit and discovered inputs are still read by the caller.
+
+        if has_appendix:
+            appendix = self.project_root / PROVISIONAL_DECISIONS_PATH
+            if appendix.resolve() not in {path.resolve() for path in paths}:
+                paths.append(appendix)
         return paths
 
     def _accounted_requirement_paths(self, requirement_docs: list[str]) -> list[Path]:

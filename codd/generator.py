@@ -53,6 +53,7 @@ from codd.project_types import (
     resolve_layout_profile,
     resolve_project_type,
 )
+from codd.requirement_appendix import protect_requirement_appendix, with_requirement_appendix
 from codd.requirements_meta import normalize_operation_flow, ui_pattern_choices
 from codd.verifiable_behavior_audit import VB_BLOCKER_SCOPE_GUIDANCE
 
@@ -808,6 +809,7 @@ class _DesignRewrite:
         )
         if requirements:
             context += f"\n\nRequirement documents:\n{requirements}"
+        context = with_requirement_appendix(context, project_root)
         if self.scope is None:
             self.selecting_scope = True
             self.scope = self._select_scope(artifact, lines, len(prefix.splitlines()), numbered, context, ai_command)
@@ -1094,12 +1096,12 @@ def _generate_one_artifact(
     rewrite: _DesignRewrite | None = None,
     rejected: dict[str, str] | None = None,
 ) -> GenerationResult:
-    """Render ONE artifact's document and write it (overwriting any prior file).
+    """Render ONE artifact's document and write it.
 
     The shared per-artifact rendering step used by both :func:`generate_wave`
     (the wave loop) and :func:`regenerate_artifact` (the single-doc repair seam).
-    Always (re)writes the output; skip-if-exists is the wave loop's decision, not
-    this helper's, so a scoped repair can overwrite exactly one doc.
+    The wave loop handles skip-if-exists. The managed requirements appendix is
+    reserved for elicit and human editing.
     """
 
     managed = is_managed_behavior_document(
@@ -1178,6 +1180,7 @@ def _generate_one_artifact(
     if drafts is not None:
         drafts[artifact.output] = render(body)
     else:
+        protect_requirement_appendix(project_root, [Path(artifact.output)])
         if managed:
             output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(render(body), encoding="utf-8")
@@ -1310,6 +1313,7 @@ def _report_reconciliation_failure(
             or any(log == resolve_project_path(project_root, artifact.output) for artifact in artifacts)
         ):
             raise ValueError("invalid audit path")
+        protect_requirement_appendix(project_root, [log])
         parent.mkdir(parents=True, exist_ok=True)
         with log.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -1419,6 +1423,7 @@ def _reconcile_upstream_design(
         requirements = tuple({
             doc.path: DependencyDocument(doc.node_id, Path(doc.path), doc.content)
             for doc in _load_requirement_documents(project_root, config)
+            if doc.node_id is not None
         }.values())
     except (OSError, ValueError) as exc:
         return skip(f"Could not read requirement documents: {exc}")
@@ -1543,6 +1548,7 @@ def _publish_reconciled_design(
     log = resolve_project_path(project_root, DESIGN_RECONCILIATION_LOG)
     if log is None or log in paths.values() or (log.exists() and not log.is_file()):
         raise ValueError(f"Invalid design reconciliation log path: {DESIGN_RECONCILIATION_LOG}")
+    protect_requirement_appendix(project_root, [log, *(paths[output] for output in drafts)])
     log.parent.mkdir(parents=True, exist_ok=True)
     payload = "".join(json.dumps(entry, ensure_ascii=False) + "\n" for entry in entries).encode("utf-8")
     previous_log = log.read_bytes() if log.is_file() else None
@@ -1694,6 +1700,7 @@ def reconcile_design_artifact(
             prompt = f"{base_prompt}\nPrevious extraction rejected: {exc}\nReturn only the corrected codd-behavior block.\n"
     if path.read_bytes().decode("utf-8") != original:
         raise ValueError(f"{artifact.output}: document changed during extraction; run again")
+    protect_requirement_appendix(project_root, [path])
     path.write_bytes(updated.encode("utf-8"))
     # Retain the evidence even on RED. The command never resolves a conflict by
     # choosing a winner or altering the source passages.
@@ -2144,6 +2151,11 @@ def _inject_lexicon(
     return lexicon.as_context_string() + "\n\n---\n\n" + base_prompt
 
 
+def _inject_project_context(prompt: str, project_root: Path | None) -> str:
+    prompt = _inject_lexicon(prompt, project_root)
+    return with_requirement_appendix(prompt, project_root) if project_root is not None else prompt
+
+
 def _generate_document_body(
     artifact: WaveArtifact,
     dependency_documents: list[DependencyDocument],
@@ -2182,7 +2194,7 @@ def _generate_document_body(
             # A declaration in a generated body can make subsequent attempts strict.
             strict_operation_flow=contract_is_required() if contract_is_required else False,
         )
-        prompt = _inject_lexicon(prompt, project_root)
+        prompt = _inject_project_context(prompt, project_root)
         try:
             body = _sanitize_generated_body(
                 artifact.title,

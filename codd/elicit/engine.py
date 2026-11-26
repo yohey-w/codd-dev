@@ -15,6 +15,7 @@ import yaml
 from codd.deployment.providers.ai_command import SubprocessAiCommand
 from codd.elicit.finding import ElicitResult, Finding, FindingDimension, FindingType
 from codd.elicit.persistence import ElicitPersistence
+from codd.requirement_appendix import PROVISIONAL_DECISIONS_PATH, read_requirement_appendix
 
 
 DEFAULT_TEMPLATE_PATH = Path(__file__).parent / "templates" / "elicit_prompt_L0.md"
@@ -48,14 +49,26 @@ class ElicitEngine:
         self.template_path = Path(template_path) if template_path is not None else DEFAULT_TEMPLATE_PATH
         self.max_context_chars = max_context_chars
 
-    def run(self, project_root: Path, lexicon_config: Any | None = None) -> ElicitResult:
+    def run(
+        self,
+        project_root: Path,
+        lexicon_config: Any | None = None,
+        *,
+        requirements_context: str | None = None,
+    ) -> ElicitResult:
         root = Path(project_root)
         project_scope, project_phase = _project_scope_phase(root)
         lexicon_configs = _as_lexicon_configs(lexicon_config)
         if len(lexicon_configs) > 1:
-            return self._run_many(root, lexicon_configs, scope=project_scope, phase=project_phase)
+            return self._run_many(
+                root, lexicon_configs, scope=project_scope, phase=project_phase,
+                requirements_context=requirements_context,
+            )
         config = lexicon_configs[0] if lexicon_configs else None
-        return self._run_one(root, config, scope=project_scope, phase=project_phase)
+        return self._run_one(
+            root, config, scope=project_scope, phase=project_phase,
+            requirements_context=requirements_context,
+        )
 
     def _run_one(
         self,
@@ -64,8 +77,14 @@ class ElicitEngine:
         *,
         scope: str,
         phase: str,
+        requirements_context: str | None = None,
     ) -> ElicitResult:
-        prompt = self.build_prompt(root, lexicon_config=lexicon_config)
+        if requirements_context is None:
+            prompt = self.build_prompt(root, lexicon_config=lexicon_config)
+        else:
+            prompt = self.build_prompt(
+                root, lexicon_config=lexicon_config, requirements_context=requirements_context
+            )
         raw_output = self.invoke(prompt, root)
         result = self.deserialize_result(raw_output)
         result.findings = _apply_scope_phase(
@@ -84,7 +103,9 @@ class ElicitEngine:
                 )
             )
         _attach_lexicon_source(result.findings, _string_attr(lexicon_config, "lexicon_name"))
-        result.findings = ElicitPersistence(root).filter_known(result.findings)
+        # Provisional review reconciles pending findings after discovery.
+        if requirements_context is None:
+            result.findings = ElicitPersistence(root).filter_known(result.findings)
         if not result.findings and result.lexicon_coverage_report:
             non_gap = all(
                 str(status).lower() != "gap"
@@ -101,11 +122,14 @@ class ElicitEngine:
         *,
         scope: str,
         phase: str,
+        requirements_context: str | None = None,
     ) -> ElicitResult:
         prepared = _prepare_lexicon_configs(lexicon_configs)
         combined = ElicitResult()
         for config, duplicate_axes in prepared:
-            result = self._run_one(root, config, scope=scope, phase=phase)
+            result = self._run_one(
+                root, config, scope=scope, phase=phase, requirements_context=requirements_context
+            )
             if duplicate_axes:
                 result.findings = [
                     finding
@@ -130,16 +154,33 @@ class ElicitEngine:
             )
         return combined
 
-    def build_prompt(self, project_root: Path, lexicon_config: Any | None = None) -> str:
+    def build_prompt(
+        self,
+        project_root: Path,
+        lexicon_config: Any | None = None,
+        *,
+        requirements_context: str | None = None,
+    ) -> str:
         root = Path(project_root)
         template = self._template_text(lexicon_config)
         replacements = {
-            "requirements_content": _collect_requirements(root, self.max_context_chars),
+            "requirements_content": (
+                _collect_requirements(root, self.max_context_chars)
+                if requirements_context is None else requirements_context
+            ),
             "design_doc_content": _collect_design_docs(root, self.max_context_chars),
             "project_lexicon": _project_lexicon_text(root, lexicon_config, self.max_context_chars),
             "existing_axes": _existing_axes_text(root),
         }
-        return _replace_placeholders(template, replacements)
+        if requirements_context is None:
+            return _replace_placeholders(template, replacements)
+        if "{{requirements_content}}" not in template:
+            template += "\n\n## Requirements\n\n{{requirements_content}}\n"
+        return re.sub(
+            r"\{\{(\w+)\}\}",
+            lambda match: replacements.get(match.group(1), match.group(0)),
+            template,
+        )
 
     def invoke(self, prompt: str, project_root: Path) -> str:
         if _is_mock_ai_command(self.ai_command):
@@ -207,6 +248,36 @@ def _collect_requirements(project_root: Path, max_chars: int) -> str:
         directory_names=("requirements",),
     )
     return _read_documents(paths, project_root, max_chars)
+
+
+def _collect_provisional_requirements(project_root: Path) -> str:
+    """Give discovery and resolution the same complete requirements snapshot."""
+    canonical = _document_paths(project_root, explicit_names=(), directory_names=("requirements",))
+    legacy = _document_paths(
+        project_root,
+        explicit_names=("requirements.md", "REQUIREMENTS.md", "docs/requirements.md", ".codd/requirements.md"),
+        directory_names=(),
+    )
+    appendix = read_requirement_appendix(project_root)
+    appendix_path = project_root / PROVISIONAL_DECISIONS_PATH
+    paths = _unique_paths([*canonical, *legacy])
+    documents = _read_documents(
+        [path for path in paths if appendix is None or path.resolve() != appendix_path.resolve()],
+        project_root,
+        max_chars=None,
+    )
+    guidelines = (
+        "Prefer the primary requirements under docs/requirements/ when they conflict with legacy files. "
+        "Human requirements take precedence over provisional decisions."
+    )
+    if appendix is None:
+        return f"{guidelines}\n\n{documents}"
+    return (
+        f"{guidelines}\n\n{documents}\n\n"
+        "## Existing provisional decisions\n\n"
+        "These choices already address their original findings. Do not report the same questions again.\n\n"
+        f"### {PROVISIONAL_DECISIONS_PATH.as_posix()}\n{appendix.rstrip()}\n"
+    )
 
 
 def _collect_design_docs(project_root: Path, max_chars: int) -> str:
@@ -281,21 +352,25 @@ def _document_paths(
     return _unique_paths(paths)
 
 
-def _read_documents(paths: list[Path], project_root: Path, max_chars: int) -> str:
+def _read_documents(paths: list[Path], project_root: Path, max_chars: int | None) -> str:
     if not paths:
         return "(none provided)"
     chunks: list[str] = []
     remaining = max_chars
     for path in paths:
-        if remaining <= 0:
+        if remaining is not None and remaining <= 0:
             break
-        text = path.read_text(encoding="utf-8", errors="replace").strip()
+        text = read_requirement_appendix(project_root) if path == project_root / PROVISIONAL_DECISIONS_PATH else None
+        if text is None:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        text = text.strip()
         if not text:
             continue
         rel_path = _relative_path(path, project_root)
         chunk = f"### {rel_path}\n{text}\n"
         chunks.append(chunk[:remaining])
-        remaining -= len(chunks[-1])
+        if remaining is not None:
+            remaining -= len(chunks[-1])
     return "\n".join(chunks) if chunks else "(none provided)"
 
 

@@ -17,6 +17,7 @@ import warnings
 from typing import Any, Callable, Collection, Iterable, Iterator
 
 import codd.generator as generator_module
+from codd.ai_invoke import FILE_BLOCK_RE, file_block_paths
 from codd.ai_usage import note_implement_routing, usage_session
 from codd.discovery import (
     DEFAULT_IGNORED_DIRS,
@@ -29,6 +30,12 @@ from codd.design_consistency import enforce_design_consistency
 from codd.languages import resolve_assertion_guidance, resolve_test_framework_guidance
 from codd.path_safety import resolve_project_path
 from codd.project_types import ProjectCapabilities
+from codd.requirement_appendix import (
+    RequirementAppendixWriteError,
+    implementation_step_outputs,
+    preserve_requirement_appendix,
+    protect_requirement_appendix,
+)
 from codd.scanner import _extract_frontmatter, build_document_node_path_map
 from codd.verifiable_behavior_audit import VB_BLOCKER_SCOPE_GUIDANCE
 import unicodedata
@@ -36,7 +43,6 @@ import unicodedata
 
 LOGGER = logging.getLogger(__name__)
 
-FILE_BLOCK_RE = re.compile(r"^=== FILE: (?P<path>.+?) ===\s*$", re.MULTILINE)
 _PROMPT_FILE_BLOCK_RE = re.compile(
     r"^(?:--- BEGIN (?P<label>(?:EXISTING FILE|DEPENDENCY ARTIFACT) [^\n]+) ---"
     r"|=== EXISTING FILE: [^\n]+ ===)\n"
@@ -912,6 +918,7 @@ class Implementer:
         same way ``codd generate`` injects review feedback.
         """
         spec = _normalize_spec_paths(spec)
+        protect_requirement_appendix(self.project_root, [Path(path) for path in (*spec.output_paths, *spec.expected_outputs)])
         _check_guard_files_uniqueness(self.project_root, self.config)
         _create_output_paths(self.project_root, spec.output_paths)
 
@@ -1255,16 +1262,17 @@ class Implementer:
             existing_output_coverage=existing_output_coverage,
             dependency_coverage=dependency_coverage,
         )
-        prompt = generator_module._inject_lexicon(prompt, self.project_root)
+        prompt = generator_module._inject_project_context(prompt, self.project_root)
         one_shot = False
         if select_command is not None and dependency_coverage is not None:
             resolved_ai_command, one_shot = select_command(existing_output_coverage, dependency_coverage)
         try:
-            raw_output = generator_module._invoke_ai_command(
-                resolved_ai_command,
-                prompt,
-                project_root=self.project_root,
-            )
+            with preserve_requirement_appendix(self.project_root):
+                raw_output = generator_module._invoke_ai_command(
+                    resolved_ai_command, prompt, project_root=self.project_root,
+                )
+        except RequirementAppendixWriteError as exc:
+            raise NoUsableGeneratedFiles(str(exc)) from exc
         except ValueError as exc:
             # The invocation layer prefixes execution errors before including
             # CLI diagnostics, which can themselves contain "empty output".
@@ -1838,6 +1846,9 @@ def _create_output_paths(project_root: Path, output_paths: list[str]) -> None:
 
 def _clean_output_paths(project_root: Path, output_paths: list[str]) -> None:
     root = project_root.resolve(strict=False)
+    # Check the whole request before deleting any of its otherwise valid outputs.
+    destinations = [_resolve_output_path(project_root, path) for path in output_paths]
+    protect_requirement_appendix(project_root, [path for path in destinations if path != root], removing=True)
     for output_path in output_paths:
         destination = _resolve_output_path(project_root, output_path)
         _ensure_inside_project(project_root, destination, "output path")
@@ -2037,6 +2048,13 @@ def _implementation_steps_context(
     implicit = _filter_layer2_impl_steps([step for step in steps if step.inferred], config)
     if not explicit and not implicit:
         return None
+    protect_requirement_appendix(
+        project_root,
+        [
+            path for step in (*explicit, *implicit)
+            for path in implementation_step_outputs(getattr(step, "expected_outputs", None), getattr(step, "target_path_hint", None))
+        ],
+    )
 
     lines: list[str] = []
     if explicit:
@@ -4045,6 +4063,7 @@ def _write_generated_files(
     existing_output_coverage: _ExistingOutputCoverage | None = None,
     one_shot_prompt: str | None = None,
 ) -> list[Path]:
+    protect_requirement_appendix(project_root, file_block_paths(raw_output))
     file_payloads = _parse_file_payloads(
         raw_output,
         spec.output_paths,
@@ -4055,6 +4074,7 @@ def _write_generated_files(
     from codd.ai_invoke import _CapturedFileOutput
 
     captured_paths = raw_output.captured_paths if isinstance(raw_output, _CapturedFileOutput) else frozenset()
+    protect_requirement_appendix(project_root, [*captured_paths, *(Path(path) for path, _ in file_payloads)])
     # Preserve the incomplete-context preflight and its precedence over syntax.
     if existing_output_coverage is not None and existing_output_coverage.incomplete_paths:
         blocked: list[str] = []
