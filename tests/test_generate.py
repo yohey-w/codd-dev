@@ -1,6 +1,8 @@
 """Tests for wave-based template generation."""
 
+from contextlib import contextmanager
 import hashlib
+import json
 from pathlib import Path
 import subprocess
 
@@ -10,6 +12,7 @@ import yaml
 
 import codd.generator as generator_module
 from codd.cli import main
+from codd.design_consistency import DesignConsistencyError
 from codd.generator import generate_wave
 from codd.scanner import _extract_frontmatter
 
@@ -97,6 +100,210 @@ Tenant isolation and audit logging are mandatory.
         encoding="utf-8",
     )
     return project
+
+
+RECONCILIATION_OWNER = "docs/governance/decisions.md"
+RECONCILIATION_PEER = "docs/design/system_design.md"
+RECONCILIATION_REPORTER = "docs/plan/implementation_plan.md"
+RECONCILIATION_LOG = ".codd/audit/design-reconciliations.jsonl"
+ACCEPTANCE_CRITERIA = "docs/test/acceptance_criteria.md"
+DISPUTED_POLICY = "The system design does not follow the approved import size limit."
+UNRESTRICTED_IMPORT = "Validation accepts files of any size."
+BOUNDED_IMPORT = "Validation rejects files larger than 100 bytes."
+
+
+def _reconciliation_document(rule, *, spec=None, disagreement=None):
+    quote = disagreement[0] if disagreement else None
+    declarations = {
+        "owns": {spec: rule} if spec else {},
+        "cases": [],
+        "unresolved": [{"documents": list(disagreement[1]), "quote": quote}] if disagreement else [],
+    }
+    paragraphs = [rule, quote] if quote else [rule]
+    return (
+        "# File Import\n\n## Overview\n\n"
+        + "\n\n".join(paragraphs)
+        + f"\n\n```codd-behavior\n{yaml.safe_dump(declarations)}```\n"
+    )
+
+
+def _write_reconciliation_document(project, output, content):
+    path = project / output
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _report_import_disagreement():
+    return _reconciliation_document(
+        "The implementation plan relies on the approved import size limit.",
+        disagreement=(DISPUTED_POLICY, (RECONCILIATION_OWNER, RECONCILIATION_PEER)),
+    )
+
+
+@pytest.fixture
+def reconciliation_project(tmp_path, monkeypatch):
+    project = _setup_project(tmp_path)
+    config = yaml.safe_load(CoDD_YAML)
+    config["generate"] = {"design_consistency": True, "body_retry": {"max_retries": 1}}
+    config["wave_config"]["2"][0]["depends_on"] = ["governance:decisions"]
+    config["wave_config"]["3"][0]["depends_on"] = ["design:system-design"]
+    (project / "codd/codd.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    _write_reconciliation_document(project, RECONCILIATION_OWNER, _reconciliation_document(
+        "The approved import size limit is 100 bytes.", spec="import-policy",
+    ))
+    _write_reconciliation_document(project, RECONCILIATION_PEER, _reconciliation_document(
+        UNRESTRICTED_IMPORT, spec="import-validation",
+    ))
+    calls = []
+
+    def generate(_command, prompt):
+        if "Select reconciliation edit locations" in prompt:
+            # The invalid target in this fixture has an additional unresolved
+            # report. Only the eligibility regression should ever reach it.
+            lines = (project / RECONCILIATION_PEER).read_text(encoding="utf-8").splitlines()
+            return json.dumps({"replace_lines": list(range(5, len(lines))), "insert_after": []})
+        if "Node ID: design:system-design" in prompt:
+            calls.append("rewrite")
+            return _reconciliation_document(BOUNDED_IMPORT, spec="import-validation")
+        assert "Node ID: design:implementation-plan" in prompt
+        calls.append("reporter")
+        if BOUNDED_IMPORT in prompt:
+            return _reconciliation_document("The implementation plan enforces the 100 byte limit.")
+        return _report_import_disagreement()
+
+    monkeypatch.setattr(generator_module, "_invoke_ai_command", generate)
+    return project, calls
+
+
+def test_zero_reconciliation_budget_does_not_reread_cited_documents(reconciliation_project, monkeypatch):
+    project, calls = reconciliation_project
+    config_path = project / "codd/codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["generate"]["body_retry"]["max_retries"] = 0
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    read_bytes = Path.read_bytes
+    snapshots = []
+
+    def record_cited_snapshot(path):
+        if path in {project / RECONCILIATION_OWNER, project / RECONCILIATION_PEER}:
+            snapshots.append(path.relative_to(project).as_posix())
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", record_cited_snapshot)
+
+    with pytest.raises(DesignConsistencyError, match=DISPUTED_POLICY):
+        generate_wave(project, 3)
+
+    assert calls == ["reporter"]
+    assert snapshots == []
+    assert not (project / RECONCILIATION_REPORTER).exists()
+    assert not (project / RECONCILIATION_LOG).exists()
+
+
+def test_reconciliation_cannot_rewrite_a_document_later_in_the_same_wave(reconciliation_project):
+    project, calls = reconciliation_project
+    config_path = project / "codd/codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["wave_config"]["2"] = config["wave_config"].pop("3") + config["wave_config"]["2"]
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    peer = project / RECONCILIATION_PEER
+    before = peer.read_bytes()
+
+    with pytest.raises(DesignConsistencyError, match=DISPUTED_POLICY):
+        generate_wave(project, 2)
+
+    assert calls == ["reporter"]
+    assert peer.read_bytes() == before
+    assert not (project / RECONCILIATION_REPORTER).exists()
+    assert not (project / RECONCILIATION_LOG).exists()
+
+
+def test_reconciliation_cannot_rewrite_a_cited_document_with_its_own_disagreement(reconciliation_project):
+    project, calls = reconciliation_project
+    _write_reconciliation_document(project, ACCEPTANCE_CRITERIA, _reconciliation_document(
+        "The acceptance criteria exercise the approved import size limit.",
+    ))
+    _write_reconciliation_document(project, RECONCILIATION_PEER, _reconciliation_document(
+        UNRESTRICTED_IMPORT, spec="import-validation",
+        disagreement=(
+            "The decisions and acceptance criteria disagree about empty input files.",
+            (RECONCILIATION_OWNER, ACCEPTANCE_CRITERIA),
+        ),
+    ))
+    peer = project / RECONCILIATION_PEER
+    before = peer.read_bytes()
+
+    with pytest.raises(DesignConsistencyError, match=DISPUTED_POLICY):
+        generate_wave(project, 3)
+
+    assert calls == ["reporter"]
+    assert peer.read_bytes() == before
+    assert not (project / RECONCILIATION_REPORTER).exists()
+    assert not (project / RECONCILIATION_LOG).exists()
+
+
+@pytest.mark.parametrize("failure", ["document", "audit"])
+def test_reconciliation_restores_documents_when_publication_fails(reconciliation_project, monkeypatch, failure):
+    project, calls = reconciliation_project
+    peer = project / RECONCILIATION_PEER
+    reporter = project / RECONCILIATION_REPORTER
+    log = project / RECONCILIATION_LOG
+    before = peer.read_bytes()
+    previous_log = b'{"review_dependents": []}\n'
+    log.parent.mkdir(parents=True)
+    log.write_bytes(previous_log)
+    write_bytes = Path.write_bytes
+    temporary_file = generator_module.NamedTemporaryFile
+
+    def partial_document_write(path, data):
+        if path == reporter:
+            write_bytes(path, data[:10])
+            raise OSError("publication failed")
+        return write_bytes(path, data)
+
+    @contextmanager
+    def partial_audit_write(**kwargs):
+        with temporary_file(**kwargs) as handle:
+            write = handle.write
+
+            def fail_after_prefix(data):
+                assert data.startswith(previous_log)
+                write(data[:len(previous_log) + 10])
+                raise OSError("publication failed")
+
+            monkeypatch.setattr(handle, "write", fail_after_prefix)
+            yield handle
+
+    if failure == "document":
+        monkeypatch.setattr(Path, "write_bytes", partial_document_write)
+    else:
+        monkeypatch.setattr(generator_module, "NamedTemporaryFile", partial_audit_write)
+
+    with pytest.raises(OSError, match="publication failed"):
+        generate_wave(project, 3)
+
+    assert calls == ["reporter", "rewrite", "reporter"]
+    assert peer.read_bytes() == before
+    assert not reporter.exists()
+    assert log.read_bytes() == previous_log
+    assert list(log.parent.iterdir()) == [log]
+
+
+def test_complete_reconciliation_rejects_staged_documents_when_a_planned_document_is_missing(reconciliation_project):
+    project, calls = reconciliation_project
+    _write_reconciliation_document(project, RECONCILIATION_REPORTER, _report_import_disagreement())
+    peer = project / RECONCILIATION_PEER
+    reporter = project / RECONCILIATION_REPORTER
+    peer_before = peer.read_bytes()
+    reporter_before = reporter.read_bytes()
+
+    with pytest.raises(DesignConsistencyError, match=f"{ACCEPTANCE_CRITERIA}: planned document is missing"):
+        generator_module.reconcile_generated_design(project)
+
+    assert calls == ["rewrite", "reporter"]
+    assert peer.read_bytes() == peer_before
+    assert reporter.read_bytes() == reporter_before
+    assert not (project / RECONCILIATION_LOG).exists()
 
 
 @pytest.fixture

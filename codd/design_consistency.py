@@ -89,13 +89,22 @@ class DesignConsistencySummary:
         )
 
 
+@dataclass(frozen=True)
+class DesignDisagreement:
+    reporter: str
+    documents: tuple[str, ...]
+    quote: str
+
+
 class DesignConsistencyError(ValueError):
     def __init__(
         self, details: list[str], *, retry_candidate: bool, dependency_repairs: dict[str, str] | None = None,
+        disagreements: list[DesignDisagreement] | None = None,
     ) -> None:
         super().__init__("Unresolved design consistency issues:\n  - " + "\n  - ".join(details))
         self.retry_candidate = retry_candidate
         self.dependency_repairs = dependency_repairs or {}
+        self.disagreements = disagreements or []
 
 
 class StrictDesignLoader(yaml.SafeLoader):
@@ -395,10 +404,14 @@ def enforce_design_consistency(
     complete: bool = False,
     required: bool = False,
     candidate: tuple[str, str] | None = None,
+    drafts: dict[str, str | None] | None = None,
+    allow_missing: bool = False,
 ) -> DesignConsistencySummary | None:
     """Require consistent declared examples before using a generated document set.
 
     Compare operation spelling variants and exact typed inputs and conditions.
+    Reconciliation can check staged documents before publishing them, including
+    a partial document set while generation is still in progress.
     """
     from codd.generator import _load_wave_artifacts
 
@@ -417,6 +430,7 @@ def enforce_design_consistency(
     documents: list[tuple[WaveArtifact, str | None]] = []
     candidate_path = candidate[0] if candidate else None
     prior_specs: set[str] = set()
+    drafts = drafts if drafts is not None else {}
     for artifact in artifacts:
         path = resolve_project_path(project_root, artifact.output)
         if path is None:
@@ -432,11 +446,14 @@ def enforce_design_consistency(
                     previous = None  # An invalid previous block cannot establish ownership.
                 if previous:
                     prior_specs.update(previous.owns)
+        elif artifact.output in drafts:
+            content = drafts[artifact.output]
         else:
             content = path.read_text(encoding="utf-8") if path.is_file() else None
         documents.append((artifact, content))
 
     errors: list[str] = []
+    disagreements: list[DesignDisagreement] = []
     owners: dict[str, dict[str, str]] = {}
     operations: dict[str, str] = {}
     cases: dict[tuple[str, str, str], list[BehaviorCase]] = {}
@@ -444,7 +461,7 @@ def enforce_design_consistency(
     operation_flow_owners = _operation_flow_owner_paths(config)
     for artifact, content in documents:
         if content is None:
-            if complete:
+            if complete and not allow_missing:
                 errors.append(f"{artifact.output}: planned document is missing")
             continue
         try:
@@ -478,6 +495,7 @@ def enforce_design_consistency(
                 errors.append(f"{location}: unresolved disagreement references unknown documents: {', '.join(sorted(missing))}")
             else:
                 errors.append(f"{location}: unresolved disagreement between {' and '.join(paths)}:\n    {quote}")
+                disagreements.append(DesignDisagreement(artifact.output, paths, quote))
     for spec, claims in owners.items():
         if len(claims) > 1 and (not candidate_path or candidate_path in claims):
             one = candidate_path or next(iter(claims))
@@ -490,9 +508,13 @@ def enforce_design_consistency(
             errors.append(f"{claims[one]} and {claims[other]}: both own specification {spec!r} ({detail})")
 
     if complete:
+        pending_specs = {
+            spec for artifact, content in documents if allow_missing and content is None
+            for spec in artifact.behavior_owners or ()
+        }
         errors.extend(
             f"{case.location}: no design document owns {case.spec!r}"
-            for claims in cases.values() for case in claims if case.spec not in owners
+            for claims in cases.values() for case in claims if case.spec not in owners and case.spec not in pending_specs
         )
 
     retry_candidate = candidate is not None and not errors
@@ -551,6 +573,7 @@ def enforce_design_consistency(
             errors + (list(repair_feedback.values()) if candidate_path else dependency_details),
             retry_candidate=retry_candidate,
             dependency_repairs=repair_feedback if complete and not errors else None,
+            disagreements=disagreements,
         )
     if not complete:
         return None

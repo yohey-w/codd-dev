@@ -200,6 +200,7 @@ class GreenfieldResult:
     next_step: str | None = None
     can_resume: bool = True
     inspect_command_override: str | None = None
+    design_reconciliation: str | None = None
 
     @property
     def inspect_command(self) -> str | None:
@@ -231,6 +232,8 @@ class GreenfieldResult:
                 "inspect_command": self.inspect_command,
                 "resume_command": self.resume_command,
             }
+        if self.design_reconciliation is not None:
+            payload["design_reconciliation"] = self.design_reconciliation
         return payload
 
 
@@ -255,6 +258,8 @@ def format_greenfield_result(result: GreenfieldResult, format_name: str) -> str:
             lines.append(f"Resume:  {result.resume_command}")
     if result.session_path is not None:
         lines.append(f"Session: {result.session_path.as_posix()}")
+    if result.design_reconciliation is not None:
+        lines.append(result.design_reconciliation)
     return "\n".join(lines) + "\n"
 
 
@@ -660,11 +665,14 @@ class GreenfieldPipeline:
         session["result"]["status"] = "success"
         path = save_session(project_root, session)
         self._notify(options, f"greenfield {project_root.name}: SUCCESS — system built")
+        from codd.generator import design_reconciliation_notice
+
         return GreenfieldResult(
             project_root=project_root,
             status="success",
             stages=_stage_outcomes(session),
             session_path=path,
+            design_reconciliation=design_reconciliation_notice(project_root),
         )
 
     # ── failure handling ────────────────────────────────────
@@ -682,6 +690,8 @@ class GreenfieldPipeline:
         inspect_command: str | None = None,
         can_resume: bool = True,
     ) -> GreenfieldResult:
+        from codd.generator import design_reconciliation_notice
+
         record["status"] = STATUS_FAILED
         record["detail"] = error
         record["finished_at"] = _utc_now()
@@ -704,6 +714,7 @@ class GreenfieldPipeline:
             next_step=next_step,
             inspect_command_override=inspect_command,
             can_resume=can_resume,
+            design_reconciliation=design_reconciliation_notice(project_root),
         )
         self.echo(f"[greenfield] stage {stage_name} FAILED: {error}")
         self.echo(f"[greenfield] inspect: {result.inspect_command}")
@@ -1242,6 +1253,9 @@ class GreenfieldPipeline:
     # ── stage: generate ─────────────────────────────────────
 
     def _stage_generate(self, project_root: Path, record: dict[str, Any], options: dict[str, Any]) -> None:
+        from codd.design_consistency import DesignConsistencyError
+        from codd.generator import reconcile_generated_design
+
         lister = self.wave_lister or _default_wave_lister
         waves = list(lister(project_root))
         if not waves:
@@ -1259,10 +1273,19 @@ class GreenfieldPipeline:
                 detail = runner(project_root, wave, ai_command=self.ai_command)
             except (FileNotFoundError, ValueError) as exc:
                 record["units"][key] = STATUS_FAILED
+                if isinstance(exc, DesignConsistencyError) and exc.disagreements:
+                    raise _DesignConsistencyStageError(f"wave {wave}: {exc}") from exc
                 raise StageError(f"wave {wave}: {exc}") from exc
             record["units"][key] = STATUS_DONE
             self._checkpoint(project_root)
             self.echo(f"[greenfield] generate wave {wave}: {detail}")
+
+        # A resumed run can skip the waves that wrote these reporters. Resolve
+        # them before validating the VB registry against the resulting documents.
+        try:
+            reconcile_generated_design(project_root, ai_command=self.ai_command)
+        except DesignConsistencyError as exc:
+            raise _DesignConsistencyStageError(str(exc)) from exc
 
         # After ALL waves are generated, enforce the canonical VB-registry
         # completeness contract (model-independence): a weak model can reference
