@@ -4010,6 +4010,12 @@ def generate(
 
     # Auto-generate wave_config if missing
     config = _load_project_config(project_root)
+    if config.get("wave_config") == {} and config.get("empty_required_artifact_plan") is True:
+        if not all_waves:
+            raise click.ClickException("The saved artifact selection has no generation waves.")
+        click.echo("All waves complete (0 wave(s)): 0 generated, 0 skipped")
+        _enforce_stage_contract_gate(project_root, "generate", opt_out=no_contract_gate)
+        return
     if not config.get("wave_config"):
         click.echo("wave_config not found. Auto-generating from requirements...")
         from codd.planner import plan_init
@@ -4715,6 +4721,12 @@ def brownfield_cmd(
     default=False,
     help="Skip the verifiable-behavior coverage gate after each implement task",
 )
+@click.option(
+    "--use-required-artifacts",
+    is_flag=True,
+    default=False,
+    help="Use the accountable required-artifact selection for planning; recorded for --resume",
+)
 @click.option("--resume", is_flag=True, default=False, help="Resume from .codd/greenfield_session.yaml")
 @click.option("--dry-run", is_flag=True, default=False, help="Print the resolved execution plan without invoking AI")
 @click.option(
@@ -4744,6 +4756,7 @@ def greenfield_cmd(
     dry_run: bool,
     ntfy_topic: str | None,
     output_format: str,
+    use_required_artifacts: bool = False,
 ) -> None:
     """Run the unattended greenfield autopilot: requirements in, system out.
 
@@ -4760,6 +4773,7 @@ def greenfield_cmd(
     """
     from codd.greenfield.pipeline import GreenfieldPipeline, format_greenfield_result
 
+    lineup_options = {"use_required_artifacts": True} if use_required_artifacts else {}
     pipeline = GreenfieldPipeline(
         project_name=project_name,
         language=language,
@@ -4771,6 +4785,7 @@ def greenfield_cmd(
         coverage_gate=False if no_coverage_gate else None,
         ntfy_topic=ntfy_topic,
         echo=click.echo,
+        **lineup_options,
     )
     try:
         result = pipeline.run(Path(project_path).resolve(), resume=resume, dry_run=dry_run)
@@ -7971,6 +7986,11 @@ def drift(path: str, output_format: str, e2e: bool, screen_flow: bool):
 @click.option("--json", "as_json", is_flag=True, hidden=True, help="Deprecated alias for --format json.")
 @click.option("--init", "initialize", is_flag=True, help="Generate wave_config from requirement docs")
 @click.option(
+    "--use-required-artifacts",
+    is_flag=True,
+    help="Plan the saved accounted artifact selection (requires --init)",
+)
+@click.option(
     "--derive",
     is_flag=True,
     help="Derive required design artifacts from requirement documents using AI",
@@ -8011,6 +8031,7 @@ def plan(
     output_format: str,
     as_json: bool,
     initialize: bool,
+    use_required_artifacts: bool,
     derive: bool,
     account_decisions: bool,
     rederive: bool,
@@ -8044,6 +8065,8 @@ def plan(
         raise click.BadOptionUsage("account_decisions", "--account-decisions requires --derive")
     if rederive and not account_decisions:
         raise click.BadOptionUsage("rederive", "--rederive requires --derive --account-decisions")
+    if use_required_artifacts and not initialize:
+        raise click.BadOptionUsage("use_required_artifacts", "--use-required-artifacts requires --init")
 
     if derive:
         if initialize:
@@ -8058,8 +8081,12 @@ def plan(
             raise click.BadOptionUsage("format", "--format json cannot be used with --regenerate-wave-config")
 
         if account_decisions:
+            from codd.required_artifacts_deriver import plan_accounted_artifacts
+
             try:
-                report = _plan_accounted_artifacts(project_root, ai_cmd, rederive)
+                report = plan_accounted_artifacts(
+                    project_root, ai_cmd, rederive, warn=lambda message: click.echo(message, err=True),
+                )
             except (OSError, ValueError, yaml.YAMLError) as exc:
                 raise click.ClickException(str(exc)) from exc
             if as_json:
@@ -8071,7 +8098,11 @@ def plan(
             return
 
         from codd import generator as generator_module
-        from codd.required_artifacts_deriver import RequiredArtifactsDeriver
+        from codd.required_artifacts_deriver import (
+            RequiredArtifactsDeriver,
+            lexicon_data_from_yaml,
+            requirement_docs_from_lexicon,
+        )
 
         config = load_project_config(project_root)
         resolved_ai_command = generator_module._resolve_ai_command(
@@ -8080,8 +8111,10 @@ def plan(
             command_name="plan_derive",
         )
         lexicon_path = project_root / LEXICON_FILENAME
-        lexicon_data = _load_lexicon_data_for_update(lexicon_path)
-        requirement_docs = _requirement_docs_from_lexicon_data(lexicon_data)
+        text = lexicon_path.read_text(encoding="utf-8") if lexicon_path.exists() else ""
+        lexicon_data = lexicon_data_from_yaml(text)
+        lexicon_data.setdefault("required_artifacts", [])
+        requirement_docs = requirement_docs_from_lexicon(lexicon_data)
 
         try:
             from codd.lexicon import ProjectLexicon, validate_lexicon
@@ -8118,13 +8151,19 @@ def plan(
         if as_json:
             raise click.BadOptionUsage("format", "--format json cannot be used with --init")
 
+        plan_options = {"use_required_artifacts": True} if use_required_artifacts else {}
         try:
-            result = plan_init(project_root, force=force, ai_command=ai_cmd)
+            result = plan_init(project_root, force=force, ai_command=ai_cmd, **plan_options)
         except FileExistsError:
             if not click.confirm("codd.yaml already contains wave_config. Overwrite it?", default=False):
                 click.echo("Aborted: existing wave_config preserved.")
                 raise SystemExit(1)
-            result = plan_init(project_root, force=True, ai_command=ai_cmd)
+            try:
+                result = plan_init(project_root, force=True, ai_command=ai_cmd, **plan_options)
+            except (FileNotFoundError, ValueError, yaml.YAMLError) as exc:
+                if not use_required_artifacts:
+                    raise
+                raise click.ClickException(str(exc)) from exc
         except (FileNotFoundError, ValueError) as exc:
             click.echo(f"Error: {exc}")
             raise SystemExit(1)
@@ -8141,6 +8180,8 @@ def plan(
             f"Initialized wave_config in {config_rel_path} from {len(result.requirement_paths)} requirement document(s)."
         )
         click.echo(f"Generated {artifact_count} artifact(s) across {wave_count} wave(s).")
+        if use_required_artifacts and result.required_artifact_report:
+            click.echo(result.required_artifact_report)
         _enforce_stage_contract_gate(project_root, "plan", opt_out=no_contract_gate)
         return
 
@@ -8464,85 +8505,6 @@ def _plan_design_doc_nodes(project_root: Path, design_docs: tuple[str, ...]):
     return nodes
 
 
-def _plan_accounted_artifacts(project_root: Path, ai_cmd: str | None, rederive: bool) -> dict[str, Any]:
-    from hashlib import sha256
-
-    from codd.ai_invoke import resolve_ai_command
-    from codd.lexicon import ProjectLexicon, validate_lexicon
-    from codd.path_safety import resolve_project_path
-    from codd.required_artifacts_deriver import RequiredArtifactsDeriver
-
-    def fingerprint(artifacts: list[dict[str, Any]]) -> str:
-        return sha256(yaml.safe_dump(artifacts, sort_keys=True).encode("utf-8")).hexdigest()
-
-    path = resolve_project_path(project_root, LEXICON_FILENAME)
-    if path is None:
-        raise ValueError(f"{LEXICON_FILENAME} resolves outside the project")
-    original = _optional_file_bytes(path)
-    data = _lexicon_data_from_yaml((original or b"").decode("utf-8"))
-    lexicon = ProjectLexicon(data)
-    if "required_artifacts" in data and not rederive:
-        validate_lexicon(data)
-        artifacts = lexicon.required_artifacts
-        report = {"required_artifacts": artifacts, "saved": True}
-        decisions = data.get("required_artifact_decisions")
-        if isinstance(decisions, dict) and decisions.get("artifacts_sha256") == fingerprint(artifacts):
-            report = {**decisions, **report}
-            del report["artifacts_sha256"]
-        return report
-
-    command = resolve_ai_command(load_project_config(project_root), ai_cmd, command_name="plan_derive")
-    deriver = RequiredArtifactsDeriver(
-        project_root, ai_command=command, warn=lambda message: click.echo(message, err=True),
-    )
-    report = deriver.derive_accounted(
-        _requirement_docs_from_lexicon_data(data), lexicon.coverage_decisions,
-    )
-    lexicon.set_required_artifacts(report["required_artifacts"])
-    output = lexicon.as_dict()
-    output["required_artifact_decisions"] = {
-        "artifacts_sha256": fingerprint(report["required_artifacts"]),
-        **{key: value for key, value in report.items() if key != "required_artifacts"},
-    }
-    validate_lexicon(output)
-    _write_accounted_lexicon(path, original, yaml.safe_dump(output, sort_keys=False, allow_unicode=True))
-    return {**report, "saved": False}
-
-
-def _optional_file_bytes(path: Path) -> bytes | None:
-    try:
-        return path.read_bytes()
-    except FileNotFoundError:
-        return None
-
-
-def _write_accounted_lexicon(path: Path, original: bytes | None, content: str) -> None:
-    """Write the selection and its evidence together, guarding concurrent derivations."""
-    from stat import S_IMODE
-    from tempfile import NamedTemporaryFile
-
-    with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as handle:
-        temp_path = Path(handle.name)
-        try:
-            handle.write(content)
-            handle.close()
-            lock = path.with_name(f".{path.name}.derive.lock")
-            try:
-                lock.mkdir()
-            except FileExistsError as exc:
-                raise ValueError(f"Another derivation is writing {LEXICON_FILENAME}. Retry the command.") from exc
-            try:
-                if _optional_file_bytes(path) != original:
-                    raise ValueError(f"{LEXICON_FILENAME} changed during derivation. Retry the command.")
-                if original is not None:
-                    temp_path.chmod(S_IMODE(path.stat().st_mode))
-                temp_path.replace(path)
-            finally:
-                lock.rmdir()
-        finally:
-            temp_path.unlink(missing_ok=True)
-
-
 def _echo_accounted_artifacts(report: dict[str, Any]) -> None:
     def echo_item(item_id: str) -> None:
         item = items[item_id]
@@ -8609,37 +8571,6 @@ def _regenerate_artifact_wave_config(
     )
     click.echo(f"Backed up codd.yaml to {backup_path.relative_to(project_root).as_posix()}")
     click.echo(f"Updated {raw_config_path.relative_to(project_root).as_posix()}:wave_config")
-
-
-def _load_lexicon_data_for_update(lexicon_path: Path) -> dict[str, Any]:
-    text = lexicon_path.read_text(encoding="utf-8") if lexicon_path.exists() else ""
-    data = _lexicon_data_from_yaml(text)
-    data.setdefault("required_artifacts", [])
-    return data
-
-
-def _lexicon_data_from_yaml(text: str) -> dict[str, Any]:
-    data = yaml.safe_load(text) or {}
-    if not isinstance(data, dict):
-        raise ValueError(f"{LEXICON_FILENAME} must contain a YAML mapping")
-    data.setdefault("node_vocabulary", [])
-    data.setdefault("naming_conventions", [])
-    data.setdefault("design_principles", [])
-    data.setdefault("coverage_decisions", [])
-    return data
-
-
-def _requirement_docs_from_lexicon_data(data: dict[str, Any]) -> list[str]:
-    value = (
-        data.get("requirement_docs_path")
-        or data.get("requirement_doc_paths")
-        or data.get("requirement_docs")
-    )
-    if isinstance(value, str):
-        return [value]
-    if isinstance(value, list):
-        return [str(item) for item in value if str(item).strip()]
-    return []
 
 
 @main.command()
