@@ -62,10 +62,17 @@ CoDD requires full content for every Tier 1 dependency artifact. Tier 1 covers
 the artifacts identified through imports from the task's existing files and
 outputs from its immediate dependency tasks. An unresolved immediate dependency
 or a missing, unreadable, or abbreviated Tier 1 artifact sends the task to the
-ordinary command. Tier 2 covers the remaining transitive task dependencies and
-design-document closure. Missing or abbreviated Tier 2 artifacts are counted for
-logging and leave the task eligible. The task's own declared outputs are handled
-by the existing-output rules.
+ordinary command with `reason=incomplete_dependency_artifact`. If the Tier 1
+files exceed the character budget, raise
+`implement.dependency_artifact_files_prompt_limit` in `codd/codd.yaml` to cover
+their combined size and restore one-shot eligibility if the other conditions
+are met. The setting accepts a positive integer. An unset, `null`, or invalid
+value uses 20,000 characters.
+
+Tier 2 covers the remaining transitive task dependencies and design-document
+closure and uses the budget left by Tier 1. Missing or abbreviated Tier 2
+artifacts are counted for logging and leave the task eligible. The task's own
+declared outputs are handled by the existing-output rules.
 
 This applies to task generation in `codd implement run` and greenfield,
 including regeneration with feedback. Step derivation and chunked execution
