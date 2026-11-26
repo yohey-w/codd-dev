@@ -9,6 +9,8 @@ from dataclasses import replace
 
 import pytest
 
+from tests.greenfield.owner_first_baseline import main_reference
+
 from codd import ai_invoke, generator, implement_oracle, implement_oracle_scope, implementer
 from codd.greenfield import pipeline as pipeline_module
 from codd.greenfield.pipeline import GreenfieldPipeline, ImplementTaskRef, StageError
@@ -62,7 +64,7 @@ def _run_stage(tmp_path, monkeypatch, mode, *, enabled=True, rounds=2, failed=("
         "scan:\n  source_dirs: [src]\n  test_dirs: [tests]\n"
         f"greenfield:\n  vb_rework:\n    max_rounds: {rounds}\n"
         "implement:\n  python_name_lint: off\n"
-        + ("  owner_first_retry_on_copy: true\n" if enabled else "")
+        + (f"  owner_first_retry_on_copy: {str(enabled).lower()}\n" if enabled is not None else "")
         + ("  implement_oracle: false\n" if oracle_mode == "opt_out" else ""),
     )
     registry = (
@@ -190,7 +192,8 @@ def _run_stage(tmp_path, monkeypatch, mode, *, enabled=True, rounds=2, failed=("
     return project, writes, oracle, log
 
 
-def test_auth_uses_main_round_when_option_is_unset(tmp_path, monkeypatch):
+@pytest.mark.parametrize("enabled", [None, False])
+def test_auth_uses_main_round_when_option_is_unset(tmp_path, monkeypatch, main_reference, enabled):
     gate = pipeline_module._enforce_stage_coverage_gate
 
     def legacy_gate(project_root, *, coverage_gate, echo, rerun, rerun_oracle, scope_resolver, authenticity_profile):
@@ -205,16 +208,22 @@ def test_auth_uses_main_round_when_option_is_unset(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(pipeline_module, "_enforce_stage_coverage_gate", legacy_gate)
-    project, writes, oracle, log = _run_stage(tmp_path, monkeypatch, "clean", enabled=False)
-    assert [(Path(root), task_id) for root, task_id, *_ in writes] == [(project, t) for t in "abc"]
-    assert [Path(root) for root, *_ in oracle] == [project, project]
+    project, writes, oracle, log = _run_stage(tmp_path, monkeypatch, "clean", enabled=enabled)
+    baseline = main_reference["auth"][str(enabled)]
+    for actual, expected in ((writes, baseline["writes"]), (oracle, baseline["checks"]), (log, baseline["messages"])):
+        assert json.dumps(actual).replace(str(project), "<project>") == (
+            json.dumps(expected).replace(baseline["project"], "<project>")
+        )
     assert any("authenticity rework round 1/2" in message for message in log)
 
 
-def test_auth_zero_rounds_skips_trial(tmp_path, monkeypatch):
+def test_auth_zero_rounds_skips_trial(tmp_path, monkeypatch, main_reference):
     project, writes, oracle, _ = _run_stage(tmp_path, monkeypatch, "clean", rounds=0)
-    assert writes == []
-    assert [Path(root) for root, *_ in oracle] == [project]
+    baseline = main_reference["auth"]["zero"]
+    assert writes == baseline["writes"] == []
+    assert [Path(at) == project for at, *_ in oracle] == [
+        at == baseline["project"] for at, *_ in baseline["checks"]
+    ]
 
 
 @pytest.mark.parametrize("failed", [("a",), ("a", "b")])
@@ -223,7 +232,9 @@ def test_auth_adopts_only_owners_after_separate_project_judgment(tmp_path, monke
     assert tuple(task_id for _, task_id, *_ in writes) == failed
     work_root = Path(writes[0][0])
     assert {Path(root) for root, *_ in writes} == {work_root}
-    assert len(oracle) == 2
+    assert len(oracle) == 3
+    assert Path(oracle[-1][0]) == project
+    assert oracle[-1][1:] == oracle[1][1:]
     judge_root = Path(oracle[1][0])
     assert len({project, work_root, judge_root}) == 3
     assert oracle[1][1] == "original\n"
@@ -246,7 +257,7 @@ def test_auth_can_retry_when_native_oracle_is_skipped(tmp_path, monkeypatch, ora
     project, writes, oracle, log = _run_stage(tmp_path, monkeypatch, "clean", oracle_mode=oracle_mode)
     assert [(task_id, Path(root) == project) for root, task_id, *_ in writes] == [("a", False)]
     assert not oracle
-    assert sum(oracle_trace in message for message in log) == 2
+    assert sum(oracle_trace in message for message in log) == 3
     assert any("marker authenticity OK after owner-first retry" in message for message in log)
 
 
@@ -257,11 +268,10 @@ def test_auth_can_retry_when_native_oracle_is_skipped(tmp_path, monkeypatch, ora
         "orphan_observation", "scope_index", "not_executed",
     ],
 )
-def test_auth_rejection_preserves_feedback_and_normal_round(tmp_path, monkeypatch, mode):
-    with monkeypatch.context() as normal_patches:
-        _, normal, _, _ = _run_stage(tmp_path / "normal", normal_patches, "clean", enabled=False)
+def test_auth_rejection_preserves_feedback_and_normal_round(tmp_path, monkeypatch, mode, main_reference):
+    normal = main_reference["auth"]["None"]["writes"]
     project, writes, oracle, log = _run_stage(tmp_path / "trial", monkeypatch, mode)
-    assert [task_id for _, task_id, *_ in writes] == list("aabc")
+    assert [task_id for _, task_id, *_ in writes] == ["a", *(row[1] for row in normal)]
     assert Path(writes[0][0]) != project
     assert writes[1][2] is True
     feedback_header = "A previous test-authoring attempt was REJECTED"
@@ -276,8 +286,13 @@ def test_auth_rejection_preserves_feedback_and_normal_round(tmp_path, monkeypatc
         assert Path(oracle[1][0]) not in {project, Path(writes[0][0])}
 
 
-def test_auth_skips_trial_if_every_test_materializer_is_an_owner(tmp_path, monkeypatch):
+def test_auth_skips_trial_if_every_test_materializer_is_an_owner(tmp_path, monkeypatch, main_reference):
     project, writes, oracle, log = _run_stage(tmp_path, monkeypatch, "clean", failed=tuple("abc"))
-    assert [(Path(root), task_id) for root, task_id, *_ in writes] == [(project, t) for t in "abc"]
-    assert [Path(root) for root, *_ in oracle] == [project, project]
+    baseline = main_reference["auth"]["all"]
+    assert [(Path(at) == project, task) for at, task, *_ in writes] == [
+        (at == baseline["project"], task) for at, task, *_ in baseline["writes"]
+    ]
+    assert [Path(at) == project for at, *_ in oracle] == [
+        at == baseline["project"] for at, *_ in baseline["checks"]
+    ]
     assert any("authenticity rework round 1/2" in message for message in log)

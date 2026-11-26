@@ -17,7 +17,7 @@ import tempfile
 import threading
 from typing import Any, Callable, Iterable, Sequence
 
-from codd.ai_usage import active_usage_log, resolve_usage_log, summarize_usage, usage_session
+from codd.ai_usage import active_usage_log, recorded_usage_session, resolve_usage_log, summarize_usage
 from codd.greenfield.pipeline import (
     ImplementTaskRef, _declared_output_is_file_path, _is_glob_decl, _output_paths_for_task,
     _task_declares_no_authored_artifact,
@@ -75,16 +75,16 @@ def _owners(root, tasks, targets, config, eligible, skip_all):
         if (path.resolve(strict=True) != path or not path.is_file() or path.stat().st_nlink != 1
                 or not os.access(path, os.W_OK) or not os.access(path.parent, os.W_OK | os.X_OK)):
             return []
-        matches = [
-            task for task in tasks
-            if not _task_declares_no_authored_artifact(task, config)
-            and any(
-                not _is_glob_decl(str(raw))
-                and not str(raw).endswith(("/", "/."))
-                and Path(raw) == rel
-                for raw in _declared_evidence(task)
-            )
-        ]
+        matches = []
+        for task in tasks:
+            if _task_declares_no_authored_artifact(task, config):
+                continue
+            files = [Path(raw) for raw in _declared_evidence(task)
+                     if not _is_glob_decl(str(raw)) and not str(raw).endswith(("/", "/."))]
+            if any(item != rel and (root / item).resolve() == path for item in files):
+                return []
+            if rel in files:
+                matches.append(task)
         if len(matches) != 1:
             return []
         task = matches[0]
@@ -96,6 +96,7 @@ def _owners(root, tasks, targets, config, eligible, skip_all):
         for prefix in prefixes:
             dest = root / prefix
             if (prefix.is_absolute() or ".." in prefix.parts or
+                    any(parent.exists() and not parent.is_dir() for parent in dest.parents) or
                     (dest.exists() and dest.is_file() != _declared_output_is_file_path(str(prefix)))):
                 return []
         relative = PurePosixPath(rel.as_posix())
@@ -111,7 +112,7 @@ def _owners(root, tasks, targets, config, eligible, skip_all):
     return [task for task in tasks if task.task_id in selected]
 
 
-def _inventory(root: Path, *, original: Path | None = None) -> _State:
+def _inventory(root: Path, *, original: Path | None = None, keep_contents: bool = False) -> _State:
     """lstat, link text, mode and exact file contents, including ignored/hidden entries."""
     result = {Path("."): (root.lstat().st_mode, None)}
     size = 0
@@ -137,7 +138,9 @@ def _inventory(root: Path, *, original: Path | None = None) -> _State:
                 data = path.read_bytes()
                 if original is not None and os.fsencode(original) in data:
                     raise _Declined("P2: an input embeds the live project path")
-                value = hashlib.sha256(data).digest()
+                if original is not None and b"/" in data and b"\0" not in data:
+                    _rebase_text(os.fsdecode(data), original, None)
+                value = data if keep_contents else hashlib.sha256(data).digest()
             else:
                 raise _Declined("P2/P4: special filesystem entry")
             result[rel] = mode, value
@@ -180,20 +183,49 @@ def _check_git(root: Path, state: _State) -> None:
             raise _Declined("P2: Git worktree is not the project root")
 
 
-def _rebase_text(value: str, root: Path, copy: Path) -> str:
-    # Free-form feedback can quote a path or append a diagnostic line number.
-    # A neighbouring directory can have the project name as a prefix.
-    pattern = re.escape(str(root)) + r"""(?=$|[/\s:,'";)\]}])"""
-    return re.sub(pattern, lambda _: str(copy), value)
+_PATH_TOKEN = re.compile(
+    r"""(?P<quote>["'])(?P<quoted>~?/[^"'\n]*?)(?P=quote)|(?P<bare>~?/[^\s"'=:,;(){}\[\]<>|`!?\#]+)"""
+)
+
+
+def _copy_path(value: str, root: Path, copy: Path | None) -> str:
+    location = Path(value).expanduser().resolve()
+    if location != root.parent and not location.is_relative_to(root):
+        return value
+    if copy is None:
+        raise _Declined("P2: input refers to the live project or its parent")
+    if location == root.parent:
+        return str(copy.parent)
+    return str(copy / location.relative_to(root))
+
+
+def _rebase_text(value: str, root: Path, copy: Path | None) -> str:
+    """Translate project paths, including aliases in prose and command arguments."""
+    def replace(match: re.Match) -> str:
+        quote = match["quote"] or ""
+        token = match["quoted"] or match["bare"]
+        moved = _copy_path(token, root, copy)
+        if not quote and moved == token and token.endswith("."):
+            moved = _copy_path(token[:-1], root, copy) + "."
+        return quote + moved + quote
+
+    result = _PATH_TOKEN.sub(replace, value)
+    # Unquoted paths containing whitespace can be ambiguous in free-form text.
+    # Refuse any remaining literal reference, leaving neighbouring paths alone.
+    end = r"""(?=$|[^\w./-]|\.(?:\s|$))"""
+    if (re.search(re.escape(str(root)) + "(?:/|" + end + ")", result)
+            or re.search(re.escape(str(root.parent)) + "/?" + end, result)):
+        raise _Declined("P2: ambiguous live path in a copy input")
+    return result
 
 
 def _copy_env_value(value: str, root: Path, copy: Path) -> str:
     parts = value.split(os.pathsep)
     for index, part in enumerate(parts):
-        if os.path.isabs(part):
-            location = Path(part).resolve()
-            if location.is_relative_to(root):
-                parts[index] = str(copy / location.relative_to(root))
+        if os.path.isabs(part) or part.startswith("~/"):
+            moved = _copy_path(part, root, copy)
+            if moved != part:
+                parts[index] = moved
                 continue
         parts[index] = _rebase_text(part, root, copy)
     return os.pathsep.join(parts)
@@ -205,6 +237,7 @@ def _at_copy(root: Path, copy: Path):
     cwd = Path.cwd()
     changes = {}
     for key, value in os.environ.items():
+        _rebase_text(key, root, None)
         rebased = _copy_env_value(value, root, copy)
         if rebased != value:
             changes[key] = rebased
@@ -289,7 +322,67 @@ class _Replacement:
         os.utime(path, ns=(path.stat().st_atime_ns, self.mtime_ns))
 
 
-def _publish(root: Path, candidates: dict[Path, _Replacement]) -> None:
+def _restore_check_writes(root: Path, before: _State) -> set[Path]:
+    """Undo writes by a live checker, including to ignored files and the Git index."""
+    changed = set()
+    existing = {}
+    pending = [root]
+    while pending:
+        path = pending.pop()
+        rel = path.relative_to(root)
+        mode = existing[rel] = path.lstat().st_mode
+        if stat.S_ISDIR(mode):
+            if (rel not in before or mode != before[rel][0]) and mode & 0o700 != 0o700:
+                path.chmod(stat.S_IMODE(mode) | 0o700)
+            pending.extend(path.iterdir())
+    # Remove newly created entries and type changes, children before parents.
+    for rel in sorted(existing, key=lambda p: len(p.parts), reverse=True):
+        mode = existing[rel]
+        if rel not in before or stat.S_IFMT(mode) != stat.S_IFMT(before[rel][0]):
+            path = root / rel
+            if stat.S_ISDIR(mode):
+                path.rmdir()
+            else:
+                path.unlink()
+            changed.add(rel)
+            del existing[rel]
+    # The inventory visits each directory before its descendants.
+    for rel, (mode, value) in before.items():
+        path = root / rel
+        current_mode = existing.get(rel)
+        if stat.S_ISLNK(mode):
+            if current_mode is None or os.readlink(path) != value:
+                path.unlink(missing_ok=True)
+                path.symlink_to(value)
+                changed.add(rel)
+            continue
+        if stat.S_ISDIR(mode):
+            if current_mode is None:
+                path.mkdir()
+            if current_mode != mode:
+                path.chmod(stat.S_IMODE(mode))
+                changed.add(rel)
+        elif (current_mode != mode or path.stat().st_size != len(value)
+              or path.read_bytes() != value):
+            path.unlink(missing_ok=True)
+            path.write_bytes(value)
+            path.chmod(stat.S_IMODE(mode))
+            changed.add(rel)
+    return changed
+
+
+def _confirm_live(root: Path, validate: Callable, config: dict) -> bool:
+    # Snapshot AFTER publication so that rollback touches only checker writes.
+    # The outer publication transaction owns rollback of the target files.
+    before = _inventory(root, keep_contents=True)
+    try:
+        passed = validate(root, deepcopy(config))
+    finally:
+        changed = _restore_check_writes(root, before)
+    return passed and not (changed - _RECORDS)
+
+
+def _publish(root: Path, candidates: dict[Path, _Replacement], confirm: Callable[[], bool]) -> None:
     # Prepare every replacement and keep the old inodes until the final rename.
     # Backups and replacements share the target filesystem even for mount points.
     with ExitStack() as originals, ExitStack() as staging_dirs:
@@ -309,6 +402,8 @@ def _publish(root: Path, candidates: dict[Path, _Replacement]) -> None:
                 os.replace(new, dest)
                 published.append((dest, old, original))
             staging_dirs.close()
+            if not confirm():
+                raise _Declined("P3: live recheck failed")
         except BaseException:
             for dest, old, original in reversed(published):
                 try:
@@ -340,8 +435,8 @@ def try_owner_first(
         if not paths or any(not p.parts or ".." in p.parts or p.parts[0] in {".git", ".codd"} for p in paths):
             return False
         eligible = tasks if eligible_tasks is None else eligible_tasks
-        if any(str(root) in str(item) for item in (tasks, config, ai_command)):
-            return False
+        for item in (tasks, config, ai_command):
+            _rebase_text(str(item), root, None)
         if not _portable(config) or not _portable(ai_command, command=True):
             return False
         for task in tasks:
@@ -363,7 +458,8 @@ def try_owner_first(
         if (temp_parent.is_relative_to(root) or threading.active_count() != 1
                 or interpreter.is_relative_to(root) or interpreter.resolve().is_relative_to(root)):
             raise _Declined("P2: cannot isolate the current execution paths")
-        if any(p and Path(p).resolve().is_relative_to(root) for p in sys.path):
+        if any(p and (Path(p).resolve() == root.parent or Path(p).resolve().is_relative_to(root))
+               for p in sys.path):
             raise _Declined("P2: interpreter imports from the live project")
         before = _inventory(root, original=root)
         _check_git(root, before)
@@ -375,7 +471,7 @@ def try_owner_first(
             shutil.copytree(root, work, symlinks=True)
             if _inventory(work) != before:
                 raise _Declined("P2: project changed during copy")
-            with usage_session(usage_config, root), _at_copy(root, work):
+            with recorded_usage_session(usage_config, root), _at_copy(root, work):
                 completed = reimplement(work, owners, _rebase_text(feedback, root, work), deepcopy(config))
                 if set(completed) != {task.task_id for task in owners}:
                     raise _Declined("P5: owner did not complete")
@@ -403,16 +499,15 @@ def try_owner_first(
                 replacement.write(judge / rel)
             inputs = dict(live)
             inputs.update((rel, after[rel]) for rel in candidates)
-            with _at_copy(root, judge):
-                if not validate(judge, deepcopy(config)):
-                    raise _Declined("P3: recheck failed")
+            if not validate(judge, deepcopy(config)):
+                raise _Declined("P3: recheck failed")
             checked = _inventory(judge)
             changes = _changed(inputs, checked)
             if changes - _journal_changes(changes, inputs, checked, _RECORDS):
                 raise _Declined("P3: recheck changed project files")
             if _inventory(root) != live:
                 raise _Declined("P5: live project changed before publication")
-        _publish(root, candidates)
+        _publish(root, candidates, lambda: _confirm_live(root, validate, config))
     except Exception as exc:
         reason = str(exc) if isinstance(exc, _Declined) else f"P5: {type(exc).__name__}"
         echo(f"[greenfield] owner-first retry: rejected ({reason})")

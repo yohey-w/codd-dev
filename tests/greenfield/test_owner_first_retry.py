@@ -107,9 +107,9 @@ def exercise(case, monkeypatch, *, mutate=None, validate=None, targets=(TARGET,)
 
     def check(judge, copied_config):
         checks.append(judge)
-        assert judge != calls[0] and judge != root and judge.name == root.name
-        assert Path.cwd() == judge
-        assert (root / TARGET).read_bytes() == b"broken\n"
+        assert judge != calls[0] and judge.name == root.name
+        if judge != root:
+            assert (root / TARGET).read_bytes() == b"broken\n"
         assert (judge / ".git/index").read_bytes() == before[".git/index"][1]
         assert (judge / TARGET).read_bytes() == b"repaired\n"
         assert (judge / ".codd/runtime.state").read_bytes() == b"original\n"
@@ -120,7 +120,7 @@ def exercise(case, monkeypatch, *, mutate=None, validate=None, targets=(TARGET,)
         root, tasks, targets, f"repair {root / TARGET}", config,
         reimplement=pipeline._reimplement_tasks, validate=check, **kwargs,
     )
-    assert all(not path.exists() for path in calls + checks)
+    assert all(not path.exists() for path in calls + checks if path != root)
     after = tree(root)
     delta = {name for name in before.keys() | after.keys() if before.get(name) != after.get(name)}
     return accepted, delta, calls, checks
@@ -136,7 +136,7 @@ def test_accept_publishes_only_checked_bytes_and_real_usage(case, monkeypatch):
         return True
 
     accepted, delta, calls, checks = exercise(case, monkeypatch, mutate=mutate, validate=validate)
-    assert accepted and len(calls) == len(checks) == 1
+    assert accepted and len(calls) == 1 and len(checks) == 2 and checks[-1] == case[0]
     root = case[0]
     assert delta == {TARGET, USAGE}
     assert (root / TARGET).read_bytes() == b"repaired\n"
@@ -197,7 +197,7 @@ def test_failed_trial_preserves_original_and_records_call(case, monkeypatch, fau
 
 
 @pytest.mark.parametrize("reason", [
-    "directory", "directory_spelling", "link_alias", "glob", "duplicate",
+    "directory", "directory_spelling", "link_alias", "second_link_owner", "blocked_parent", "glob", "duplicate",
     "unwritable", "misrouted", "synthesized", "outside",
 ])
 def test_only_unique_explicit_writable_owner_may_run(case, monkeypatch, reason):
@@ -209,6 +209,11 @@ def test_only_unique_explicit_writable_owner_may_run(case, monkeypatch, reason):
     elif reason == "link_alias":
         (root / "src/alias.data").symlink_to(Path(TARGET).name)
         tasks[0] = replace(tasks[0], expected_outputs=("src/alias.data",))
+    elif reason == "second_link_owner":
+        (root / "src/alias.data").symlink_to(Path(TARGET).name)
+        tasks[1] = replace(tasks[1], expected_outputs=("src/alias.data",))
+    elif reason == "blocked_parent":
+        tasks[0] = replace(tasks[0], output_paths=(TARGET, SIBLING + "/nested"))
     elif reason == "glob":
         tasks[0] = replace(tasks[0], expected_outputs=("src/*.data",))
     elif reason == "duplicate":
@@ -255,20 +260,28 @@ def test_live_path_redirections_do_not_start_the_writer(case, monkeypatch, redir
 
 
 def test_publish_rollback_survives_a_second_rename_error(case, monkeypatch):
-    from codd.greenfield.owner_first_retry import _publish, _Replacement
+    from codd.greenfield.owner_first_retry import try_owner_first
 
-    root = case[0]
+    root, config, tasks, _ = case
     before = tree(root)
     replace_file = os.replace
+    renames = []
+
+    def write(copy, owners, *_):
+        for name in (TARGET, SIBLING):
+            (copy / name).write_bytes(b"replacement")
+        return [task.task_id for task in owners]
 
     def fail(src, dst):
-        if Path(dst) == root / SIBLING or Path(src).name == "old":
+        renames.append((Path(src).name, Path(dst)))
+        if Path(dst) == root / TARGET or Path(src).name == "old":
             raise PermissionError("replacement unavailable")
         return replace_file(src, dst)
 
     monkeypatch.setattr(os, "replace", fail)
-    with pytest.raises(PermissionError):
-        _publish(root, {Path(TARGET): _Replacement(b"first", 0o751, 1), Path(SIBLING): _Replacement(b"second", 0o644, 1)})
+    assert not try_owner_first(root, tasks, [TARGET, SIBLING], "repair", config,
+                               reimplement=write, validate=lambda *_: True)
+    assert renames == [("new", root / SIBLING), ("new", root / TARGET), ("old", root / SIBLING)]
     assert tree(root) == before
 
 
@@ -284,8 +297,8 @@ def test_environment_keeps_external_dependencies_and_rebases_live_aliases(case, 
         assert os.environ["SRT1_PATHS"].split(os.pathsep) == [str(dependencies), str(copy / "src")]
         return True
 
-    accepted, delta, calls, checks = exercise(case, monkeypatch, mutate=inspect, validate=inspect)
-    assert accepted and len(calls) == len(checks) == 1
+    accepted, delta, calls, checks = exercise(case, monkeypatch, mutate=inspect)
+    assert accepted and len(calls) == 1 and len(checks) == 2 and checks[-1] == case[0]
     assert delta == {TARGET, USAGE}
     assert os.environ["SRT1_PATHS"].split(os.pathsep) == [str(dependencies), str(alias)]
 
@@ -301,7 +314,7 @@ def test_publication_preserves_judged_modification_time(case, monkeypatch):
         return True
 
     accepted, _, _, _ = exercise(case, monkeypatch, validate=inspect)
-    assert accepted and timestamps == [path.stat().st_mtime_ns]
+    assert accepted and timestamps == [path.stat().st_mtime_ns] * 2
 
 
 @pytest.mark.parametrize("destination", ["default", "outer", "disabled", "existing_artifact"])
@@ -321,7 +334,7 @@ def test_usage_recording_respects_session_and_protects_inputs(case, monkeypatch,
     if destination in {"disabled", "existing_artifact"}:
         assert not calls and not checks and not accepted and not delta
     else:
-        assert accepted and len(calls) == len(checks) == 1
+        assert accepted and len(calls) == 1 and len(checks) == 2 and checks[-1] == case[0]
         assert delta == ({TARGET, USAGE} if destination == "default" else {TARGET, ".codd/run", outer})
 
 
@@ -369,3 +382,135 @@ def test_copy_keeps_ordinary_ai_timeout_recovery_and_usage(case, monkeypatch, li
     assert timeouts == {"copy": [expected, expected], "live": [expected, expected]}
     rows = [json.loads(line) for line in (root / USAGE).read_text().splitlines()]
     assert [row["outcome"] for row in rows if "outcome" in row] == ["timeout", "success"] * 2
+
+@pytest.mark.parametrize("channel", ["environment", "embedded_env", "feedback", "task", "config", "command"])
+def test_work_inputs_do_not_point_to_live_parent(case, monkeypatch, channel):
+    from codd.greenfield.owner_first_retry import try_owner_first
+
+    root, config, tasks, _ = case
+    alias = root.parent / "workspace-link"
+    alias.symlink_to(root.parent)
+    parent = str(root.parent)
+    feedback = "fix the target"
+    command = "fixed-writer"
+    if channel == "environment":
+        monkeypatch.setenv("BUILD_WORKSPACE", str(alias) + "/")
+    elif channel == "embedded_env":
+        monkeypatch.setenv("BUILD_ARGS", f'--workspace="{alias}"')
+    elif channel == "feedback":
+        feedback += f' in workspace "{alias}"'
+    elif channel == "task":
+        tasks[0] = replace(tasks[0], description=f"Build under {parent}")
+    elif channel == "config":
+        config["project"]["description"] = f"Build under {alias}"
+    else:
+        command += f" -C{alias}"
+
+    seen = []
+    def write(copy, owners, message, settings):
+        seen.append((os.environ.get("BUILD_WORKSPACE", ""), os.environ.get("BUILD_ARGS", ""),
+                     message, repr(owners), repr(settings), command))
+        return []
+
+    assert not try_owner_first(root, tasks, [TARGET], feedback, config,
+                               reimplement=write, validate=lambda *_: True, ai_command=command)
+    assert all(parent not in str(values) and str(alias) not in str(values) for values in seen)
+
+
+@pytest.mark.parametrize("fault", ["outside", "late_edit", "exception", "timeout"])
+def test_live_recheck_rolls_back_every_target(case, monkeypatch, fault):
+    from codd.greenfield import owner_first_retry as retry
+
+    root, config, tasks, _ = case
+    status = put(root.parent, "workspace-mode", b"stable")
+    live_checks = []
+    if fault == "late_edit":
+        publish = retry._publish
+        def edit_before_publish(*args, **kwargs):
+            (root / ".codd/runtime.state").write_bytes(b"updated by concurrent editor")
+            return publish(*args, **kwargs)
+        monkeypatch.setattr(retry, "_publish", edit_before_publish)
+
+    def write(copy, owners, *_):
+        for name in (TARGET, SIBLING):
+            (copy / name).write_bytes(b"candidate")
+        return [task.task_id for task in owners]
+
+    def check(at, settings):
+        assert [(at / name).read_bytes() for name in (TARGET, SIBLING)] == [b"candidate"] * 2
+        if at == root:
+            live_checks.append(at)
+        if fault == "outside":
+            return not (at.parent / status.name).exists()
+        if fault == "late_edit":
+            return (at / ".codd/runtime.state").read_bytes() == b"original\n"
+        if at == root:
+            if fault == "timeout":
+                raise subprocess.TimeoutExpired("checker", 1)
+            raise ValueError("check failed")
+        return True
+
+    before = tree(root)
+    assert not retry.try_owner_first(root, tasks, [TARGET, SIBLING], "repair", config,
+                                     reimplement=write, validate=check)
+    assert live_checks == [root]
+    if fault == "late_edit":
+        assert (root / ".codd/runtime.state").read_bytes() == b"updated by concurrent editor"
+        before[".codd/runtime.state"] = tree(root)[".codd/runtime.state"]
+    assert tree(root) == before
+
+
+def test_judge_and_live_checks_inherit_ordinary_environment(case, monkeypatch):
+    root = case[0]
+    monkeypatch.setenv("CODD_AI_USAGE_LOG", USAGE)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(root.parent))
+    monkeypatch.setenv("BUILD_WORKSPACE", str(root.parent))
+    original = dict(os.environ)
+    checks = []
+    def check(at):
+        checks.append((at, dict(os.environ)))
+        return True
+
+    accepted, _, _, _ = exercise(case, monkeypatch, validate=check)
+    assert accepted
+    assert len(checks) == 2 and checks[-1][0] == root
+    assert all(env == original for _, env in checks)
+
+
+@pytest.mark.parametrize("failure", ["write_error", "missing_row"])
+def test_failed_usage_append_prevents_adoption(case, monkeypatch, failure):
+    from codd import ai_usage
+
+    original = ai_usage._append
+    attempted = []
+    def fail_call_only(path, record):
+        if "outcome" in record:
+            attempted.append(record["outcome"])
+            if failure == "write_error":
+                raise OSError("usage log full")
+            return
+        original(path, record)
+
+    monkeypatch.setattr(ai_usage, "_append", fail_call_only)
+    accepted, delta, calls, checks = exercise(case, monkeypatch)
+    assert attempted == ["success"] and len(calls) == 1
+    assert not accepted and not checks and TARGET not in delta
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_live_checker_writes_are_rolled_back(case, monkeypatch, raises):
+    root = case[0]
+    def mutate_live(at):
+        if at == root:
+            (root / SIBLING).unlink()
+            (root / SIBLING).mkdir()
+            put(root, SIBLING + "/created", b"new")
+            (root / ".git/index").write_bytes(b"damaged")
+            (root / ".codd/runtime.state").chmod(0)
+            (root / SIBLING).chmod(0)
+            if raises:
+                raise RuntimeError("check interrupted")
+        return True
+
+    accepted, delta, _, checks = exercise(case, monkeypatch, validate=mutate_live)
+    assert not accepted and checks[-1] == root
+    assert delta == {USAGE}

@@ -86,6 +86,7 @@ bounded-retry loop — it does not re-implement tsc running or normalization.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -1897,6 +1898,7 @@ def run_implement_oracle_gate(
 
                 def validate(judge_root: Path, judge_config: Mapping[str, Any]) -> bool:
                     nonlocal judged
+                    judge_messages.clear()
                     certify_oracle_scope(judge_root, profile, spec)
                     checked = _run_oracle_command(judge_root, profile, spec, judge_config)
                     judged = _apply_orphan_artifact_gate(
@@ -1999,7 +2001,17 @@ def _owner_first_failure_path(result: ImplementOracleResult, root: Path) -> str 
         relative_paths.add(path.as_posix())
     if len(relative_paths) != 1:
         return None
-    return relative_paths.pop()
+    target = relative_paths.pop()
+    # A parsed file finding does not account for an independent, unlocated
+    # failure printed by the runner (e.g. a pytest sessionfinish hook).
+    from codd.ansi import strip_ansi
+
+    location = rf"(?:collecting\s+)?(?:{re.escape(target)}|{re.escape(str(root / target))})(?=[:\s]|$)"
+    for line in strip_ansi(result.raw_output).splitlines():
+        marker = re.match(r"^[\s_=]*(?:ERROR|FAILED|FAIL|FATAL|INTERNALERROR)\b[:\s]*", line, re.I)
+        if marker and not re.match(location, line[marker.end():]):
+            return None
+    return target
 
 
 def _apply_orphan_artifact_gate(

@@ -1,11 +1,14 @@
 """Greenfield oracle retry sequencing with a fixed implementation response."""
 
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
 
 import pytest
+
+from tests.greenfield.owner_first_baseline import doctor_and_check, main_reference
 
 from codd import implement_oracle, implementer
 from codd.deployment.providers.ai_command import SubprocessAiCommand
@@ -128,22 +131,54 @@ class OracleProject:
         self.pipeline._enforce_implement_oracle_gate(self.root, self.tasks, {})
 
 
-MAIN_EVENTS = [
-    ('certify', 'real'), ('oracle', 'real'),
-    ('real', 'docs/design/target.md'), ('real', 'docs/design/other.md'), ('oracle', 'real'),
-]
+def oracle_scenario(tmp_path, monkeypatch, scenario, *, enabled):
+    project = OracleProject(tmp_path, monkeypatch, enabled=enabled,
+                            max_attempts={"narrow": 4, "budget": 1}.get(scenario, 2),
+                            orphan_mode="enforce" if scenario == "orphan" else "warn")
+    if scenario == "multiple":
+        _write(project.root, 'tests/test_notes.txt', '>>> raise ValueError("doctest failed collection")\n')
+        _write(project.root, 'tests/conftest.py',
+               'def pytest_collect_file(file_path, parent):\n'
+               '    if file_path.suffix == ".txt":\n'
+               '        import pytest\n'
+               '        class BadCollector(pytest.File):\n'
+               '            def collect(self):\n'
+               '                raise ValueError("doctest failed collection")\n'
+               '        return BadCollector.from_parent(parent, path=file_path)\n')
+    elif scenario == "mixed":
+        _write(project.root, OTHER, 'from .missing import name\n')
+    elif scenario == "orphan":
+        _write(project.root, 'web/orphan.js', 'const value = 3;\n')
+    elif scenario == "narrow":
+        scope = OracleRerunScope(
+            rung='narrow', task_ids=('other',), allowed_paths=(OTHER,),
+        )
+        outcomes = iter(((scope, False), (None, True)))
+        monkeypatch.setattr(implement_oracle, '_derive_scope_for_rung', lambda **_kwargs: next(outcomes))
+    elif scenario == "global_error":
+        _write(project.root, "tests/conftest.py",
+               "from pathlib import Path\n"
+               "def pytest_sessionfinish(session, exitstatus):\n"
+               "    if 'VALUE = 2' not in Path('src/app/core.py').read_text():\n"
+               "        term = session.config.pluginmanager.get_plugin('terminalreporter')\n"
+               "        term.write_line('ERROR: global fixture schema is inconsistent')\n"
+               "        session.exitstatus = 1\n")
+    return project
 
 
-def test_oracle_owner_first_default_matches_main(tmp_path, monkeypatch):
-    project = OracleProject(tmp_path, monkeypatch)
+def _normalized_feedback(text, root):
+    return re.sub(r"\d+\.\d+s\b", "<duration>", text.replace(str(root), "<project>"))
+
+
+@pytest.mark.parametrize("enabled", [None, False])
+def test_oracle_owner_first_default_matches_main(tmp_path, monkeypatch, main_reference, enabled):
+    project = OracleProject(tmp_path, monkeypatch, enabled=enabled)
     project.run()
-
-    assert project.events == MAIN_EVENTS
-    assert [line for line in project.echo if 'implement-oracle:' in line] == [
-        "[greenfield] implement-oracle: python oracle scope certified: 3 source .py + 2 test .py observed under source_root='src' + test_root='tests'",
-        '[greenfield] implement-oracle: no parseable diagnostics → broad',
-        "[greenfield] implement-oracle: python composite oracle failed; 3 source file(s), 2 test file(s), 1 finding(s); re-running implementation with normalized feedback (attempt 1/1, scope=broad) — categories {'test_not_collected': 1}",
-        '[greenfield] implement-oracle: python composite oracle passed; 3 source file(s), 2 test file(s), 0 finding(s)',
+    baseline = main_reference["oracle"][str(enabled)]
+    assert project.events == baseline["events"]
+    assert project.echo == baseline["echo"]
+    assert [_normalized_feedback(f, project.root) for f in project.feedback] == [
+        _normalized_feedback(f, baseline["root"]) for f in baseline["feedback"]
     ]
     assert project.feedback[0] == project.feedback[1]
     assert (project.root / TARGET).read_text().endswith(FIXED)
@@ -160,7 +195,7 @@ def test_oracle_owner_first_accepts_one_file_with_original_manifest_semantics(tm
 
     assert project.events == [
         ('certify', 'real'), ('oracle', 'real'), ('copy', 'docs/design/target.md'),
-        ('certify', 'judge'), ('oracle', 'judge'),
+        ('certify', 'judge'), ('oracle', 'judge'), ('certify', 'real'), ('oracle', 'real'),
     ], project.echo
     assert project.results[-1].passed
     assert project.results[-1].orphan_artifacts == ['web/orphan.js']
@@ -170,15 +205,20 @@ def test_oracle_owner_first_accepts_one_file_with_original_manifest_semantics(tm
 
 
 @pytest.mark.parametrize('response', ['unfixed', 'exception', 'timeout', 'extra'])
-def test_oracle_owner_first_falls_back_with_original_feedback(tmp_path, monkeypatch, response):
+def test_oracle_owner_first_falls_back_with_original_feedback(tmp_path, monkeypatch, main_reference, response):
     project = OracleProject(tmp_path, monkeypatch, enabled=True, response=response)
     project.run()
 
     judge = [('certify', 'judge'), ('oracle', 'judge')] if response == 'unfixed' else []
+    baseline = main_reference["oracle"]["None"]
+    ordinary = baseline["events"]
     assert project.events == [
-        *MAIN_EVENTS[:2], ('copy', 'docs/design/target.md'), *judge, *MAIN_EVENTS[2:],
+        *ordinary[:2], ('copy', 'docs/design/target.md'), *judge, *ordinary[2:],
     ], project.echo
     assert project.feedback[1] == project.feedback[2]
+    assert [_normalized_feedback(f, project.root) for f in project.feedback[1:]] == [
+        _normalized_feedback(f, baseline["root"]) for f in baseline["feedback"]
+    ]
     assert 'pytest_collect_exit_2' in project.feedback[1]
     reruns = [line for line in project.echo if 're-running implementation' in line]
     assert len(reruns) == 1 and '(attempt 1/1, scope=broad)' in reruns[0]
@@ -188,63 +228,44 @@ def test_oracle_owner_first_falls_back_with_original_feedback(tmp_path, monkeypa
     assert (project.root / OTHER).read_text().endswith('VALUE = 2\n')
 
 
-def test_oracle_owner_first_refuses_multiple_collection_failures(tmp_path, monkeypatch):
-    project = OracleProject(tmp_path, monkeypatch, enabled=True)
-    _write(project.root, 'tests/test_notes.txt', '>>> raise ValueError("doctest failed collection")\n')
-    _write(project.root, 'tests/conftest.py',
-           'def pytest_collect_file(file_path, parent):\n'
-           '    if file_path.suffix == ".txt":\n'
-           '        import pytest\n'
-           '        class BadCollector(pytest.File):\n'
-           '            def collect(self):\n'
-           '                raise ValueError("doctest failed collection")\n'
-           '        return BadCollector.from_parent(parent, path=file_path)\n')
-
+def test_oracle_owner_first_refuses_multiple_collection_failures(tmp_path, monkeypatch, main_reference):
+    project = oracle_scenario(tmp_path, monkeypatch, "multiple", enabled=True)
     with pytest.raises(StageError):
         project.run()
-    assert project.events == MAIN_EVENTS
+    assert project.events == main_reference["oracle"]["multiple"]["events"]
 
 
-def test_oracle_owner_first_refuses_mixed_source_and_collection_failures(tmp_path, monkeypatch):
-    project = OracleProject(tmp_path, monkeypatch, enabled=True)
-    _write(project.root, OTHER, 'from .missing import name\n')
+def test_oracle_owner_first_refuses_mixed_source_and_collection_failures(tmp_path, monkeypatch, main_reference):
+    project = oracle_scenario(tmp_path, monkeypatch, "mixed", enabled=True)
     project.run()
-    assert project.events == MAIN_EVENTS
+    assert project.events == main_reference["oracle"]["mixed"]["events"]
 
 
-def test_oracle_owner_first_judge_enforces_unowned_artifacts(tmp_path, monkeypatch):
-    project = OracleProject(tmp_path, monkeypatch, enabled=True, orphan_mode='enforce')
-    _write(project.root, 'web/orphan.js', 'const value = 3;\n')
+def test_oracle_owner_first_judge_enforces_unowned_artifacts(tmp_path, monkeypatch, main_reference):
+    project = oracle_scenario(tmp_path, monkeypatch, "orphan", enabled=True)
     with pytest.raises(StageError, match='orphan-artifact gate'):
         project.run()
 
+    ordinary = main_reference["oracle"]["orphan"]["events"]
     assert project.events == [
-        *MAIN_EVENTS[:2], ('copy', 'docs/design/target.md'),
-        ('certify', 'judge'), ('oracle', 'judge'), *MAIN_EVENTS[2:],
+        *ordinary[:2], ('copy', 'docs/design/target.md'),
+        ('certify', 'judge'), ('oracle', 'judge'), *ordinary[2:],
     ], project.echo
 
 
-def test_oracle_owner_first_does_not_preempt_narrow_or_later_broad(tmp_path, monkeypatch):
-    project = OracleProject(tmp_path, monkeypatch, enabled=True, max_attempts=4)
-    scope = OracleRerunScope(
-        rung='narrow', task_ids=('other',), allowed_paths=(OTHER,),
-    )
-    outcomes = iter(((scope, False), (None, True)))
-    monkeypatch.setattr(implement_oracle, '_derive_scope_for_rung', lambda **_kwargs: next(outcomes))
+def test_oracle_owner_first_does_not_preempt_narrow_or_later_broad(tmp_path, monkeypatch, main_reference):
+    project = oracle_scenario(tmp_path, monkeypatch, "narrow", enabled=True)
     project.run()
 
-    assert project.events == [
-        *MAIN_EVENTS[:2], ('real', 'docs/design/other.md'), ('oracle', 'real'), *MAIN_EVENTS[2:],
-    ]
+    assert project.events == main_reference["oracle"]["narrow"]["events"]
 
 
-def test_oracle_owner_first_respects_single_attempt_budget(tmp_path, monkeypatch):
-    project = OracleProject(tmp_path, monkeypatch, enabled=True, max_attempts=1)
-
+def test_oracle_owner_first_respects_single_attempt_budget(tmp_path, monkeypatch, main_reference):
+    project = oracle_scenario(tmp_path, monkeypatch, "budget", enabled=True)
     with pytest.raises(StageError, match='test_not_collected'):
         project.run()
 
-    assert project.events == MAIN_EVENTS[:2]
+    assert project.events == main_reference["oracle"]["budget"]["events"]
     assert any('FAILED after 1 attempt(s)' in line for line in project.echo)
     assert (project.root / TARGET).read_text() == BROKEN
 
@@ -262,3 +283,15 @@ def test_oracle_refuses_two_findings_in_the_same_file(tmp_path):
         passed=False, executed=True, command='check', findings=findings,
     )
     assert implement_oracle._owner_first_failure_path(result, tmp_path) is None
+
+
+@pytest.mark.parametrize("enabled", [None, False])
+def test_doctor_and_check_preserve_open_implement_settings(tmp_path, main_reference, enabled):
+    assert doctor_and_check(tmp_path, enabled) == main_reference["doctor"][str(enabled)]
+
+
+def test_oracle_skips_owner_when_collection_also_reports_global_error(tmp_path, monkeypatch, main_reference):
+    project = oracle_scenario(tmp_path, monkeypatch, "global_error", enabled=True)
+    project.run()
+    assert project.events == main_reference["oracle"]["global_error"]["events"]
+    assert not any("owner-first retry: trying" in line for line in project.echo)
