@@ -14,7 +14,7 @@ import shutil
 import sys
 import time
 import warnings
-from typing import Any, Callable, Collection, Iterable, Iterator
+from typing import TYPE_CHECKING, Any, Callable, Collection, Iterable, Iterator
 
 import codd.generator as generator_module
 from codd.ai_invoke import FILE_BLOCK_RE, file_block_paths
@@ -39,6 +39,10 @@ from codd.requirement_appendix import (
 from codd.scanner import _extract_frontmatter, build_document_node_path_map
 from codd.verifiable_behavior_audit import VB_BLOCKER_SCOPE_GUIDANCE
 import unicodedata
+
+
+if TYPE_CHECKING:
+    from codd.greenfield.pipeline import ImplementTaskRef
 
 
 LOGGER = logging.getLogger(__name__)
@@ -2075,7 +2079,9 @@ def _implementation_steps_context(
         )
 
     existing_files = _ExistingStepFiles()
-    existing_content_lines = _render_existing_expected_output_content(explicit + implicit, project_root, existing_files)
+    existing_content_lines = _render_existing_expected_output_content(
+        explicit + implicit, project_root, existing_files, spec, config,
+    )
     if existing_content_lines:
         if lines:
             lines.append("")
@@ -2129,11 +2135,33 @@ def _cited_step_design_context(
     return blocks, incomplete
 
 
+def _step_output_owner_candidates(project_root: Path, spec: ImplementSpec) -> list[ImplementTaskRef]:
+    """Return the approved plan with the current task first, if it is unambiguous."""
+    from codd.greenfield.pipeline import _default_task_lister
+
+    if not spec.expected_outputs:
+        return []
+    try:
+        tasks = [task for task in _default_task_lister(project_root) if task.source == "derived"]
+    except Exception:  # noqa: BLE001 — unavailable ownership evidence leaves the full context intact.
+        return []
+    matches = [
+        task for task in tasks
+        if task.design_node == spec.design_node and set(task.expected_outputs) == set(spec.expected_outputs)
+    ]
+    if len(matches) != 1:
+        return []
+    current = matches[0]
+    # Ownership is order-stable on ties. Give the current task priority so a
+    # shared output stays visible even if a sibling was listed first.
+    return [current, *(task for task in tasks if task is not current)]
+
+
 def _render_existing_expected_output_content(
     steps: list[Any], project_root: Path, existing_files: _ExistingStepFiles,
+    spec: ImplementSpec, config: dict[str, Any],
 ) -> list[str]:
-    """Render current on-disk content for any step's ``expected_outputs`` path
-    that already exists.
+    """Render existing step outputs unless the approved plan assigns them to another task.
 
     A step whose ``expected_outputs`` names a file an earlier task already
     generated (e.g. "extend the shared test helper with these methods") is
@@ -2144,6 +2172,8 @@ def _render_existing_expected_output_content(
     shows the real content so the model edits from ground truth instead of
     guessing.
     """
+    from codd.greenfield.test_rederivation import owning_task_for_path
+
     relative_paths = _ordered_unique(
         [
             str(path).strip()
@@ -2153,13 +2183,17 @@ def _render_existing_expected_output_content(
         ]
     )
 
+    if not relative_paths:
+        return []
+
     resolved_root = project_root.resolve()
+    tasks = _step_output_owner_candidates(resolved_root, spec)
     blocks: list[str] = []
     for relative_path in relative_paths:
         path = project_root / relative_path
         candidate = path.resolve()
         try:
-            candidate.relative_to(resolved_root)
+            resolved_name = candidate.relative_to(resolved_root).as_posix()
         except ValueError:
             continue
         if not candidate.is_file():
@@ -2172,6 +2206,13 @@ def _render_existing_expected_output_content(
         except (OSError, UnicodeDecodeError):
             existing_files.has_unreadable_files = True
             continue
+        if tasks:
+            try:
+                owner = owning_task_for_path(resolved_root, resolved_name, tasks, config=config)
+            except Exception:  # noqa: BLE001 — keep showing the file if ownership cannot be resolved.
+                owner = None
+            if owner is not None and owner is not tasks[0]:
+                continue
         blocks.append(f"=== EXISTING FILE: {relative_path} ===\n{content.rstrip()}\n=== END EXISTING FILE ===")
         file_id = file_stat.st_dev, file_stat.st_ino
         snapshot = _ExistingStepFile(
