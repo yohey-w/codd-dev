@@ -14,12 +14,19 @@ import shutil
 import sys
 import time
 import warnings
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Collection, Iterable, Iterator
 
 import codd.generator as generator_module
 from codd.ai_usage import note_implement_routing, usage_session
+from codd.discovery import (
+    DEFAULT_IGNORED_DIRS,
+    matches_exclude_pattern,
+    scan_exclude_patterns,
+    should_skip_path,
+)
 from codd.generator import DependencyDocument, _load_project_config, _normalize_conventions
 from codd.languages import resolve_assertion_guidance, resolve_test_framework_guidance
+from codd.path_safety import resolve_project_path
 from codd.project_types import ProjectCapabilities
 from codd.scanner import _extract_frontmatter, build_document_node_path_map
 from codd.verifiable_behavior_audit import VB_BLOCKER_SCOPE_GUIDANCE
@@ -29,6 +36,12 @@ import unicodedata
 LOGGER = logging.getLogger(__name__)
 
 FILE_BLOCK_RE = re.compile(r"^=== FILE: (?P<path>.+?) ===\s*$", re.MULTILINE)
+_PROMPT_FILE_BLOCK_RE = re.compile(
+    r"^(?:--- BEGIN (?P<label>(?:EXISTING FILE|DEPENDENCY ARTIFACT) [^\n]+) ---"
+    r"|=== EXISTING FILE: [^\n]+ ===)\n"
+    r"(?P<body>.*?)\n(?(label)--- END (?P=label) ---|=== END EXISTING FILE ===)$",
+    re.MULTILINE | re.DOTALL,
+)
 # Repo-root infrastructure artifacts (implement.root_artifact_patterns):
 # AI-emitted paths matching these are written at the PROJECT ROOT instead of
 # being confined under (or dropped for being outside) the task output paths.
@@ -456,6 +469,10 @@ class _IncompleteExistingOutputError(ValueError):
     """A text replacement targeted an existing file without complete context."""
 
 
+class _UnseenExistingOutputError(RuntimeError):
+    """A one-shot response targets a file whose current content was not shown in full."""
+
+
 class NoUsableGeneratedFiles(RuntimeError):
     """One implement attempt yielded NO usable generated files (transiently).
 
@@ -829,6 +846,7 @@ class _DependencyArtifactCoverage:
     unmatched_plan_task: bool = False
     incomplete_near_dependencies: bool = False
     incomplete_distant_artifacts: int = 0
+    incomplete_step_sources: bool = False
 
 
 _IMPLEMENT_ROUTE_REASONS = {
@@ -836,10 +854,14 @@ _IMPLEMENT_ROUTE_REASONS = {
     "incomplete_existing_output": "An existing output file is not shown in full.",
     "existing_output_over_budget": "Existing outputs exceed the prompt limit even though their full content is shown.",
     "unmatched_plan_task": "The task could not be matched to an approved task in the derived plan.",
-    "incomplete_dependency_artifact": "An immediate dependency is unresolved or a near dependency artifact is not shown in full.",
+    "incomplete_dependency_artifact": (
+        "An immediate dependency is unresolved, or the prompt lacks the full content of a required "
+        "dependency artifact or cited design document."
+    ),
     "non_concrete_output": "The task does not name concrete output files.",
     "complete_context": "The prompt shows existing outputs and near dependency artifacts in full for the declared files.",
     "incomplete_output_rejected": "The existing-file replacement guard exhausted its retries.",
+    "unseen_existing_output": "The one-shot response would overwrite an existing file without its full current content in the prompt.",
     "no_usable_output": "The command exhausted its retries without usable output.",
     "syntax_gate": "Syntax or confusable-character validation exhausted its retries.",
 }
@@ -870,11 +892,13 @@ class Implementer:
         ai_command: str | None = None,
         use_derived_steps: bool | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        _from_verification: bool = False,
     ) -> None:
         self.project_root = Path(project_root).resolve()
         self.config = config if config is not None else _load_project_config(self.project_root)
         self.ai_command = ai_command
         self.use_derived_steps = _use_derived_steps_enabled(self.config, use_derived_steps)
+        self._from_verification = _from_verification
         # Injectable backoff between no-usable-output retries (tests stub it to
         # avoid real sleeps); mirrors ai_invoke._invoke_with_recovery's ``sleep``.
         self._sleep = sleep
@@ -915,7 +939,10 @@ class Implementer:
             design_context.conventions,
             document_conventions,
         )
+        full_document_paths: set[Path] = set()
         coding_principles = _load_coding_principles(self.project_root, self.config)
+        if coding_principles:
+            full_document_paths.add(self.project_root / self.config["coding_principles"])
         capabilities = generator_module._resolve_generation_capabilities(
             self.config, self.project_root
         )
@@ -925,7 +952,9 @@ class Implementer:
             else None
         )
         screen_flow_content = (
-            _load_screen_flow_for_implementation(self.project_root, capabilities=capabilities)
+            _load_screen_flow_for_implementation(
+                self.project_root, capabilities=capabilities, full_prompt_files=full_document_paths,
+            )
             if _spec_looks_ui_facing(spec, design_context.content)
             else None
         )
@@ -940,6 +969,7 @@ class Implementer:
                 spec=spec,
                 dependency_documents=all_documents,
                 project_root=self.project_root,
+                known_design_paths=node_paths.values(),
             )
             if self.use_derived_steps
             else None
@@ -974,10 +1004,11 @@ class Implementer:
             coverage: _ExistingOutputCoverage, dependency_coverage: _DependencyArtifactCoverage,
         ) -> tuple[str, bool]:
             nonlocal command, route, incomplete_distant_artifacts
-            if route is None:
+            fallback = route == "one_shot" and dependency_coverage.incomplete_step_sources
+            if route is None or fallback:
                 from codd.greenfield.pipeline import _declared_output_is_file_path
 
-                route = "standard"
+                route, command = "standard", resolved_ai_command
                 if self.ai_command is not None:
                     reason = "explicit_override"
                 elif coverage.incomplete_paths or (
@@ -988,7 +1019,9 @@ class Implementer:
                     reason = "existing_output_over_budget"
                 elif dependency_coverage.unmatched_plan_task:
                     reason = "unmatched_plan_task"
-                elif dependency_coverage.incomplete_near_dependencies:
+                elif (
+                    dependency_coverage.incomplete_near_dependencies or dependency_coverage.incomplete_step_sources
+                ):
                     reason = "incomplete_dependency_artifact"
                 elif not all(map(_declared_output_is_file_path, spec.expected_outputs or spec.output_paths)):
                     reason = "non_concrete_output"
@@ -996,7 +1029,9 @@ class Implementer:
                     command = one_shot_command
                     route, reason = "one_shot", "complete_context"
                 incomplete_distant_artifacts = dependency_coverage.incomplete_distant_artifacts
-                _log_implement_route(spec, route, reason, incomplete_distant_artifacts=incomplete_distant_artifacts)
+                _log_implement_route(
+                    spec, route, reason, incomplete_distant_artifacts=incomplete_distant_artifacts, fallback=fallback,
+                )
             return command, route == "one_shot"
 
         def generate(current_feedback: str | None, coverage: _ExistingOutputCoverage) -> list[Path]:
@@ -1010,6 +1045,7 @@ class Implementer:
                 screen_flow_content=screen_flow_content,
                 screen_flow_routes=screen_flow_routes,
                 impl_steps_context=impl_steps_context,
+                full_document_paths=full_document_paths,
                 capabilities=capabilities,
                 resolved_ai_command=resolved_ai_command,
                 language=language,
@@ -1035,10 +1071,10 @@ class Implementer:
                 try:
                     generated_files, existing_output_coverage = run_attempts()
                 except CoddCLIError as exc:
-                    # The retry loop chains its terminal errors from these
-                    # existing output rejections.
+                    # Terminal attempt errors are chained from output rejections.
                     fallback_reason = {
                         _IncompleteExistingOutputError: "incomplete_output_rejected",
+                        _UnseenExistingOutputError: "unseen_existing_output",
                         NoUsableGeneratedFiles: "no_usable_output",
                         ImplementSyntaxGateError: "syntax_gate",
                     }.get(type(exc.__cause__))
@@ -1099,6 +1135,10 @@ class Implementer:
             existing_output_coverage = _ExistingOutputCoverage()
             try:
                 return generate(current_feedback, existing_output_coverage), existing_output_coverage
+            except _UnseenExistingOutputError as exc:
+                from codd.cli import CoddCLIError
+
+                raise CoddCLIError(str(exc)) from exc
             except _IncompleteExistingOutputError as exc:
                 # Allow one correction for an unnecessary replacement without
                 # spending the general retry budget. Honor explicit retry opt-out.
@@ -1162,6 +1202,7 @@ class Implementer:
         screen_flow_content: str | None,
         screen_flow_routes: list[Any],
         impl_steps_context: _ImplementationStepsContext | None,
+        full_document_paths: set[Path],
         capabilities: ProjectCapabilities,
         resolved_ai_command: str,
         language: str,
@@ -1206,6 +1247,7 @@ class Implementer:
             screen_flow_content=screen_flow_content,
             screen_flow_routes=screen_flow_routes,
             impl_steps_context=impl_steps_context,
+            full_document_paths=full_document_paths,
             feedback=current_feedback,
             capabilities=capabilities,
             project_root=self.project_root,
@@ -1253,6 +1295,7 @@ class Implementer:
                 root_artifact_patterns=_root_artifact_patterns_from_config(self.config),
                 test_root=_test_root_from_config(self.config),
                 existing_output_coverage=existing_output_coverage,
+                one_shot_prompt=prompt if one_shot and not self._from_verification else None,
             )
         except (ImplementSyntaxGateError, _IncompleteExistingOutputError):
             # These write-time rejections have their own retry limits.
@@ -1286,6 +1329,7 @@ def implement_tasks(
     task: str | None = None,
     language: str | None = None,
     feedback: str | None = None,
+    _from_verification: bool = False,
     **_ignored: Any,
 ) -> list[ImplementationResult]:
     project_root = Path(project_root).resolve()
@@ -1318,6 +1362,7 @@ def implement_tasks(
         config=config,
         ai_command=ai_command,
         use_derived_steps=use_derived_steps,
+        _from_verification=_from_verification,
     ).run_implement(spec, feedback=feedback)
     return [result]
 
@@ -1936,6 +1981,41 @@ class _ExistingStepFiles:
 class _ImplementationStepsContext:
     text: str
     existing_files: _ExistingStepFiles
+    cited_design_paths: list[str]
+
+
+_STEP_DESIGN_FILES_PROMPT_LIMIT_CHARS = 128 * 1024
+
+
+def _find_step_design_citations(
+    sections: Iterable[str], known_design_paths: Iterable[Path], project_root: Path,
+) -> list[str]:
+    """Find registered paths and unambiguous standalone filenames in citation order."""
+    references: dict[str, str | None] = {}
+    for path in dict.fromkeys(known_design_paths):
+        if not path.name:
+            continue
+        literal = path.as_posix()
+        references[path.name] = None if path.name in references else literal
+        if "/" in literal:
+            references[literal] = literal
+        else:
+            references.update({f"./{literal}": literal, (project_root / path).as_posix(): literal})
+    if not references:
+        return []
+
+    alternatives: list[str] = []
+    for literal in sorted(references, key=len, reverse=True):
+        escaped = re.escape(literal)
+        if "/" not in literal or literal.startswith("./"):
+            # Reject suffixes of other filenames or paths, including ./ inside a folder path.
+            escaped = rf"(?<![\w./\\-]){escaped}(?![\w/\\-]|\.[\w.-])"
+        alternatives.append(escaped)
+    pattern = re.compile("|".join(alternatives))
+    return _ordered_unique([
+        path for section in sections for match in pattern.finditer(section)
+        if (path := references[match[0]]) is not None
+    ])
 
 
 def _implementation_steps_context(
@@ -1944,6 +2024,7 @@ def _implementation_steps_context(
     spec: ImplementSpec,
     dependency_documents: list[DependencyDocument],
     project_root: Path,
+    known_design_paths: Iterable[Path] = (),
 ) -> _ImplementationStepsContext | None:
     from codd.llm.impl_step_deriver import render_impl_steps_for_prompt
 
@@ -1978,7 +2059,52 @@ def _implementation_steps_context(
             lines.append("")
         lines.extend(existing_content_lines)
 
-    return _ImplementationStepsContext("\n".join(lines), existing_files)
+    cited_design_paths = _find_step_design_citations(
+        (step.source_design_section for step in explicit + implicit), known_design_paths, project_root,
+    )
+    return _ImplementationStepsContext("\n".join(lines), existing_files, cited_design_paths)
+
+
+def _cited_step_design_context(
+    project_root: Path, citations: list[str], full_prompt_files: set[Path],
+) -> tuple[list[str], bool]:
+    """Carry whole cited designs independently of the producer-artifact budget."""
+    project_root = project_root.resolve()
+    shown_paths = {path.resolve() for path in full_prompt_files}
+    shown_file_ids = {_existing_output_file_id(path) for path in shown_paths}
+    shown_file_ids.discard(None)
+    budget = _STEP_DESIGN_FILES_PROMPT_LIMIT_CHARS
+    blocks: list[str] = []
+    incomplete = False
+    for citation in citations:
+        path = resolve_project_path(project_root, citation)
+        if path is None or not path.is_file():
+            incomplete = True
+            continue
+        file_id = _existing_output_file_id(path)
+        if path in shown_paths or file_id in shown_file_ids:
+            continue
+        try:
+            with path.open(encoding="utf-8") as source:
+                content = source.read(budget + 1)
+        except (OSError, UnicodeDecodeError):
+            incomplete = True
+            continue
+        if len(content) > budget:
+            incomplete = True
+            continue
+        budget -= len(content)
+        shown_paths.add(path)
+        if file_id is not None:
+            shown_file_ids.add(file_id)
+        relative_path = path.relative_to(project_root).as_posix()
+        blocks.extend([
+            f"--- BEGIN STEP DESIGN SOURCE {relative_path} ---",
+            content.removesuffix("\n"),
+            f"--- END STEP DESIGN SOURCE {relative_path} ---",
+            "",
+        ])
+    return blocks, incomplete
 
 
 def _render_existing_expected_output_content(
@@ -2226,7 +2352,8 @@ def _load_design_md_content(
 
 
 def _load_screen_flow_for_implementation(
-    project_root: Path, capabilities: ProjectCapabilities | None = None
+    project_root: Path, capabilities: ProjectCapabilities | None = None,
+    *, full_prompt_files: set[Path] | None = None,
 ) -> str | None:
     # screen-flow.md / route definitions only apply to UI projects. A non-UI
     # project must never see a "UI file generation"/"route definitions" warning.
@@ -2248,7 +2375,10 @@ def _load_screen_flow_for_implementation(
                 stacklevel=3,
             )
         return None
-    return screen_flow_path.read_text(encoding="utf-8")
+    content = screen_flow_path.read_text(encoding="utf-8")
+    if full_prompt_files is not None and content and len(content) <= SCREEN_FLOW_PROMPT_LIMIT:
+        full_prompt_files.add(screen_flow_path)
+    return content
 
 
 def _is_ui_task(task_title: str, task_description: str = "") -> bool:
@@ -2597,6 +2727,7 @@ def _existing_output_files_context(
     *, limit: int = EXISTING_OUTPUT_FILES_PROMPT_LIMIT,
     coverage: _ExistingOutputCoverage | None = None,
     existing_step_files: _ExistingStepFiles | None = None,
+    full_prompt_files: set[Path] | None = None,
 ) -> str | None:
     """Current content of *expected_outputs* entries that already exist on disk.
 
@@ -2697,6 +2828,8 @@ def _existing_output_files_context(
         if status == "PARTIAL":
             excerpt += f"\n[PARTIAL EXISTING FILE: showing {len(excerpt)} of {len(content)} characters]"
         sections.append(f"--- BEGIN EXISTING FILE {text} ---\n{excerpt}\n--- END EXISTING FILE {text} ---")
+        if status == "FULL" and full_prompt_files is not None:
+            full_prompt_files.add(candidate)
     if coverage is not None:
         for path, file_id in coverage.incomplete_files.values():
             if path not in full_paths and file_id not in full_file_ids:
@@ -2731,7 +2864,7 @@ def _existing_output_files_context(
     return "\n\n".join(sections)
 
 
-#: Cap on total bytes of dependency-produced file content folded into an
+#: Default cap on total characters of dependency-produced file content folded into an
 #: implement prompt by ``_dependency_artifact_files_context`` (PART 2 of the
 #: cross-artifact symbol-coherence fix). Mirrors
 #: ``EXISTING_OUTPUT_FILES_PROMPT_LIMIT``: full producer content is the
@@ -2739,6 +2872,15 @@ def _existing_output_files_context(
 #: pathological producer must never blow the prompt budget — on overflow the
 #: block degrades to a name-level surface, then to paths only.
 DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT = 20000
+
+
+def _dependency_artifact_files_prompt_limit(config: dict[str, Any]) -> int:
+    section = config.get("implement")
+    if isinstance(section, dict):
+        value = section.get("dependency_artifact_files_prompt_limit")
+        if type(value) is int and value > 0:
+            return value
+    return DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT
 
 
 def _dependency_artifact_degraded_entry(project_root: Path, path_text: str) -> str:
@@ -2807,7 +2949,7 @@ def _tier1_signature_entry(project_root: Path, path_text: str) -> str:
 
 
 def _render_tier1_dependency_artifacts(
-    project_root: Path, tier1_paths: list[str], budget: int,
+    project_root: Path, files: list[tuple[str, str]], budget: int,
     *, incomplete: set[str] | None = None,
 ) -> tuple[list[str], int]:
     """Render Tier-1 (distance-1) producer files under the SIGNATURE-FLOOR invariant.
@@ -2820,7 +2962,6 @@ def _render_tier1_dependency_artifacts(
     than silently capped (Root B was precisely the silent distance-1 truncation).
     Returns ``(sections, bytes_used)``.
     """
-    files = list(_read_dependency_artifacts(project_root, tier1_paths, incomplete))
     if not files:
         return [], 0
 
@@ -2848,30 +2989,180 @@ def _render_tier1_dependency_artifacts(
     return sections, used
 
 
+def _read_directory_dependency_artifacts(
+    project_root: Path, directory: Path, exclude_patterns: Collection[str],
+    producer_ids: set[str], declared_output_owners: dict[Path, set[str]],
+) -> tuple[list[tuple[Path, str]], bool]:
+    """Read the directory producers' files and report coverage for each producer."""
+    directory = directory.absolute()
+    try:
+        root = project_root.resolve()
+        walk_root = resolve_project_path(root, directory)
+    except (OSError, RuntimeError):
+        return [], False
+    if walk_root is None:
+        return [], False
+    lexical_root = project_root.absolute()
+    display_root = walk_root
+    if directory.is_relative_to(lexical_root) and ".." not in directory.parts:
+        display_root = root / directory.relative_to(lexical_root)
+
+    def excluded(path: Path) -> bool:
+        return should_skip_path(path, root, exclude_patterns=exclude_patterns)
+
+    def has_hidden_dir(path: Path, base: Path) -> bool:
+        if not path.is_relative_to(base):
+            base = root
+        return any(part.startswith(".") for part in path.relative_to(base).parts)
+
+    def excluded_dir(path: Path) -> bool:
+        directory_pattern = f"{path.relative_to(root).as_posix()}/"
+        return (
+            path.name in DEFAULT_IGNORED_DIRS
+            or excluded(path)
+            or any(matches_exclude_pattern(directory_pattern, pattern) for pattern in exclude_patterns)
+        )
+
+    if walk_root != display_root and (excluded_dir(walk_root) or has_hidden_dir(walk_root, root)):
+        return [], False
+    if display_root != root and excluded_dir(display_root):
+        return [], False
+
+    files: list[tuple[Path, str]] = []
+    covered_producers: set[str] = set()
+    complete = True
+
+    def record_walk_error(_error: OSError) -> None:
+        nonlocal complete
+        complete = False
+
+    for current, dirs, names in os.walk(walk_root, onerror=record_walk_error):
+        current_path = Path(current)
+        display_path = display_root / current_path.relative_to(walk_root)
+        walk_dirs: list[str] = []
+        for name in dirs:
+            path = current_path / name
+            if name.startswith(".") or excluded_dir(path) or excluded_dir(display_path / name):
+                continue
+            try:
+                if not path.is_symlink():
+                    walk_dirs.append(name)
+                    continue
+                # A linked subtree is outside the walk. Ignore it only when its
+                # in-project target is excluded as well.
+                target = resolve_project_path(root, path)
+                if target is None or not (excluded_dir(target) or has_hidden_dir(target, walk_root)):
+                    complete = False
+            except (OSError, RuntimeError):
+                complete = False
+        dirs[:] = walk_dirs
+
+        for name in names:
+            path = current_path / name
+            display_file = display_path / name
+            if excluded(path) or excluded(display_file):
+                continue
+            owners = declared_output_owners.get(display_file) or declared_output_owners.get(path)
+            if owners and producer_ids.isdisjoint(owners):
+                continue
+            try:
+                resolved = resolve_project_path(root, path)
+                if resolved is None or not resolved.is_file():
+                    complete = False
+                    continue
+                if resolved != path and (excluded(resolved) or has_hidden_dir(resolved.parent, walk_root)):
+                    continue
+                owners = owners or declared_output_owners.get(resolved)
+                matching_producers = producer_ids & owners if owners else producer_ids
+                if not matching_producers:
+                    continue
+                files.append((display_file.relative_to(root), resolved.read_text(encoding="utf-8")))
+                covered_producers.update(matching_producers)
+            except (OSError, RuntimeError, UnicodeDecodeError):
+                complete = False
+
+    return sorted(files, key=lambda artifact: artifact[0].as_posix()), complete and covered_producers == producer_ids
+
+
+def _declared_dependency_output_owners(
+    project_root: Path, outputs_by_id: dict[str, list[str]],
+) -> dict[Path, set[str]]:
+    """Index explicit paths and their in-project targets for directory reads."""
+    owners: dict[Path, set[str]] = {}
+    for task_id, outputs in outputs_by_id.items():
+        for output in outputs:
+            if output.endswith("/"):
+                continue
+            path = project_root / output
+            owners.setdefault(path, set()).add(task_id)
+            try:
+                resolved = resolve_project_path(project_root, path)
+            except RuntimeError:  # A symlink loop has no resolved target.
+                continue
+            if resolved is not None:
+                owners.setdefault(resolved, set()).add(task_id)
+    return owners
+
+
 def _read_dependency_artifacts(
     project_root: Path, output_paths: list[str], incomplete: set[str] | None,
+    *, declared_producers: dict[str, set[str]] | None = None,
+    outputs_by_id: dict[str, list[str]] | None = None,
+    exclude_patterns: Collection[str] = (),
+    expanded_paths: set[Path] | None = None,
+    incomplete_directories: set[str] | None = None,
 ) -> Iterator[tuple[str, str]]:
     """Yield readable producer files and record omitted paths when requested."""
+    seen: set[Path] = set()
+    declared_producers = declared_producers or {}
+    declared_output_owners: dict[Path, set[str]] | None = None
+    if expanded_paths is None:
+        expanded_paths = set()
+    if incomplete_directories is None:
+        incomplete_directories = incomplete
     for raw in output_paths:
         text = str(raw).strip()
         if not text:
             continue
         candidate = project_root / text
+        producer_ids = declared_producers.get(text, set())
+        expects_directory = bool(producer_ids) and text.endswith("/")
         try:
             _ensure_inside_project(project_root, candidate, "dependency artifact")
-        except ValueError:
+            is_directory = bool(producer_ids) and candidate.is_dir()
+        except (ValueError, OSError, RuntimeError):
             pass
         else:
-            if candidate.is_file():
+            if is_directory:
+                # Resolve output ownership only when a directory needs expansion.
+                if declared_output_owners is None:
+                    declared_output_owners = _declared_dependency_output_owners(project_root, outputs_by_id or {})
+                files, complete = _read_directory_dependency_artifacts(
+                    project_root, candidate, exclude_patterns, producer_ids, declared_output_owners,
+                )
+                if not complete and incomplete_directories is not None:
+                    incomplete_directories.add(text)
+                for path, content in files:
+                    member = project_root / path
+                    expanded_paths.add(member)
+                    if member not in seen:
+                        seen.add(member)
+                        yield path.as_posix(), content
+                continue
+            if not expects_directory and candidate.is_file():
+                if candidate in expanded_paths:
+                    continue
                 try:
                     content = candidate.read_text(encoding="utf-8")
                 except (OSError, UnicodeDecodeError):
                     pass
                 else:
+                    seen.add(candidate)
                     yield text, content
                     continue
-        if incomplete is not None:
-            incomplete.add(text)
+        omissions = incomplete_directories if expects_directory else incomplete
+        if omissions is not None:
+            omissions.add(text)
 
 
 def _render_dependency_artifact_files(
@@ -2919,6 +3210,7 @@ def _dependency_artifact_files_context(
     dependency_documents: list[DependencyDocument],
     spec: "ImplementSpec | None" = None,
     *, coverage: _DependencyArtifactCoverage | None = None,
+    full_prompt_files: set[Path] | None = None,
 ) -> str | None:
     """On-disk content of the files this task's producers wrote — the binding
     import contract (PART 2).
@@ -3080,13 +3372,10 @@ def _dependency_artifact_files_context(
 
     # DISTANCE-1 declared producers: the outputs of THIS task's IMMEDIATE deps only
     # (the first BFS level), NOT the transitive closure.
-    tier1_declared: list[str] = []
-    t1_seen: set[str] = set()
+    tier1_declared: dict[str, set[str]] = {}
     for dep_id in direct_dependencies:
         for output in outputs_by_id.get(dep_id, ()):
-            if output not in t1_seen:
-                t1_seen.add(output)
-                tier1_declared.append(output)
+            tier1_declared.setdefault(output, set()).add(dep_id)
 
     # TIER-1 = observed ∪ declared distance-1 (observed = highest priority). Its
     # surface is ALWAYS carried at signature granularity or above (the Root B floor).
@@ -3110,13 +3399,31 @@ def _dependency_artifact_files_context(
     # overflow but NEVER below (with telemetry); Tier-2 gets the remaining budget
     # under the existing full→names→paths ladder. Byte-identical to the shipped
     # single-ladder path when Tier-1 is empty (edge-less/no-observed shape).
-    incomplete_tier1 = set() if coverage is not None else None
-    incomplete_tier2 = set() if coverage is not None else None
+    track_full_content = coverage is not None or full_prompt_files is not None
+    incomplete_tier1 = set() if track_full_content else None
+    incomplete_tier2 = set() if track_full_content else None
+    limit = _dependency_artifact_files_prompt_limit(config)
+    incomplete_directories: set[str] = set()
+    expanded_paths: set[Path] = set()
+    tier1_files = list(_read_dependency_artifacts(
+        project_root, tier1, incomplete_tier1, declared_producers=tier1_declared,
+        outputs_by_id=outputs_by_id,
+        exclude_patterns=scan_exclude_patterns(config), expanded_paths=expanded_paths,
+        incomplete_directories=incomplete_directories,
+    ))
     tier1_sections, tier1_used = _render_tier1_dependency_artifacts(
-        project_root, tier1, DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT, incomplete=incomplete_tier1,
+        project_root, tier1_files, limit, incomplete=incomplete_tier1,
     )
-    remaining = max(0, DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT - tier1_used)
+    if expanded_paths:
+        tier2 = [path for path in tier2 if project_root / path not in expanded_paths]
+    remaining = max(0, limit - tier1_used)
     tier2_block = _render_dependency_artifact_files(project_root, tier2, remaining, incomplete=incomplete_tier2)
+
+    if full_prompt_files is not None:
+        full_prompt_files.update(
+            project_root / path for path, _ in tier1_files if path not in (incomplete_tier1 or ())
+        )
+        full_prompt_files.update(project_root / path for path in tier2 if path not in (incomplete_tier2 or ()))
 
     if coverage is not None and spec is not None:
         # Existing-output coverage handles files this task owns. Leave the
@@ -3124,7 +3431,8 @@ def _dependency_artifact_files_context(
         own_outputs = {project_root / path for path in (*spec.expected_outputs, *spec.output_paths)}
         coverage.unmatched_plan_task = bool(plan_records) and not matched_task
         coverage.incomplete_near_dependencies = (
-            any(dep_id not in outputs_by_id for dep_id in direct_dependencies)
+            bool(incomplete_directories)
+            or any(dep_id not in outputs_by_id for dep_id in direct_dependencies)
             or any(project_root / path not in own_outputs for path in incomplete_tier1 or ())
         )
         coverage.incomplete_distant_artifacts = len(
@@ -3235,6 +3543,7 @@ def _build_implementation_prompt(
     screen_flow_content: str | None = None,
     screen_flow_routes: list[str] | None = None,
     impl_steps_context: _ImplementationStepsContext | None = None,
+    full_document_paths: set[Path] | None = None,
     feedback: str | None = None,
     capabilities: ProjectCapabilities | None = None,
     project_root: Path | None = None,
@@ -3562,6 +3871,15 @@ def _build_implementation_prompt(
             lines.append(f"{index}. Targets: {targets or '(no explicit targets)'}")
             lines.append(f"   Reason: {reason}")
 
+    full_prompt_files = None
+    if project_root is not None and impl_steps_context and impl_steps_context.cited_design_paths:
+        full_prompt_files = {
+            project_root / design_context.path,
+            *(project_root / document.path for document in dependency_documents),
+            *impl_steps_context.existing_files.by_path,
+            *(full_document_paths or ()),
+        }
+
     # Direct --output declarations are just as authoritative as task-derived
     # expected_outputs. The existing reader skips directories without scanning.
     declared_outputs = list(dict.fromkeys([*spec.expected_outputs, *spec.output_paths]))
@@ -3571,6 +3889,7 @@ def _build_implementation_prompt(
             limit=_existing_output_files_prompt_limit(config),
             coverage=existing_output_coverage,
             existing_step_files=impl_steps_context.existing_files if impl_steps_context else None,
+            full_prompt_files=full_prompt_files,
         )
         if project_root is not None and declared_outputs
         else None
@@ -3591,6 +3910,7 @@ def _build_implementation_prompt(
     dependency_artifact_context = (
         _dependency_artifact_files_context(
             project_root, config, dependency_documents, spec, coverage=dependency_coverage,
+            full_prompt_files=full_prompt_files,
         )
         if project_root is not None
         else None
@@ -3618,6 +3938,15 @@ def _build_implementation_prompt(
                 "",
             ]
         )
+
+    if project_root is not None and impl_steps_context and full_prompt_files is not None:
+        blocks, incomplete_sources = _cited_step_design_context(
+            project_root, impl_steps_context.cited_design_paths, full_prompt_files,
+        )
+        if blocks:
+            lines.extend(["", "Design documents cited by implementation steps:", *blocks])
+        if dependency_coverage is not None:
+            dependency_coverage.incomplete_step_sources = incomplete_sources
 
     if design_md_content:
         lines.extend(
@@ -3710,6 +4039,7 @@ def _write_generated_files(
     root_artifact_patterns: list[str] | tuple[str, ...] | None = None,
     test_root: str | None = None,
     existing_output_coverage: _ExistingOutputCoverage | None = None,
+    one_shot_prompt: str | None = None,
 ) -> list[Path]:
     file_payloads = _parse_file_payloads(
         raw_output,
@@ -3746,6 +4076,31 @@ def _write_generated_files(
                 "Increase implement.existing_output_files_prompt_limit or use an AI command "
                 "that can read and edit files directly on disk."
             )
+    output_prefixes = [PurePosixPath(item) for item in spec.output_paths]
+    if one_shot_prompt is not None:
+        # Check the destinations after parsing and rerooting, before any write.
+        rendered_bodies: set[str] | None = None
+        for relative_path, _ in file_payloads:
+            destination = project_root / relative_path
+            _ensure_inside_project(project_root, destination, "generated file")
+            if not destination.is_file():
+                continue
+            is_root_artifact = not any(
+                _path_starts_with(PurePosixPath(relative_path), prefix) for prefix in output_prefixes
+            )
+            if is_root_artifact and _root_artifact_overwrite_blocked(destination, relative_path):
+                continue
+            try:
+                current = destination.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                raise _UnseenExistingOutputError(repr(relative_path)) from exc
+            if current in one_shot_prompt:
+                continue
+            # Only file context blocks can supply the renderer's trimmed form.
+            if rendered_bodies is None:
+                rendered_bodies = {match["body"] for match in _PROMPT_FILE_BLOCK_RE.finditer(one_shot_prompt)}
+            if current.rstrip() not in rendered_bodies:
+                raise _UnseenExistingOutputError(repr(relative_path))
     if syntax_gate or confusable_check:
         # Validate EVERY payload before writing ANY file: a gate failure leaves
         # the working tree untouched (no partial half-broken task output).
@@ -3776,7 +4131,6 @@ def _write_generated_files(
         for relative_path, _ in file_payloads:
             _verify_existing_step_output(project_root, relative_path, step_snapshots, captured_paths)
     traceability_comment = _build_traceability_comment(design_context, spec, dependency_documents)
-    output_prefixes = [PurePosixPath(item) for item in spec.output_paths]
     generated_paths: list[Path] = []
     # ``StageError`` is lazy-imported (as in ``_create_output_paths``) to avoid the
     # greenfield<->implementer module-load cycle.
