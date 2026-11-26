@@ -309,6 +309,61 @@ def test_blocked_is_distinct_from_covered(tmp_path):
     assert statuses == {"VB-01": "covered", "VB-02": "blocked"}
 
 
+def test_vb_audit_reads_each_consecutive_blocker_marker(tmp_path):
+    _canonical_strategy(tmp_path, "| VB-01 | a |\n| VB-02 | b |\n| VB-03 | c |\n")
+    _write(
+        tmp_path / "tests" / "test_markers.py",
+        "# codd: blocked vb=VB-01 reason=reason-a\n"
+        "# codd: blocked vb=VB-02 reason=reason-b \t\n"
+        "# codd: blocked vb=VB-03 reason=reason-c \t detail text\n",
+    )
+
+    report = build_vb_coverage_audit(tmp_path)
+
+    assert {
+        row.vb_id: (row.coverage_status, row.blocker_reason, row.blocker_details)
+        for row in report.rows
+    } == {
+        "VB-01": ("blocked", "reason-a", ""),
+        "VB-02": ("blocked", "reason-b", ""),
+        "VB-03": ("blocked", "reason-c", "detail text"),
+    }
+
+
+def test_vb_audit_ignores_blocker_reason_on_next_line(tmp_path):
+    _canonical_strategy(tmp_path, "| VB-01 | a |\n| VB-02 | b |\n| VB-03 | c |\n")
+    _write(
+        tmp_path / "tests" / "test_markers.py",
+        "# codd: blocked vb=VB-01 reason=one\n"
+        "# codd: blocked vb=VB-02\n"
+        "reason = None  # codd: blocked vb=VB-03 reason=three\n",
+    )
+
+    report = build_vb_coverage_audit(tmp_path)
+
+    assert {
+        row.vb_id: (row.coverage_status, row.blocker_reason) for row in report.rows
+    } == {
+        "VB-01": ("blocked", "one"),
+        "VB-02": ("uncovered", ""),
+        "VB-03": ("blocked", "three"),
+    }
+
+
+def test_implement_gate_rejects_blocker_reason_on_next_line(tmp_path):
+    _canonical_strategy(tmp_path, "| VB-01 | a |\n| VB-02 | b |\n")
+    _write(
+        tmp_path / "tests" / "test_markers.py",
+        "# codd: blocked vb=VB-01 reason=one\n"
+        "# codd: blocked vb=VB-02\n"
+        "reason = None\n",
+    )
+
+    passed = run_implement_coverage_gate(tmp_path, design_node=None, output_paths=["tests/"])
+
+    assert passed is False
+
+
 @pytest.fixture
 def conflicting_vb_project(tmp_path):
     _canonical_strategy(

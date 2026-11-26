@@ -85,6 +85,9 @@ implement:
   # Maximum characters of existing declared output content in the prompt.
   # Set a positive limit to override the default of 20,000 characters.
   existing_output_files_prompt_limit: null
+  # Maximum characters of full dependency artifact content, with Tier 1 first.
+  # Set a positive integer to override the default of 20,000 characters.
+  dependency_artifact_files_prompt_limit: null
   # Write-time syntax sanity gate for `codd implement`: every AI-produced file
   # payload with a stdlib-checkable format (Python via ast, JSON, YAML, TOML)
   # must parse BEFORE anything is written to disk. A failure routes a clear
