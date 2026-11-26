@@ -70,6 +70,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from codd.ansi import strip_ansi
 from codd.implement_oracle_types import (
     EVIDENCE_ENVIRONMENT_BUILD,
     EVIDENCE_MISSING_SYMBOL,
@@ -187,6 +188,14 @@ class PythonToolRun:
     output: str = ""
     optional: bool = False
     skipped_reason: str = ""
+
+
+@dataclass
+class _OwnerFirstEvidence:
+    """Evidence for one opt-in run, independent of normalized tool findings."""
+
+    collection_errors: int | None = None
+    lint_clean: bool = True  # An unconfigured or unavailable optional lint does not run.
 
 
 @dataclass(frozen=True)
@@ -948,6 +957,38 @@ _PYTEST_SYNTAX_ERROR = re.compile(
 _PYTEST_NO_MODULE = re.compile(r"No module named pytest", re.IGNORECASE)
 
 
+def _single_collection_error(output: str, target: str, root: Path) -> bool:
+    """Account for the entire quiet collection report, including its node list."""
+    lines = [line for line in strip_ansi(output).splitlines() if line.strip()]
+    count = 0
+    while count < len(lines) and re.fullmatch(r"[^:]+::.+", lines[count]):
+        count += 1
+    if len(lines) < count + 7 or not re.fullmatch(r"=+ ERRORS =+", lines[count]):
+        return False
+    header = _PYTEST_ERROR_COLLECTING.fullmatch(lines[count + 1])
+    if not header or header["path"] != target:
+        return False
+    # Anything outside the collected nodes, the one traceback and the final
+    # summary is unaccounted for. Unknown reporter formats keep ordinary retry.
+    collected = "1 test" if count == 1 else f"{count or 'no'} tests"
+    frames = lines[count + 2:-5]
+    import_context = [
+        f"ImportError while importing test module '{root / target}'.",
+        "Hint: make sure your test modules/packages have valid Python names.",
+        "Traceback:",
+    ]
+    if frames[:3] == import_context:
+        frames = frames[3:]
+    return bool(
+        all(re.fullmatch(r"(?:    .*|.+:\d+: in .+)", line) for line in frames)
+        and re.fullmatch(r"E\s+.+", lines[-5])
+        and re.fullmatch(r"=+ short test summary info =+", lines[-4])
+        and re.fullmatch(rf"ERROR {re.escape(target)}(?: - .+)?", lines[-3])
+        and re.fullmatch(r"!+ Interrupted: 1 error during collection !+", lines[-2])
+        and re.fullmatch(rf"{collected} collected, 1 error in \d+(?:\.\d+)?s", lines[-1])
+    )
+
+
 def normalize_python_tool_output(
     output: str,
     *,
@@ -1083,6 +1124,7 @@ def _run_python_pytest_collect_layer(
     config: Mapping[str, Any] | None,
     *,
     profile: LanguageProfile | None = None,
+    evidence: _OwnerFirstEvidence | None = None,
 ) -> PythonToolRun:
     """``python -m pytest <test_root> --collect-only -q`` — test importability.
 
@@ -1153,6 +1195,8 @@ def _run_python_pytest_collect_layer(
             ),
         )
     if completed.returncode == 0:
+        if evidence is not None:
+            evidence.collection_errors = 0
         return PythonToolRun(name="pytest_collect", executed=True, output=output)
     index = _build_python_module_index(project_root, source_root, package_root, test_root, scope)
     findings, failed_paths = normalize_python_tool_output(
@@ -1180,6 +1224,9 @@ def _run_python_pytest_collect_layer(
                 ),
             )
         ]
+    if (evidence is not None and completed.returncode == 2 and len(failed_paths) == 1
+            and _single_collection_error(output, failed_paths[0], project_root)):
+        evidence.collection_errors = 1
     return PythonToolRun(
         name="pytest_collect",
         executed=True,
@@ -1204,6 +1251,7 @@ def _run_python_lint_layer(
     files: tuple[str, ...],
     *,
     required: bool,
+    evidence: _OwnerFirstEvidence | None = None,
 ) -> PythonToolRun:
     """Optional ruff/pyflakes undefined-name lint (F821 family).
 
@@ -1245,6 +1293,8 @@ def _run_python_lint_layer(
         command = f"{shlex.quote(_which('ruff'))} check --select F821,F822 --output-format concise {shlex.quote(target_root)}"
     else:
         command = f"{shlex.quote(sys.executable)} -m pyflakes {shlex.quote(target_root)}"
+    if evidence is not None:
+        evidence.lint_clean = False
     try:
         completed = subprocess.run(
             command, shell=True, cwd=project_root, capture_output=True, text=True, timeout=300
@@ -1270,6 +1320,8 @@ def _run_python_lint_layer(
             skipped_reason=f"name lint did not run ({exc}); optional, skipped",
         )
     output = "\n".join(p for p in (completed.stdout, completed.stderr) if p)
+    if evidence is not None:
+        evidence.lint_clean = completed.returncode == 0
     findings: list[ImplementOracleFinding] = []
     if completed.returncode != 0:
         for line in output.splitlines():
@@ -1659,16 +1711,21 @@ class PythonCompositeOracleAdapter:
                 project_root, source_root, package_root, test_root, scope, all_files
             ),
         ]
+        implement = config.get("implement") if isinstance(config, Mapping) else None
+        evidence = None
+        if isinstance(implement, Mapping) and implement.get("owner_first_retry_on_copy") is True:
+            evidence = _OwnerFirstEvidence()
+        observation = {"evidence": evidence} if evidence is not None else {}
         collection = _run_python_pytest_collect_layer(
             project_root, source_root, package_root, test_root, scope, config,
-            profile=ctx.language_profile,
+            profile=ctx.language_profile, **observation,
         )
         tools.append(collection)
         lint_mode = _python_lint_mode(config)
         if lint_mode != "off":
             tools.append(
                 _run_python_lint_layer(
-                    project_root, source_root, all_files, required=(lint_mode == "required")
+                    project_root, source_root, all_files, required=(lint_mode == "required"), **observation,
                 )
             )
 
@@ -1685,12 +1742,15 @@ class PythonCompositeOracleAdapter:
         findings.extend(_certify_python_tool_observability(scope, tools))
 
         passed = not findings
-        implement = config.get("implement") if isinstance(config, Mapping) else None
-        observed_failure_paths = (
-            collection.observed_files
-            if isinstance(implement, Mapping) and implement.get("owner_first_retry_on_copy") is True
-            else ()
-        )
+        observed_failure_paths = ()
+        if evidence is not None and evidence.lint_clean and len(findings) == 1:
+            if evidence.collection_errors == 1:
+                observed_failure_paths = collection.observed_files
+            elif evidence.collection_errors == 0 and findings[0].path and any(
+                findings[0] in tool.findings for tool in tools[:2]
+            ):
+                # Compile and first-party imports enumerate their findings in process.
+                observed_failure_paths = (findings[0].path,)
         return ImplementOracleResult(
             passed=passed,
             executed=True,

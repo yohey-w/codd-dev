@@ -19,7 +19,7 @@ from typing import Any, Callable, Iterable, Sequence
 
 from codd.ai_usage import active_usage_log, recorded_usage_session, resolve_usage_log, summarize_usage
 from codd.greenfield.pipeline import (
-    ImplementTaskRef, _declared_output_is_file_path, _is_glob_decl, _output_paths_for_task,
+    ImplementTaskRef, OwnerFirstRestoreError, _declared_output_is_file_path, _is_glob_decl, _output_paths_for_task,
     _task_declares_no_authored_artifact,
 )
 from codd.implementer import (
@@ -112,7 +112,7 @@ def _owners(root, tasks, targets, config, eligible, skip_all):
     return [task for task in tasks if task.task_id in selected]
 
 
-def _inventory(root: Path, *, original: Path | None = None, keep_contents: bool = False) -> _State:
+def _inventory(root: Path, *, original: Path | None = None) -> _State:
     """lstat, link text, mode and exact file contents, including ignored/hidden entries."""
     result = {Path("."): (root.lstat().st_mode, None)}
     size = 0
@@ -140,7 +140,7 @@ def _inventory(root: Path, *, original: Path | None = None, keep_contents: bool 
                     raise _Declined("P2: an input embeds the live project path")
                 if original is not None and b"/" in data and b"\0" not in data:
                     _rebase_text(os.fsdecode(data), original, None)
-                value = data if keep_contents else hashlib.sha256(data).digest()
+                value = hashlib.sha256(data).digest()
             else:
                 raise _Declined("P2/P4: special filesystem entry")
             result[rel] = mode, value
@@ -322,80 +322,37 @@ class _Replacement:
         os.utime(path, ns=(path.stat().st_atime_ns, self.mtime_ns))
 
 
-def _restore_check_writes(root: Path, before: _State) -> set[Path]:
-    """Undo writes by a live checker, including to ignored files and the Git index."""
-    changed = set()
-    existing = {}
-    pending = [root]
-    while pending:
-        path = pending.pop()
-        rel = path.relative_to(root)
-        mode = existing[rel] = path.lstat().st_mode
-        if stat.S_ISDIR(mode):
-            if (rel not in before or mode != before[rel][0]) and mode & 0o700 != 0o700:
-                path.chmod(stat.S_IMODE(mode) | 0o700)
-            pending.extend(path.iterdir())
-    # Remove newly created entries and type changes, children before parents.
-    for rel in sorted(existing, key=lambda p: len(p.parts), reverse=True):
-        mode = existing[rel]
-        if rel not in before or stat.S_IFMT(mode) != stat.S_IFMT(before[rel][0]):
-            path = root / rel
-            if stat.S_ISDIR(mode):
-                path.rmdir()
-            else:
-                path.unlink()
-            changed.add(rel)
-            del existing[rel]
-    # The inventory visits each directory before its descendants.
-    for rel, (mode, value) in before.items():
-        path = root / rel
-        current_mode = existing.get(rel)
-        if stat.S_ISLNK(mode):
-            if current_mode is None or os.readlink(path) != value:
-                path.unlink(missing_ok=True)
-                path.symlink_to(value)
-                changed.add(rel)
-            continue
-        if stat.S_ISDIR(mode):
-            if current_mode is None:
-                path.mkdir()
-            if current_mode != mode:
-                path.chmod(stat.S_IMODE(mode))
-                changed.add(rel)
-        elif (current_mode != mode or path.stat().st_size != len(value)
-              or path.read_bytes() != value):
-            path.unlink(missing_ok=True)
-            path.write_bytes(value)
-            path.chmod(stat.S_IMODE(mode))
-            changed.add(rel)
-    return changed
-
-
-def _confirm_live(root: Path, validate: Callable, config: dict) -> bool:
-    # Snapshot AFTER publication so that rollback touches only checker writes.
-    # The outer publication transaction owns rollback of the target files.
-    before = _inventory(root, keep_contents=True)
+def _restore_target(dest: Path, old: Path, original: _Replacement) -> None:
+    if dest.parent.resolve() != dest.parent:
+        raise OSError("target parent was redirected")
     try:
-        passed = validate(root, deepcopy(config))
-    finally:
-        changed = _restore_check_writes(root, before)
-    return passed and not (changed - _RECORDS)
+        os.replace(old, dest)
+    except OSError:
+        # Staging has normally been removed before the live check. Recreate
+        # the target itself, even if the checker removed or relinked it.
+        dest.unlink(missing_ok=True)
+        dest.write_bytes(original.data)
+        dest.chmod(stat.S_IMODE(original.mode))
+    mode = dest.lstat().st_mode
+    if (not stat.S_ISREG(mode) or (mode ^ original.mode) & 0o111
+            or dest.read_bytes() != original.data):
+        raise OSError("restored content or executable bits differ")
 
 
 def _publish(root: Path, candidates: dict[Path, _Replacement], confirm: Callable[[], bool]) -> None:
-    # Prepare every replacement and keep the old inodes until the final rename.
-    # Backups and replacements share the target filesystem even for mount points.
-    with ExitStack() as originals, ExitStack() as staging_dirs:
+    with ExitStack() as staging_dirs:
         files = []
         for rel, replacement in candidates.items():
             dest = root / rel
+            meta = dest.stat()
+            original = _Replacement(dest.read_bytes(), meta.st_mode, meta.st_mtime_ns)
             staging = Path(staging_dirs.enter_context(tempfile.TemporaryDirectory(dir=dest.parent)))
             new, old = staging / "new", staging / "old"
             new.touch()
             shutil.copystat(dest, new)
             replacement.write(new)
             os.link(dest, old)
-            files.append((dest, new, old, originals.enter_context(dest.open("rb"))))
+            files.append((dest, new, old, original))
         published = []
         try:
             for dest, new, old, original in files:
@@ -405,15 +362,14 @@ def _publish(root: Path, candidates: dict[Path, _Replacement], confirm: Callable
             if not confirm():
                 raise _Declined("P3: live recheck failed")
         except BaseException:
+            failures = []
             for dest, old, original in reversed(published):
                 try:
-                    os.replace(old, dest)
-                except OSError:
-                    # The backup name may already have been removed during
-                    # cleanup. Its open descriptor still holds the old inode.
-                    meta = os.fstat(original.fileno())
-                    dest.chmod(stat.S_IMODE(meta.st_mode))
-                    _Replacement(original.read(), meta.st_mode, meta.st_mtime_ns).write(dest)
+                    _restore_target(dest, old, original)
+                except Exception as exc:
+                    failures.append(f"{dest.relative_to(root)} ({exc})")
+            if failures:
+                raise OwnerFirstRestoreError("could not restore " + ", ".join(failures))
             for _, new, _, _ in files:
                 if new.parent.exists():
                     shutil.rmtree(new.parent)
@@ -507,7 +463,10 @@ def try_owner_first(
                 raise _Declined("P3: recheck changed project files")
             if _inventory(root) != live:
                 raise _Declined("P5: live project changed before publication")
-        _publish(root, candidates, lambda: _confirm_live(root, validate, config))
+        _publish(root, candidates, lambda: validate(root, deepcopy(config)))
+    except OwnerFirstRestoreError as exc:
+        echo(f"[greenfield] owner-first retry: {exc}; stopping")
+        raise
     except Exception as exc:
         reason = str(exc) if isinstance(exc, _Declined) else f"P5: {type(exc).__name__}"
         echo(f"[greenfield] owner-first retry: rejected ({reason})")

@@ -8,7 +8,8 @@ import sys
 
 import pytest
 
-from tests.greenfield.owner_first_baseline import doctor_and_check, main_reference
+from tests.greenfield import owner_first_baseline
+from tests.greenfield.owner_first_baseline import main_reference, measure_both
 
 from codd import implement_oracle, implementer
 from codd.deployment.providers.ai_command import SubprocessAiCommand
@@ -24,10 +25,17 @@ OTHER = 'src/app/core.py'
 
 @pytest.fixture(autouse=True)
 def guard_subprocesses(monkeypatch):
+    _guard_oracle_processes(monkeypatch, allow_comparison=True)
+
+
+def _guard_oracle_processes(monkeypatch, allow_comparison=False):
     original = subprocess.Popen.__init__
     collection = shlex.join([sys.executable, '-m', 'pytest', 'tests', '--collect-only', '-q', '-p', 'no:cacheprovider'])
 
     def checked_popen(process, args, *positional, **kwargs):
+        if (allow_comparison and not kwargs.get("shell") and isinstance(args, list)
+                and args[:4] == [sys.executable, "-I", "-B", owner_first_baseline.__file__]):
+            return original(process, args, *positional, **kwargs)
         if args != collection:
             assert not kwargs.get('shell') and isinstance(args, (tuple, list)), args
             assert args and Path(args[0]).name == 'git', args
@@ -131,8 +139,8 @@ class OracleProject:
         self.pipeline._enforce_implement_oracle_gate(self.root, self.tasks, {})
 
 
-def oracle_scenario(tmp_path, monkeypatch, scenario, *, enabled):
-    project = OracleProject(tmp_path, monkeypatch, enabled=enabled,
+def oracle_scenario(tmp_path, monkeypatch, scenario, *, enabled, response="fix"):
+    project = OracleProject(tmp_path, monkeypatch, enabled=enabled, response=response,
                             max_attempts={"narrow": 4, "budget": 1}.get(scenario, 2),
                             orphan_mode="enforce" if scenario == "orphan" else "warn")
     if scenario == "multiple":
@@ -166,19 +174,29 @@ def oracle_scenario(tmp_path, monkeypatch, scenario, *, enabled):
     return project
 
 
+def observe_oracle(root, patches, scenario="default", **options):
+    _guard_oracle_processes(patches)
+    project = oracle_scenario(root, patches, scenario, **options)
+    failures = {"multiple": None, "orphan": "orphan-artifact gate", "budget": "test_not_collected"}
+    if scenario in failures:
+        with pytest.raises(StageError, match=failures[scenario]):
+            project.run()
+    else:
+        project.run()
+    return {"root": str(project.root), "events": project.events, "echo": project.echo, "feedback": project.feedback}
+
+
 def _normalized_feedback(text, root):
     return re.sub(r"\d+\.\d+s\b", "<duration>", text.replace(str(root), "<project>"))
 
 
 @pytest.mark.parametrize("enabled", [None, False])
-def test_oracle_owner_first_default_matches_main(tmp_path, monkeypatch, main_reference, enabled):
-    project = OracleProject(tmp_path, monkeypatch, enabled=enabled)
-    project.run()
-    baseline = main_reference["oracle"][str(enabled)]
-    assert project.events == baseline["events"]
-    assert project.echo == baseline["echo"]
+def test_oracle_owner_first_default_matches_main(tmp_path, main_reference, enabled):
+    project, baseline = measure_both(tmp_path, main_reference, "oracle", enabled=enabled)
+    assert project.events == baseline.events
+    assert project.echo == baseline.echo
     assert [_normalized_feedback(f, project.root) for f in project.feedback] == [
-        _normalized_feedback(f, baseline["root"]) for f in baseline["feedback"]
+        _normalized_feedback(f, baseline.root) for f in baseline.feedback
     ]
     assert project.feedback[0] == project.feedback[1]
     assert (project.root / TARGET).read_text().endswith(FIXED)
@@ -205,19 +223,17 @@ def test_oracle_owner_first_accepts_one_file_with_original_manifest_semantics(tm
 
 
 @pytest.mark.parametrize('response', ['unfixed', 'exception', 'timeout', 'extra'])
-def test_oracle_owner_first_falls_back_with_original_feedback(tmp_path, monkeypatch, main_reference, response):
-    project = OracleProject(tmp_path, monkeypatch, enabled=True, response=response)
-    project.run()
+def test_oracle_owner_first_falls_back_with_original_feedback(tmp_path, main_reference, response):
+    project, baseline = measure_both(tmp_path, main_reference, "oracle", enabled=True, response=response)
 
     judge = [('certify', 'judge'), ('oracle', 'judge')] if response == 'unfixed' else []
-    baseline = main_reference["oracle"]["None"]
-    ordinary = baseline["events"]
+    ordinary = baseline.events
     assert project.events == [
         *ordinary[:2], ('copy', 'docs/design/target.md'), *judge, *ordinary[2:],
     ], project.echo
     assert project.feedback[1] == project.feedback[2]
     assert [_normalized_feedback(f, project.root) for f in project.feedback[1:]] == [
-        _normalized_feedback(f, baseline["root"]) for f in baseline["feedback"]
+        _normalized_feedback(f, baseline.root) for f in baseline.feedback
     ]
     assert 'pytest_collect_exit_2' in project.feedback[1]
     reruns = [line for line in project.echo if 're-running implementation' in line]
@@ -228,44 +244,36 @@ def test_oracle_owner_first_falls_back_with_original_feedback(tmp_path, monkeypa
     assert (project.root / OTHER).read_text().endswith('VALUE = 2\n')
 
 
-def test_oracle_owner_first_refuses_multiple_collection_failures(tmp_path, monkeypatch, main_reference):
-    project = oracle_scenario(tmp_path, monkeypatch, "multiple", enabled=True)
-    with pytest.raises(StageError):
-        project.run()
-    assert project.events == main_reference["oracle"]["multiple"]["events"]
+def test_oracle_owner_first_refuses_multiple_collection_failures(tmp_path, main_reference):
+    project, baseline = measure_both(tmp_path, main_reference, "oracle", scenario="multiple", enabled=True)
+    assert project.events == baseline.events
 
 
-def test_oracle_owner_first_refuses_mixed_source_and_collection_failures(tmp_path, monkeypatch, main_reference):
-    project = oracle_scenario(tmp_path, monkeypatch, "mixed", enabled=True)
-    project.run()
-    assert project.events == main_reference["oracle"]["mixed"]["events"]
+def test_oracle_owner_first_refuses_mixed_source_and_collection_failures(tmp_path, main_reference):
+    project, baseline = measure_both(tmp_path, main_reference, "oracle", scenario="mixed", enabled=True)
+    assert project.events == baseline.events
 
 
-def test_oracle_owner_first_judge_enforces_unowned_artifacts(tmp_path, monkeypatch, main_reference):
-    project = oracle_scenario(tmp_path, monkeypatch, "orphan", enabled=True)
-    with pytest.raises(StageError, match='orphan-artifact gate'):
-        project.run()
+def test_oracle_owner_first_judge_enforces_unowned_artifacts(tmp_path, main_reference):
+    project, baseline = measure_both(tmp_path, main_reference, "oracle", scenario="orphan", enabled=True)
 
-    ordinary = main_reference["oracle"]["orphan"]["events"]
+    ordinary = baseline.events
     assert project.events == [
         *ordinary[:2], ('copy', 'docs/design/target.md'),
         ('certify', 'judge'), ('oracle', 'judge'), *ordinary[2:],
     ], project.echo
 
 
-def test_oracle_owner_first_does_not_preempt_narrow_or_later_broad(tmp_path, monkeypatch, main_reference):
-    project = oracle_scenario(tmp_path, monkeypatch, "narrow", enabled=True)
-    project.run()
+def test_oracle_owner_first_does_not_preempt_narrow_or_later_broad(tmp_path, main_reference):
+    project, baseline = measure_both(tmp_path, main_reference, "oracle", scenario="narrow", enabled=True)
 
-    assert project.events == main_reference["oracle"]["narrow"]["events"]
+    assert project.events == baseline.events
 
 
-def test_oracle_owner_first_respects_single_attempt_budget(tmp_path, monkeypatch, main_reference):
-    project = oracle_scenario(tmp_path, monkeypatch, "budget", enabled=True)
-    with pytest.raises(StageError, match='test_not_collected'):
-        project.run()
+def test_oracle_owner_first_respects_single_attempt_budget(tmp_path, main_reference):
+    project, baseline = measure_both(tmp_path, main_reference, "oracle", scenario="budget", enabled=True)
 
-    assert project.events == main_reference["oracle"]["budget"]["events"]
+    assert project.events == baseline.events
     assert any('FAILED after 1 attempt(s)' in line for line in project.echo)
     assert (project.root / TARGET).read_text() == BROKEN
 
@@ -287,11 +295,68 @@ def test_oracle_refuses_two_findings_in_the_same_file(tmp_path):
 
 @pytest.mark.parametrize("enabled", [None, False])
 def test_doctor_and_check_preserve_open_implement_settings(tmp_path, main_reference, enabled):
-    assert doctor_and_check(tmp_path, enabled) == main_reference["doctor"][str(enabled)]
+    current, baseline = measure_both(tmp_path, main_reference, "doctor", enabled=enabled)
+    assert current.results == baseline.results
 
 
-def test_oracle_skips_owner_when_collection_also_reports_global_error(tmp_path, monkeypatch, main_reference):
-    project = oracle_scenario(tmp_path, monkeypatch, "global_error", enabled=True)
-    project.run()
-    assert project.events == main_reference["oracle"]["global_error"]["events"]
+def test_oracle_skips_owner_when_collection_also_reports_global_error(tmp_path, main_reference):
+    project, baseline = measure_both(tmp_path, main_reference, "oracle", scenario="global_error", enabled=True)
+    assert project.events == baseline.events
     assert not any("owner-first retry: trying" in line for line in project.echo)
+
+
+@pytest.mark.parametrize("report", ["UsageError", "unknown", "no_total", "two_errors", "extra_summary"])
+def test_oracle_requires_a_complete_single_collection_failure(tmp_path, monkeypatch, report):
+    project = OracleProject(tmp_path, monkeypatch, enabled=True)
+    run = subprocess.run
+
+    def collect(command, *args, **kwargs):
+        result = run(command, *args, **kwargs)
+        if isinstance(command, str) and "--collect-only" in command and result.returncode:
+            lines = result.stdout.rstrip().splitlines()
+            if report in {"UsageError", "unknown"}:
+                lines.insert(0, f"{report}: global fixture schema is inconsistent")
+            elif report == "no_total":
+                lines.pop()
+            elif report == "two_errors":
+                lines[-1] = lines[-1].replace("1 error", "2 errors")
+            else:
+                lines.extend(["", "another check did not finish"])
+            result.stdout = "\n".join(lines) + "\n"
+        return result
+
+    monkeypatch.setattr(subprocess, "run", collect)
+    project.run()
+    assert [where for where, _ in project.events if where in {"copy", "real"}] == ["real", "real"]
+    assert not any("owner-first retry: trying" in line for line in project.echo)
+
+
+def test_oracle_requires_failure_count_even_with_a_located_finding(tmp_path):
+    _write(tmp_path, TARGET, BROKEN)
+    result = implement_oracle.ImplementOracleResult(
+        passed=False, executed=True, command="check", failed_paths=[TARGET],
+        findings=[implement_oracle.ImplementOracleFinding(
+            implement_oracle.EVIDENCE_OTHER, "invalid", "Invalid input", TARGET,
+        )],
+    )
+    assert implement_oracle._owner_first_failure_path(result, tmp_path) is None
+
+
+@pytest.mark.parametrize("timeout", [False, True])
+def test_oracle_skips_a_counted_error_if_another_tool_failed_without_a_finding(tmp_path, monkeypatch, timeout):
+    from codd.languages.adapters import oracle_python
+
+    project = OracleProject(tmp_path, monkeypatch, enabled=True)
+    run = subprocess.run
+
+    def commands(command, *args, **kwargs):
+        if isinstance(command, str) and command.startswith("ruff check"):
+            if timeout:
+                raise subprocess.TimeoutExpired(command, 1)
+            return subprocess.CompletedProcess(command, 1, stdout="invalid configuration", stderr="")
+        return run(command, *args, **kwargs)
+
+    monkeypatch.setattr(oracle_python, "_which", lambda name: "ruff" if name == "ruff" else None)
+    monkeypatch.setattr(subprocess, "run", commands)
+    project.run()
+    assert [where for where, _ in project.events if where in {"copy", "real"}] == ["real", "real"]

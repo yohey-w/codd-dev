@@ -86,7 +86,6 @@ bounded-retry loop — it does not re-implement tsc running or normalization.
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -1953,7 +1952,7 @@ def _owner_first_failure_path(result: ImplementOracleResult, root: Path) -> str 
     """Require one project file across the oracle's evidence and command attribution."""
     from codd.repair.test_failure_attribution import attribute_command_failure
 
-    if len(result.findings) != 1 or len(result.diagnostics) > 1:
+    if len(result.observed_failure_paths) != 1 or len(result.findings) != 1 or len(result.diagnostics) > 1:
         return None
     finding = result.findings[0]
     if finding.category not in {
@@ -1985,7 +1984,7 @@ def _owner_first_failure_path(result: ImplementOracleResult, root: Path) -> str 
     if not finding.path:
         if finding.category != EVIDENCE_TEST_NOT_COLLECTED:
             return None
-        if attribution is None or not attribution.code_addressable or not result.observed_failure_paths:
+        if attribution is None or not attribution.code_addressable:
             return None
 
     root = root.resolve()
@@ -2001,17 +2000,7 @@ def _owner_first_failure_path(result: ImplementOracleResult, root: Path) -> str 
         relative_paths.add(path.as_posix())
     if len(relative_paths) != 1:
         return None
-    target = relative_paths.pop()
-    # A parsed file finding does not account for an independent, unlocated
-    # failure printed by the runner (e.g. a pytest sessionfinish hook).
-    from codd.ansi import strip_ansi
-
-    location = rf"(?:collecting\s+)?(?:{re.escape(target)}|{re.escape(str(root / target))})(?=[:\s]|$)"
-    for line in strip_ansi(result.raw_output).splitlines():
-        marker = re.match(r"^[\s_=]*(?:ERROR|FAILED|FAIL|FATAL|INTERNALERROR)\b[:\s]*", line, re.I)
-        if marker and not re.match(location, line[marker.end():]):
-            return None
-    return target
+    return relative_paths.pop()
 
 
 def _apply_orphan_artifact_gate(

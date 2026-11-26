@@ -9,7 +9,7 @@ from dataclasses import replace
 
 import pytest
 
-from tests.greenfield.owner_first_baseline import main_reference
+from tests.greenfield.owner_first_baseline import main_reference, measure_both
 
 from codd import ai_invoke, generator, implement_oracle, implement_oracle_scope, implementer
 from codd.greenfield import pipeline as pipeline_module
@@ -192,8 +192,14 @@ def _run_stage(tmp_path, monkeypatch, mode, *, enabled=True, rounds=2, failed=("
     return project, writes, oracle, log
 
 
-@pytest.mark.parametrize("enabled", [None, False])
-def test_auth_uses_main_round_when_option_is_unset(tmp_path, monkeypatch, main_reference, enabled):
+def observe_auth(root, patches, mode="clean", **options):
+    if "enabled" in options and options["enabled"] in (None, False):
+        _require_legacy_gate_signature(patches)
+    project, writes, checks, messages = _run_stage(root, patches, mode, **options)
+    return {"root": str(project), "writes": writes, "checks": checks, "messages": messages}
+
+
+def _require_legacy_gate_signature(monkeypatch):
     gate = pipeline_module._enforce_stage_coverage_gate
 
     def legacy_gate(project_root, *, coverage_gate, echo, rerun, rerun_oracle, scope_resolver, authenticity_profile):
@@ -208,21 +214,24 @@ def test_auth_uses_main_round_when_option_is_unset(tmp_path, monkeypatch, main_r
         )
 
     monkeypatch.setattr(pipeline_module, "_enforce_stage_coverage_gate", legacy_gate)
-    project, writes, oracle, log = _run_stage(tmp_path, monkeypatch, "clean", enabled=enabled)
-    baseline = main_reference["auth"][str(enabled)]
-    for actual, expected in ((writes, baseline["writes"]), (oracle, baseline["checks"]), (log, baseline["messages"])):
-        assert json.dumps(actual).replace(str(project), "<project>") == (
-            json.dumps(expected).replace(baseline["project"], "<project>")
+
+
+@pytest.mark.parametrize("enabled", [None, False])
+def test_auth_uses_main_round_when_option_is_unset(tmp_path, main_reference, enabled):
+    current, baseline = measure_both(tmp_path, main_reference, "auth", enabled=enabled)
+    for actual, expected in ((current.writes, baseline.writes), (current.checks, baseline.checks),
+                             (current.messages, baseline.messages)):
+        assert json.dumps(actual).replace(str(current.root), "<project>") == (
+            json.dumps(expected).replace(str(baseline.root), "<project>")
         )
-    assert any("authenticity rework round 1/2" in message for message in log)
+    assert any("authenticity rework round 1/2" in message for message in current.messages)
 
 
-def test_auth_zero_rounds_skips_trial(tmp_path, monkeypatch, main_reference):
-    project, writes, oracle, _ = _run_stage(tmp_path, monkeypatch, "clean", rounds=0)
-    baseline = main_reference["auth"]["zero"]
-    assert writes == baseline["writes"] == []
-    assert [Path(at) == project for at, *_ in oracle] == [
-        at == baseline["project"] for at, *_ in baseline["checks"]
+def test_auth_zero_rounds_skips_trial(tmp_path, main_reference):
+    current, baseline = measure_both(tmp_path, main_reference, "auth", rounds=0)
+    assert current.writes == baseline.writes == []
+    assert [Path(at) == current.root for at, *_ in current.checks] == [
+        Path(at) == baseline.root for at, *_ in baseline.checks
     ]
 
 
@@ -268,9 +277,10 @@ def test_auth_can_retry_when_native_oracle_is_skipped(tmp_path, monkeypatch, ora
         "orphan_observation", "scope_index", "not_executed",
     ],
 )
-def test_auth_rejection_preserves_feedback_and_normal_round(tmp_path, monkeypatch, mode, main_reference):
-    normal = main_reference["auth"]["None"]["writes"]
-    project, writes, oracle, log = _run_stage(tmp_path / "trial", monkeypatch, mode)
+def test_auth_rejection_preserves_feedback_and_normal_round(tmp_path, mode, main_reference):
+    current, baseline = measure_both(tmp_path, main_reference, "auth", mode=mode)
+    normal = baseline.writes
+    project, writes, oracle, log = current.root, current.writes, current.checks, current.messages
     assert [task_id for _, task_id, *_ in writes] == ["a", *(row[1] for row in normal)]
     assert Path(writes[0][0]) != project
     assert writes[1][2] is True
@@ -286,13 +296,35 @@ def test_auth_rejection_preserves_feedback_and_normal_round(tmp_path, monkeypatc
         assert Path(oracle[1][0]) not in {project, Path(writes[0][0])}
 
 
-def test_auth_skips_trial_if_every_test_materializer_is_an_owner(tmp_path, monkeypatch, main_reference):
-    project, writes, oracle, log = _run_stage(tmp_path, monkeypatch, "clean", failed=tuple("abc"))
-    baseline = main_reference["auth"]["all"]
-    assert [(Path(at) == project, task) for at, task, *_ in writes] == [
-        (at == baseline["project"], task) for at, task, *_ in baseline["writes"]
+def test_auth_skips_trial_if_every_test_materializer_is_an_owner(tmp_path, main_reference):
+    current, baseline = measure_both(tmp_path, main_reference, "auth", failed=tuple("abc"))
+    assert [(Path(at) == current.root, task) for at, task, *_ in current.writes] == [
+        (Path(at) == baseline.root, task) for at, task, *_ in baseline.writes
     ]
-    assert [Path(at) == project for at, *_ in oracle] == [
-        at == baseline["project"] for at, *_ in baseline["checks"]
+    assert [Path(at) == current.root for at, *_ in current.checks] == [
+        Path(at) == baseline.root for at, *_ in baseline.checks
     ]
-    assert any("authenticity rework round 1/2" in message for message in log)
+    assert any("authenticity rework round 1/2" in message for message in current.messages)
+
+
+def test_auth_stops_rework_if_one_target_cannot_be_restored(tmp_path, monkeypatch):
+    root = tmp_path / "sample"
+    gate = GreenfieldPipeline._enforce_implement_oracle_gate
+    write = Path.write_bytes
+
+    def reject_live(pipeline, at, *args, **kwargs):
+        if at == root and kwargs.get("allow_rework") is False:
+            def fail_one_restore(path, data):
+                if path == root / _test_path("b"):
+                    raise OSError("restore write failed")
+                return write(path, data)
+            monkeypatch.setattr(Path, "write_bytes", fail_one_restore)
+            raise StageError("live recheck failed")
+        return gate(pipeline, at, *args, **kwargs)
+
+    monkeypatch.setattr(GreenfieldPipeline, "_enforce_implement_oracle_gate", reject_live)
+    with pytest.raises(StageError, match="restore.*tests/test_b.py"):
+        _run_stage(tmp_path, monkeypatch, "clean", failed=("a", "b"))
+    assert (root / _test_path("a")).read_text() == _test_body("a") + ORPHAN_TEST
+    events = [json.loads(row) for row in (tmp_path / "events.jsonl").read_text().splitlines()]
+    assert all(Path(event[1]) != root for event in events if event[0] == "write")

@@ -497,20 +497,40 @@ def test_failed_usage_append_prevents_adoption(case, monkeypatch, failure):
     assert not accepted and not checks and TARGET not in delta
 
 @pytest.mark.parametrize("raises", [False, True])
-def test_live_checker_writes_are_rolled_back(case, monkeypatch, raises):
+def test_failed_live_check_restores_only_published_targets(case, monkeypatch, raises):
     root = case[0]
+    catalog = put(root, "data/edition/catalog", b"original edition")
+    catalog.parent.chmod(0o555)
+
     def mutate_live(at):
         if at == root:
-            (root / SIBLING).unlink()
-            (root / SIBLING).mkdir()
-            put(root, SIBLING + "/created", b"new")
-            (root / ".git/index").write_bytes(b"damaged")
-            (root / ".codd/runtime.state").chmod(0)
-            (root / SIBLING).chmod(0)
+            catalog.parent.rename(root / "data/previous")
+            (root / TARGET).chmod(0o600)
             if raises:
                 raise RuntimeError("check interrupted")
+            return False
         return True
 
     accepted, delta, _, checks = exercise(case, monkeypatch, validate=mutate_live)
     assert not accepted and checks[-1] == root
-    assert delta == {USAGE}
+    assert (root / TARGET).read_bytes() == b"broken\n"
+    assert stat.S_IMODE((root / TARGET).stat().st_mode) == 0o751
+    assert (root / "data/previous/catalog").read_bytes() == b"original edition"
+    assert delta == {USAGE, "data/edition", "data/edition/catalog", "data/previous", "data/previous/catalog"}
+
+
+def test_unverified_target_restoration_stops_the_retry(case, monkeypatch):
+    root = case[0]
+    target = root / TARGET
+    read = Path.read_bytes
+    log = []
+
+    def check(at):
+        if at == root:
+            monkeypatch.setattr(Path, "read_bytes", lambda path: b"wrong bytes" if path == target else read(path))
+            return False
+        return True
+
+    with pytest.raises(RuntimeError, match="restore.*src/unit.data"):
+        exercise(case, monkeypatch, validate=check, echo=log.append)
+    assert any("restore" in message and TARGET in message for message in log)

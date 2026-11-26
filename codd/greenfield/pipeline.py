@@ -165,6 +165,10 @@ class StageError(RuntimeError):
     """A pipeline stage (or one of its units) failed."""
 
 
+class OwnerFirstRestoreError(StageError):
+    """The original target could not be restored and verified before rework."""
+
+
 class _RequiredArtifactSelectionError(StageError):
     """Artifact selection failed before wave planning started."""
 
@@ -5481,6 +5485,8 @@ def _enforce_stage_coverage_gate(
     ):
         try:
             accepted = owner_first_retry(auth.violations, config, authenticity_profile)
+        except OwnerFirstRestoreError:
+            raise
         except Exception:  # Copy preparation and judgment failures fall back to ordinary rework.
             accepted = False
         if accepted:

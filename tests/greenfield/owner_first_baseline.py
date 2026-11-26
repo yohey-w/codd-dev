@@ -1,4 +1,4 @@
-"""Measure ordinary retry with the origin/main package in a fresh interpreter."""
+"""Run each side of a comparison in its own clean interpreter and project."""
 
 import io
 import json
@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tarfile
+from types import SimpleNamespace
 
 import pytest
 
@@ -34,44 +35,47 @@ def main_reference(tmp_path_factory):
     archive = subprocess.check_output(["git", "archive", "origin/main", "codd"], cwd=repo)
     with tarfile.open(fileobj=io.BytesIO(archive)) as source:
         source.extractall(work, filter="data")
-    subprocess.run([sys.executable, "-I", "-B", __file__, str(work), str(repo)], cwd=work, check=True)
-    data = json.loads((work / "observations.json").read_text())
-    for result in data["oracle"].values():
-        result["events"] = [tuple(event) for event in result["events"]]
-    return data
+    return work
 
 
-def _measure(work, repo):
-    sys.path[:0] = [str(work), str(repo)]
+def measure_both(tmp_path, main_reference, kind, **options):
+    repo = Path(__file__).resolve().parents[2]
+    results = []
+    for name, package in (("current", repo), ("main", main_reference)):
+        work = tmp_path / name
+        work.mkdir()
+        subprocess.run(
+            [sys.executable, "-I", "-B", __file__, str(package), str(repo), kind, json.dumps(options)],
+            cwd=work, check=True,
+        )
+        data = json.loads((work / "observation.json").read_text())
+        if "root" in data:
+            data["root"] = Path(data["root"])
+        if "events" in data:
+            data["events"] = [tuple(event) for event in data["events"]]
+        results.append(SimpleNamespace(**data))
+    return results
+
+
+def _measure(package, repo, kind, options):
+    sys.path[:0] = [str(package), str(repo)]
     import codd
-    from tests.greenfield.test_auth_owner_first import _run_stage
-    from tests.greenfield.test_oracle_owner_first import oracle_scenario, StageError
 
-    assert Path(codd.__file__).resolve().parent == work / "codd"
-    oracle_cases = {}
-    for name in ("None", "False", "multiple", "mixed", "orphan", "narrow", "budget", "global_error"):
-        with pytest.MonkeyPatch.context() as patches:
-            enabled = None if name == "None" else name != "False"
-            project = oracle_scenario(work / f"oracle-{name}", patches, name, enabled=enabled)
-            if name in {"multiple", "orphan", "budget"}:
-                with pytest.raises(StageError):
-                    project.run()
-            else:
-                project.run()
-            oracle_cases[name] = {"events": project.events, "echo": project.echo,
-                                  "feedback": project.feedback, "root": str(project.root)}
-    auth_cases = {}
-    for name, options in (("None", {"enabled": None}), ("False", {"enabled": False}),
-                          ("zero", {"rounds": 0}), ("all", {"failed": tuple("abc")})):
-        with pytest.MonkeyPatch.context() as patches:
-            root, writes, checks, messages = _run_stage(work / f"auth-{name}", patches, "clean", **options)
-            auth_cases[name] = {"project": str(root), "writes": writes, "checks": checks, "messages": messages}
-    data = {
-        "oracle": oracle_cases, "auth": auth_cases,
-        "doctor": {str(flag): doctor_and_check(work / f"doctor-{flag}", flag) for flag in (None, False)},
-    }
-    (work / "observations.json").write_text(json.dumps(data))
+    assert Path(codd.__file__).resolve().parent == package / "codd"
+    project = Path.cwd() / "case"
+    if kind == "doctor":
+        return {"results": doctor_and_check(project, **options)}
+    with pytest.MonkeyPatch.context() as patches:
+        if kind == "oracle":
+            from tests.greenfield.test_oracle_owner_first import observe_oracle
+            return observe_oracle(project, patches, **options)
+        if kind == "auth":
+            from tests.greenfield.test_auth_owner_first import observe_auth
+            return observe_auth(project, patches, **options)
+    raise ValueError(kind)
 
 
 if __name__ == "__main__":
-    _measure(*map(Path, sys.argv[1:]))
+    package, repo, kind, options = sys.argv[1:]
+    data = _measure(Path(package), Path(repo), kind, json.loads(options))
+    Path("observation.json").write_text(json.dumps(data))
