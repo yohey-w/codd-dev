@@ -7914,6 +7914,16 @@ def drift(path: str, output_format: str, e2e: bool, screen_flow: bool):
     help="Derive required design artifacts from requirement documents using AI",
 )
 @click.option(
+    "--account-decisions",
+    is_flag=True,
+    help="Account for every candidate and requirement, with validation (requires --derive)",
+)
+@click.option(
+    "--rederive",
+    is_flag=True,
+    help="Replace the saved artifact selection (requires --derive --account-decisions)",
+)
+@click.option(
     "--regenerate-wave-config",
     is_flag=True,
     help="Regenerate wave_config from required_artifacts (WARNING: overwrites existing wave_config)",
@@ -7940,6 +7950,8 @@ def plan(
     as_json: bool,
     initialize: bool,
     derive: bool,
+    account_decisions: bool,
+    rederive: bool,
     regenerate_wave_config: bool,
     force: bool,
     waves: bool,
@@ -7956,9 +7968,7 @@ def plan(
         return
 
     from codd.planner import (
-        backup_codd_yaml,
         build_plan,
-        generate_wave_config_from_artifacts,
         plan_init,
         plan_to_dict,
         render_plan_text,
@@ -7967,6 +7977,11 @@ def plan(
     as_json = _resolve_output_format(output_format, as_json, "codd plan") == "json"
     project_root = Path(path).resolve()
     codd_dir = _require_codd_dir(project_root)
+
+    if account_decisions and not derive:
+        raise click.BadOptionUsage("account_decisions", "--account-decisions requires --derive")
+    if rederive and not account_decisions:
+        raise click.BadOptionUsage("rederive", "--rederive requires --derive --account-decisions")
 
     if derive:
         if initialize:
@@ -7979,6 +7994,19 @@ def plan(
             raise click.BadOptionUsage("tasks", "--tasks cannot be used with --derive")
         if as_json and regenerate_wave_config:
             raise click.BadOptionUsage("format", "--format json cannot be used with --regenerate-wave-config")
+
+        if account_decisions:
+            try:
+                report = _plan_accounted_artifacts(project_root, ai_cmd, rederive)
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                raise click.ClickException(str(exc)) from exc
+            if as_json:
+                click.echo(json.dumps(report, ensure_ascii=False, indent=2))
+                return
+            _echo_accounted_artifacts(report)
+            if regenerate_wave_config:
+                _regenerate_artifact_wave_config(project_root, codd_dir, report["required_artifacts"])
+            return
 
         from codd import generator as generator_module
         from codd.required_artifacts_deriver import RequiredArtifactsDeriver
@@ -8019,20 +8047,7 @@ def plan(
         click.echo(f"Derived {len(artifacts)} required artifact(s).")
         click.echo(f"Updated {LEXICON_FILENAME}:required_artifacts")
         if regenerate_wave_config:
-            click.echo("Regenerating wave_config from required_artifacts...")
-            backup_path = backup_codd_yaml(project_root)
-            raw_config_path = codd_dir / "codd.yaml"
-            raw_config = yaml.safe_load(raw_config_path.read_text(encoding="utf-8")) or {}
-            if not isinstance(raw_config, dict):
-                click.echo("Error: codd.yaml must contain a YAML mapping")
-                raise SystemExit(1)
-            raw_config["wave_config"] = generate_wave_config_from_artifacts(artifacts)
-            raw_config_path.write_text(
-                yaml.safe_dump(raw_config, sort_keys=False, allow_unicode=True),
-                encoding="utf-8",
-            )
-            click.echo(f"Backed up codd.yaml to {backup_path.relative_to(project_root).as_posix()}")
-            click.echo(f"Updated {raw_config_path.relative_to(project_root).as_posix()}:wave_config")
+            _regenerate_artifact_wave_config(project_root, codd_dir, artifacts)
         for artifact in artifacts:
             click.echo(f"  - {artifact['id']}: {artifact['title']}")
         return
@@ -8387,23 +8402,168 @@ def _plan_design_doc_nodes(project_root: Path, design_docs: tuple[str, ...]):
     return nodes
 
 
+def _plan_accounted_artifacts(project_root: Path, ai_cmd: str | None, rederive: bool) -> dict[str, Any]:
+    from hashlib import sha256
+
+    from codd.ai_invoke import resolve_ai_command
+    from codd.lexicon import ProjectLexicon, validate_lexicon
+    from codd.path_safety import resolve_project_path
+    from codd.required_artifacts_deriver import RequiredArtifactsDeriver
+
+    def fingerprint(artifacts: list[dict[str, Any]]) -> str:
+        return sha256(yaml.safe_dump(artifacts, sort_keys=True).encode("utf-8")).hexdigest()
+
+    path = resolve_project_path(project_root, LEXICON_FILENAME)
+    if path is None:
+        raise ValueError(f"{LEXICON_FILENAME} resolves outside the project")
+    original = _optional_file_bytes(path)
+    data = _lexicon_data_from_yaml((original or b"").decode("utf-8"))
+    lexicon = ProjectLexicon(data)
+    if "required_artifacts" in data and not rederive:
+        validate_lexicon(data)
+        artifacts = lexicon.required_artifacts
+        report = {"required_artifacts": artifacts, "saved": True}
+        decisions = data.get("required_artifact_decisions")
+        if isinstance(decisions, dict) and decisions.get("artifacts_sha256") == fingerprint(artifacts):
+            report = {**decisions, **report}
+            del report["artifacts_sha256"]
+        return report
+
+    command = resolve_ai_command(load_project_config(project_root), ai_cmd, command_name="plan_derive")
+    deriver = RequiredArtifactsDeriver(
+        project_root, ai_command=command, warn=lambda message: click.echo(message, err=True),
+    )
+    report = deriver.derive_accounted(
+        _requirement_docs_from_lexicon_data(data), lexicon.coverage_decisions,
+    )
+    lexicon.set_required_artifacts(report["required_artifacts"])
+    output = lexicon.as_dict()
+    output["required_artifact_decisions"] = {
+        "artifacts_sha256": fingerprint(report["required_artifacts"]),
+        **{key: value for key, value in report.items() if key != "required_artifacts"},
+    }
+    validate_lexicon(output)
+    _write_accounted_lexicon(path, original, yaml.safe_dump(output, sort_keys=False, allow_unicode=True))
+    return {**report, "saved": False}
+
+
+def _optional_file_bytes(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _write_accounted_lexicon(path: Path, original: bytes | None, content: str) -> None:
+    """Write the selection and its evidence together, guarding concurrent derivations."""
+    from stat import S_IMODE
+    from tempfile import NamedTemporaryFile
+
+    with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+        temp_path = Path(handle.name)
+        try:
+            handle.write(content)
+            handle.close()
+            lock = path.with_name(f".{path.name}.derive.lock")
+            try:
+                lock.mkdir()
+            except FileExistsError as exc:
+                raise ValueError(f"Another derivation is writing {LEXICON_FILENAME}. Retry the command.") from exc
+            try:
+                if _optional_file_bytes(path) != original:
+                    raise ValueError(f"{LEXICON_FILENAME} changed during derivation. Retry the command.")
+                if original is not None:
+                    temp_path.chmod(S_IMODE(path.stat().st_mode))
+                temp_path.replace(path)
+            finally:
+                lock.rmdir()
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+
+def _echo_accounted_artifacts(report: dict[str, Any]) -> None:
+    def echo_item(item_id: str) -> None:
+        item = items[item_id]
+        span = f"{item['path']}:{item['start_line']}-{item['end_line']}"
+        text = "\n      ".join(item["text"].split("\n"))
+        click.echo(f"    {item_id} ({span}): {text}")
+
+    artifacts = report["required_artifacts"]
+    if report["saved"]:
+        click.echo(f"Using {len(artifacts)} saved artifact(s). Use --rederive to replace them.")
+    else:
+        click.echo(f"Derived {len(artifacts)} required artifact(s). Updated {LEXICON_FILENAME}.")
+
+    evidence = report.get("artifact_evidence", {})
+    items = {item["id"]: item for item in report.get("requirement_items", [])}
+    added = set(report.get("added_artifact_ids", []))
+    for header, entries in (
+        ("Required artifacts", [artifact for artifact in artifacts if artifact["id"] not in added]),
+        ("Added artifacts", [artifact for artifact in artifacts if artifact["id"] in added]),
+    ):
+        click.echo(f"{header}:")
+        if not entries:
+            click.echo("  (none)")
+        for artifact in entries:
+            click.echo(f"  - {artifact['id']}: {artifact['title']}")
+            if artifact.get("rationale"):
+                click.echo(f"    {artifact['rationale']}")
+            for item_id in evidence.get(artifact["id"], []):
+                echo_item(item_id)
+
+    if "artifact_evidence" not in report:
+        click.echo("No matching decision details are saved for this selection.")
+        return
+    click.echo("Omitted candidates:")
+    for artifact in report["omitted_artifacts"]:
+        click.echo(f"  - {artifact['id']}: {artifact['title']}")
+        click.echo(f"    {artifact['rationale']}")
+    if not report["omitted_artifacts"]:
+        click.echo("  (none)")
+    click.echo("Unassigned requirements:")
+    for decision in report["unassigned_requirements"]:
+        echo_item(decision["id"])
+        click.echo(f"    Reason: {decision['rationale']}")
+    if not report["unassigned_requirements"]:
+        click.echo("  (none)")
+
+
+def _regenerate_artifact_wave_config(
+    project_root: Path, codd_dir: Path, artifacts: list[dict[str, Any]],
+) -> None:
+    from codd.planner import backup_codd_yaml, generate_wave_config_from_artifacts
+
+    click.echo("Regenerating wave_config from required_artifacts...")
+    backup_path = backup_codd_yaml(project_root)
+    raw_config_path = codd_dir / "codd.yaml"
+    raw_config = yaml.safe_load(raw_config_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw_config, dict):
+        click.echo("Error: codd.yaml must contain a YAML mapping")
+        raise SystemExit(1)
+    raw_config["wave_config"] = generate_wave_config_from_artifacts(artifacts)
+    raw_config_path.write_text(
+        yaml.safe_dump(raw_config, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    click.echo(f"Backed up codd.yaml to {backup_path.relative_to(project_root).as_posix()}")
+    click.echo(f"Updated {raw_config_path.relative_to(project_root).as_posix()}:wave_config")
+
+
 def _load_lexicon_data_for_update(lexicon_path: Path) -> dict[str, Any]:
-    if not lexicon_path.exists():
-        return {
-            "node_vocabulary": [],
-            "naming_conventions": [],
-            "design_principles": [],
-            "coverage_decisions": [],
-            "required_artifacts": [],
-        }
-    data = yaml.safe_load(lexicon_path.read_text(encoding="utf-8")) or {}
+    text = lexicon_path.read_text(encoding="utf-8") if lexicon_path.exists() else ""
+    data = _lexicon_data_from_yaml(text)
+    data.setdefault("required_artifacts", [])
+    return data
+
+
+def _lexicon_data_from_yaml(text: str) -> dict[str, Any]:
+    data = yaml.safe_load(text) or {}
     if not isinstance(data, dict):
         raise ValueError(f"{LEXICON_FILENAME} must contain a YAML mapping")
     data.setdefault("node_vocabulary", [])
     data.setdefault("naming_conventions", [])
     data.setdefault("design_principles", [])
     data.setdefault("coverage_decisions", [])
-    data.setdefault("required_artifacts", [])
     return data
 
 
