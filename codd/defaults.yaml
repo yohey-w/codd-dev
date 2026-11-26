@@ -85,6 +85,9 @@ implement:
   # Maximum characters of existing declared output content in the prompt.
   # Set a positive limit to override the default of 20,000 characters.
   existing_output_files_prompt_limit: null
+  # Maximum characters of full dependency artifact content, with Tier 1 first.
+  # Set a positive integer to override the default of 20,000 characters.
+  dependency_artifact_files_prompt_limit: null
   # Write-time syntax sanity gate for `codd implement`: every AI-produced file
   # payload with a stdlib-checkable format (Python via ast, JSON, YAML, TOML)
   # must parse BEFORE anything is written to disk. A failure routes a clear
@@ -301,6 +304,10 @@ restore:
     # (non-repo projects degrade to no testimony automatically either way).
     enabled: true
 generate:
+  # New requirements-based plans enable this. Legacy plans can annotate their
+  # existing wave documents with `codd generate --reconcile-design <node-id>`.
+  # null leaves the setting unset; false preserves an explicit opt-out.
+  design_consistency: null
   body_retry:
     # `codd generate` re-asks the AI when a produced design-doc body fails
     # structural validation (missing required sections, malformed frontmatter).

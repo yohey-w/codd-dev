@@ -9,6 +9,7 @@ import yaml
 
 from codd.config import find_codd_dir
 from codd.discovery import matches_exclude_pattern, scan_exclude_patterns
+from codd.requirement_appendix import is_requirement_appendix
 from codd.scanner import _extract_frontmatter
 from codd.validator import run_validate
 
@@ -66,6 +67,8 @@ def run_pre_commit(project_root: Path) -> int:
         return 1
 
     for relative_path in staged_docs:
+        if is_requirement_appendix(project_root, relative_path.as_posix()):
+            continue
         if _extract_frontmatter(project_root / relative_path) is not None:
             continue
         print(f"ERROR: {relative_path} is missing CoDD YAML frontmatter")

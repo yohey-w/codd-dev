@@ -58,6 +58,11 @@ from typing import Any, Callable, Mapping
 from codd.ai_usage import git_usage_exclusion, note_failure, note_output, note_route, usage_session, usage_trial
 from codd.claude_cli import with_default_claude_permission_bypass
 from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
+from codd.requirement_appendix import (
+    PROVISIONAL_DECISIONS_PATH,
+    has_requirement_appendix_snapshot,
+    protect_requirement_appendix,
+)
 
 # Default AI command (moved from codd.generator; generator re-exports it).
 DEFAULT_AI_COMMAND = (
@@ -108,7 +113,12 @@ AiInvoke = Callable[[str], str]
 # stdout: one ``=== FILE: <path> ===`` header per generated file. Kept local
 # (not imported from ``codd.implementer``) to avoid a circular import — the
 # marker shape is a stable cross-module contract.
-_FILE_BLOCK_MARKER = re.compile(r"^=== FILE: .+? ===\s*$", re.MULTILINE)
+FILE_BLOCK_RE = re.compile(r"^=== FILE: (?P<path>.+?) ===\s*$", re.MULTILINE)
+
+
+def file_block_paths(output: str) -> list[Path]:
+    """Return the paths declared in the AI's file-block headers."""
+    return [Path(match["path"].strip()) for match in FILE_BLOCK_RE.finditer(output.strip())]
 
 
 def _stdout_carries_file_contract(stdout: str) -> bool:
@@ -120,7 +130,7 @@ def _stdout_carries_file_contract(stdout: str) -> bool:
     contract on stdout lets the file-writing-agent path stay CLI-agnostic
     instead of *requiring* on-disk writes.
     """
-    return bool(stdout and _FILE_BLOCK_MARKER.search(stdout))
+    return bool(stdout and FILE_BLOCK_RE.search(stdout))
 
 # Retry feedback hook: (previous_prompt, error, attempt_index) -> next prompt.
 RetryFeedback = Callable[[str, ValueError, int], str]
@@ -359,7 +369,11 @@ def invoke_file_writing_agent(
     call_timeout = resolve_ai_call_timeout() if timeout is None else timeout
 
     exclusions, relative_log = git_usage_exclusion(project_root)
-    project_paths = ["--", ".", *exclusions] if relative_log is not None else []
+    preserve_appendix = has_requirement_appendix_snapshot(project_root)
+    if preserve_appendix:
+        # Keep Git cleanup from obscuring a direct write to the appendix.
+        exclusions.append(f":(literal,exclude){PROVISIONAL_DECISIONS_PATH.as_posix()}")
+    project_paths = ["--", ".", *exclusions] if relative_log is not None or preserve_appendix else []
     checkout_paths = project_paths or ["--", "."]
     # Stage the repository-wide baseline even when cwd is a subdirectory.
     repo_paths = ["--", ":/", *exclusions] if exclusions else []
@@ -476,6 +490,10 @@ def invoke_file_writing_agent(
         if fp.is_file():
             fp.unlink()
     subprocess.run(["git", "reset", "--quiet"], cwd=cwd, capture_output=True)
+
+    if preserve_appendix:
+        # Capture replaces stdout with file blocks built from the working tree.
+        protect_requirement_appendix(project_root, file_block_paths(result.stdout))
 
     # Resolve against the restored baseline, as the writer will. An atomic
     # save can replace a symlink with a regular file during the agent's run.

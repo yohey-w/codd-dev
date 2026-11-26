@@ -18,6 +18,7 @@ from codd.frontmatter import as_list, read_frontmatter
 from codd.graph import CEG
 from codd.parsing import get_extractor
 from codd.path_safety import require_project_path, resolve_project_path
+from codd.requirement_appendix import is_requirement_appendix
 
 
 def run_scan(project_root: Path, codd_dir: Path):
@@ -123,7 +124,7 @@ def _scan_frontmatter(ceg: CEG, project_root: Path, doc_dir: Path) -> tuple[int,
                 _load_frontmatter(ceg, rel, codd_data)
                 count += 1
                 warnings.extend(_collect_document_warnings(rel, codd_data))
-            elif rel.startswith("docs/"):
+            elif rel.startswith("docs/") and not is_requirement_appendix(project_root, rel):
                 warnings.append(f"{rel}: missing CoDD YAML frontmatter")
     if count > 0:
         print(f"  Frontmatter: {count} documents in {doc_dir.relative_to(project_root)}")
