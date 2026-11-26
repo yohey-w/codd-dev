@@ -1,6 +1,7 @@
 """Tests for codd plan."""
 
 from copy import deepcopy
+from hashlib import sha256
 import json
 from pathlib import Path
 import subprocess
@@ -204,7 +205,7 @@ def test_plan_marks_only_first_wave_ready_when_no_outputs_exist(tmp_path):
     }
 
 
-def test_plan_init_prompt_mentions_detailed_design_wave(tmp_path, mock_plan_init_ai):
+def test_plan_init_prompt_assigns_owners_and_limits_extra_design_docs(tmp_path, mock_plan_init_ai):
     project = _setup_project(tmp_path, include_wave_config=False)
     _write_requirement(project)
 
@@ -212,7 +213,9 @@ def test_plan_init_prompt_mentions_detailed_design_wave(tmp_path, mock_plan_init
 
     prompt = mock_plan_init_ai[0]["input"]
     assert "docs/detailed_design/" in prompt
-    assert "Insert a dedicated detailed design wave" in prompt
+    assert "Module count alone does not justify another document" in prompt
+    assert "one owning design artifact" in prompt
+    assert "Set owns_operation_flow: true only" in prompt
     assert "Markdown + Mermaid" in prompt
     assert "shared domain ownership" in prompt
     assert "Operational Behavior Model before implementation planning" in prompt
@@ -476,6 +479,115 @@ def test_plan_command_init_generates_wave_config_from_requirement_docs(tmp_path,
     assert '"conventions": [{"targets": ["node:id"], "reason": "release-blocking constraint"}]' in mock_plan_init_ai[0]["input"]
     assert "req:project-requirements" in mock_plan_init_ai[0]["input"]
     assert "Initialized wave_config in codd/codd.yaml" in result.output
+
+
+@pytest.mark.parametrize("explicit_false", [True, False], ids=["disabled", "unset"])
+def test_plan_init_preserves_explicitly_disabled_design_consistency(
+    tmp_path, monkeypatch, explicit_false,
+):
+    project = _setup_project(tmp_path, include_wave_config=False)
+    _write_requirement(project)
+    # Keep the prompt independent of inferred lexicon timestamps.
+    (project / "project_lexicon.yaml").write_text(
+        "node_vocabulary: []\nnaming_conventions: []\ndesign_principles: []\n",
+        encoding="utf-8",
+    )
+    config_path = project / "codd" / "codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["generate"] = {"body_retry": {"max_retries": 1}}
+    if explicit_false:
+        config["generate"]["design_consistency"] = False
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    waves = deepcopy(WAVE_CONFIG)
+    if explicit_false:
+        # Even ownership metadata returned unsolicited must be ignored.
+        waves["1"][0].update(behavior_owners=["spec"], owns_operation_flow=True)
+    prompts = _seq_invoke(monkeypatch, [yaml.safe_dump(waves)] * 3)
+
+    result = CliRunner().invoke(main, ["plan", "--init", "--path", str(project)])
+
+    if explicit_false:
+        # Captured from the 3.46.0 planner at d943740 with the same project.
+        assert sha256(prompts[0].encode("utf-8")).hexdigest() == (
+            "06d494ef81246f29ddb91593472eb8b49e80316517470961ba2e0ee73738eaf8"
+        )
+    assert result.exit_code == 0, result.output
+    written = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert written["generate"] == {
+        "body_retry": {"max_retries": 1},
+        "design_consistency": not explicit_false,
+    }
+    if explicit_false:
+        assert len(prompts) == 1
+        assert "operation_flow owner" not in result.stderr
+        assert all(
+            {"behavior_owners", "owns_operation_flow"}.isdisjoint(entry)
+            for entries in written["wave_config"].values() for entry in entries
+        )
+
+
+@pytest.mark.parametrize("setting", [None, True], ids=["unset", "enabled"])
+def test_requirements_plan_prompt_uses_managed_wave_patterns(tmp_path, mock_plan_init_ai, setting):
+    project = _setup_project(tmp_path, include_wave_config=False)
+    _write_requirement(project)
+    config_path = project / "codd/codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["generate"] = {"design_consistency": setting}
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    planner_module.plan_init(project)
+
+    assert (
+        "- Wave 5, when needed: separate implementation decisions or independent verification "
+        "contracts that do not fit in an existing design section\n"
+        "- Wave 6: implementation planning and infrastructure/build setup after their required designs\n"
+    ) in mock_plan_init_ai[0]["input"]
+
+
+@pytest.mark.parametrize("declare_operations", [False, True], ids=["implicit", "formal"])
+def test_plan_init_warns_once_without_operation_flow_owner(
+    tmp_path, mock_plan_init_ai, declare_operations,
+):
+    project = _setup_project(tmp_path, include_wave_config=False)
+    _write_requirement(project)
+    if declare_operations:
+        path = project / "docs" / "requirements" / "requirements.md"
+        requirement = path.read_text(encoding="utf-8")
+        path.write_text(
+            requirement.replace(
+                "  type: requirement\n",
+                "  type: requirement\n"
+                "  operation_flow:\n"
+                "    operations:\n"
+                "      - id: archive-item\n"
+                "        action: Archive an item\n",
+            ),
+            encoding="utf-8",
+        )
+
+    result = CliRunner().invoke(main, ["plan", "--init", "--path", str(project)])
+
+    assert result.exit_code == 0, result.output
+    assert len(mock_plan_init_ai) == 1
+    assert "operation_flow" not in result.stdout
+    lines = result.stderr.splitlines()
+    assert len(lines) == 1
+    assert "warning" in lines[0].lower()
+    assert "operation_flow" in lines[0] and "owner" in lines[0]
+
+
+def test_plan_init_with_operation_flow_owner_does_not_warn(tmp_path, monkeypatch):
+    project = _setup_project(tmp_path, include_wave_config=False)
+    _write_requirement(project)
+    waves = deepcopy(WAVE_CONFIG)
+    waves["2"][0]["owns_operation_flow"] = True
+    prompts = _seq_invoke(monkeypatch, [yaml.safe_dump(waves)])
+
+    result = CliRunner().invoke(main, ["plan", "--init", "--path", str(project)])
+
+    assert result.exit_code == 0, result.output
+    assert len(prompts) == 1
+    assert result.stderr == ""
 
 
 def test_parse_wave_config_output_ignores_leading_summary_before_yaml():
@@ -876,6 +988,51 @@ def test_plan_init_brownfield_prompt_includes_extracted_content(tmp_path, mock_b
     assert "design:extract:tasks" in prompt
     assert "modules" in prompt
     assert '"modules": ["module_name_1", "module_name_2"]' in prompt
+
+
+@pytest.mark.parametrize(
+    ("project_type", "initial_digest", "retry_digest"),
+    [
+        (
+            None,
+            "68a30a27258193a7b32e29d8309375ac6efbfcf3611448f2ebbba4e9c130746d",
+            "b27a783397f2a654b6f6b4cff11002af53494ff0c5e8ba5d6abfb4336110ace1",
+        ),
+        (
+            "cli",
+            "65f98555fb9193c017fef462bffd33a87b718fb37f53c23ff6b6ef785950f17d",
+            "e118aadb807cbd5ab5a32844e3f01ab6b5981e1a3a7d1c739f2560c25bc7353d",
+        ),
+    ],
+    ids=["untyped", "cli"],
+)
+def test_plan_init_brownfield_preserves_3460_prompt_bytes(
+    tmp_path, monkeypatch, project_type, initial_digest, retry_digest,
+):
+    project = _setup_project(tmp_path, include_wave_config=False)
+    _write_extracted_docs(project)
+    # Use a hand-authored lexicon to keep the prompt independent of draft timestamps.
+    (project / "project_lexicon.yaml").write_text(
+        "node_vocabulary: []\nnaming_conventions: []\ndesign_principles: []\n",
+        encoding="utf-8",
+    )
+    if project_type:
+        config_path = project / "codd" / "codd.yaml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config["project"]["type"] = project_type
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    prompts = _seq_invoke(monkeypatch, ["", BROWNFIELD_AI_OUTPUT])
+    result = CliRunner().invoke(main, ["plan", "--init", "--path", str(project)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stderr == ""
+    initial_prompt, retry_prompt = prompts
+    # Captured from the 3.46.0 planner at d943740 with the same inputs.
+    assert {
+        "initial": sha256(initial_prompt.encode("utf-8")).hexdigest(),
+        "retry": sha256(retry_prompt.encode("utf-8")).hexdigest(),
+    } == {"initial": initial_digest, "retry": retry_digest}
 
 
 def test_plan_init_prefers_requirements_over_extracted(tmp_path, mock_plan_init_ai):

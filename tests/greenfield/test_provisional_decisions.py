@@ -49,7 +49,10 @@ WAVE = """\
     relation: implements
 """
 DESIGN = Path("docs/design/reservations.md")
-DESIGN_BODY = "# Reservations\n\n## Overview\n\nVisitors can reserve a desk.\n"
+DESIGN_BODY = (
+    "# Reservations\n\n## Overview\n\nVisitors can reserve a desk.\n\n"
+    "```codd-behavior\nowns: {}\ncases: []\n```\n"
+)
 SURFACE_CLASSIFICATION = '{"runnable_entrypoint":{"excluded":false,"evidence":""}}'
 APPENDIX = (
     "<!-- codd:provisional-decisions -->\n# Provisional decisions\n\n"
@@ -63,10 +66,10 @@ APPENDIX = (
 
 BASELINE = {
     "prompt:elicit": "01e238f4a4d36403d89a6d845de6de58462fff331bcc289abe4d94d89c5a70cf",
-    "prompt:plan": "e982a67e067fc109c3002e8d6129c634ea6973a714b8410353ab421b355ee237",
-    "prompt:generate": "71889bc9e23bfd69d1f5fdb953006953156f12e4deef883418f003cedb1a5d89",
-    "codd/codd.yaml": "6dd738eb313a1c7cca5e19b61a3dd1d8c1353becd90fe8c30d88663acf3146c7",
-    "docs/design/reservations.md": "afe146d3aad8d394207af9cf75664ed531601a2cb1fbbaeeb1e26496276bbb7c",
+    "prompt:plan": "08df635a92f757161394bd294359d5f2e3a3d0dd7311e46644090898eb8fb8af",
+    "prompt:generate": "7f637b901cf3b66acb7e363a081e5d5e60620cce2264f1599d8cf5bbae62acaa",
+    "codd/codd.yaml": "99e3da4b619e9935dfee0562ab50269b350f299d02c0d219a5ad04401efce8ae",
+    "docs/design/reservations.md": "4a34d0c2f68f023ee5f2a4268f84091ee1c93236266de63b9c78951a47ed57c4",
     "docs/requirements/requirements.md": "b6284e2bf91f8758d9ae6ff08182872a9a2a6914e635806fae13d43b11382000",
     "findings.md": "26d0c57c5df1ff50f0f2ba77e06f42a2540e6dec5618fe262697f9a138546a3c",
     "project_lexicon.yaml": "ae527d6e16250512a04164b3b1d4ed9c15a77934357ab66836556b1e58c13f68",
@@ -118,7 +121,7 @@ def quiet_later_stages(monkeypatch):
 
 @pytest.mark.parametrize("entrypoint", ["individual", "greenfield"])
 def test_without_opt_in_keeps_baseline(tmp_path, monkeypatch, quiet_later_stages, entrypoint):
-    # Match the prompts and file bytes observed on main at d943740.
+    # Match the prompts and file bytes observed on main at 99a8785.
     project = make_project(tmp_path / "reading-room")
     monkeypatch.setattr(apply, "_utc_timestamp", lambda: "2026-01-02T03:04:05Z")
     monkeypatch.setattr(pipeline, "_utc_now", lambda: "2026-01-02T03:04:05Z")

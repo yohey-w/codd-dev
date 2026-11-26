@@ -8,6 +8,7 @@ from codecs import BOM_UTF8
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from hashlib import sha256
 from pathlib import Path
 
 from codd.path_safety import resolve_project_path
@@ -86,8 +87,18 @@ def _read_managed_appendix_bytes(project_root: Path | str) -> bytes | None:
 def read_requirement_appendix(project_root: Path | str) -> str | None:
     """Read the managed requirements appendix."""
     content = _read_managed_appendix_bytes(project_root)
+    return _decode_appendix(project_root, content) if content is not None else None
+
+
+def read_requirement_appendix_snapshot(project_root: Path | str) -> tuple[str, str] | None:
+    """Read the appendix text and hash the same source bytes."""
+    content = _read_managed_appendix_bytes(project_root)
     if content is None:
         return None
+    return _decode_appendix(project_root, content), sha256(content).hexdigest()
+
+
+def _decode_appendix(project_root: Path | str, content: bytes) -> str:
     try:
         return content.decode("utf-8-sig")
     except UnicodeDecodeError as exc:

@@ -55,6 +55,7 @@ def test_plan_retries_when_ai_references_appendix_as_a_graph_document(tmp_path, 
     assert result.wave_config["1"][0] == {
         **yaml.safe_load(WAVE)["1"][0],
         "depends_on": [{"id": "req:reading-room", "relation": "implements", "semantic": "governance"}],
+        "owns_operation_flow": False,
     }
 
 

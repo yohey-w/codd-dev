@@ -60,10 +60,10 @@ def normalize_operation_flow(
         entry = deepcopy(dict(operation))
         ui_pattern = str(entry.get("ui_pattern") or "").strip()
         if ui_pattern and ui_pattern not in ALLOWED_UI_PATTERNS:
-            _warn_or_raise(
-                f"unknown operation_flow ui_pattern {ui_pattern!r} at {source}.operations[{index}]",
-                strict=strict,
-            )
+            message = f"unknown operation_flow ui_pattern {ui_pattern!r} at {source}.operations[{index}]"
+            if strict:
+                message += f" (expected one of {ui_pattern_choices()})"
+            _warn_or_raise(message, strict=strict)
         if "enables" in entry:
             # Validation only (warnings for malformed entries); the raw value
             # is kept on the entry so downstream consumers normalize lazily.
@@ -71,6 +71,10 @@ def normalize_operation_flow(
         kept.append(entry)
     normalized["operations"] = kept
     return normalized
+
+
+def ui_pattern_choices() -> str:
+    return ", ".join(sorted(ALLOWED_UI_PATTERNS))
 
 
 def operation_flow_operations(value: Any) -> list[dict[str, Any]]:
