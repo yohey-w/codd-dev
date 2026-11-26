@@ -279,6 +279,37 @@ def test_generator_canonical_vb_head_has_hygiene_rules():
     assert "public" in text.lower()
 
 
+@pytest.mark.parametrize(
+    ("node_id", "output", "canonical"),
+    [
+        ("test:test-strategy", "docs/test/test_strategy.md", True),
+        ("test:acceptance-criteria", "docs/test/acceptance_criteria.md", False),
+    ],
+    ids=["canonical", "reference"],
+)
+def test_generator_vb_guidance_for_external_evidence(node_id, output, canonical):
+    artifact = WaveArtifact(
+        wave=1, node_id=node_id, output=output, title="Test design", depends_on=[], conventions=[],
+    )
+    prompt = _build_generation_prompt(artifact, [], [])
+    rules = [line for line in prompt.splitlines() if "only evidence" in line]
+    if not canonical:
+        assert "MUST NOT declare VB ids" in prompt
+        assert "tests can observe" not in prompt
+        assert not rules
+        return
+
+    assert len(rules) == 1
+    rule = rules[0]
+    assert rule.startswith("- Declare a VB for every outcome")
+    for phrase in (
+        "tests can observe", "external system", "required environment",
+        "record produced outside", "project's test run", "out of the VB table",
+        "prose", "acceptance or release", "required record", "pass/fail",
+    ):
+        assert phrase in rule
+
+
 # ---------------------------------------------------------------------------
 # resolve_namespace_guidance — opt-in per-language namespace-coherence contract
 # (csharp4 exprcalc dogfood 2026-07-11: impl declared `namespace ExprCalc.Evaluator;
