@@ -28,6 +28,7 @@ class _Session:
     path: Path
     stage: str
     attempt: int = 0
+    unrecorded_calls: int = 0
 
 
 @dataclass
@@ -39,6 +40,12 @@ class _Trial:
 
 _session: ContextVar[_Session | None] = ContextVar("ai_usage_session", default=None)
 _trial: ContextVar[_Trial | None] = ContextVar("ai_usage_trial", default=None)
+
+
+def active_usage_log() -> Path | None:
+    """The outer invocation's destination, including when the project cwd changes."""
+    session = _session.get()
+    return session.path if session else None
 
 
 def resolve_usage_log(config: Mapping[str, Any] | None = None, project_root=None) -> Path | None:
@@ -98,6 +105,28 @@ def usage_session(config=None, project_root=None, stage: str | None = None):
             _session.reset(token)
 
 
+@contextmanager
+def recorded_usage_session(config, project_root):
+    """Require a persisted outcome for every AI attempt made inside a copy retry."""
+    with usage_session(config, project_root):
+        session = _session.get()
+        if session is None:
+            raise OSError("AI usage recorder unavailable")
+        first = session.attempt + 1
+        failures = session.unrecorded_calls
+        offset = session.path.stat().st_size if session.path.exists() else 0
+        yield
+        if session.unrecorded_calls != failures:
+            raise OSError("AI usage record could not be appended")
+        if session.attempt >= first:
+            with session.path.open("rb") as stream:
+                stream.seek(offset)
+                rows = map(json.loads, stream)
+                recorded = sorted(row["attempt"] for row in rows if "outcome" in row)
+            if recorded != list(range(first, session.attempt + 1)):
+                raise OSError("AI usage log is missing an attempt")
+
+
 def command_metadata(command, model: str | None = None) -> tuple[str, str]:
     """Allow only executable basename and the value of an explicit model option."""
     parts = shlex.split(command) if isinstance(command, str) else list(command or [])
@@ -152,6 +181,7 @@ def usage_trial(prompt: str, route: str, command, model: str | None = None, *, d
     try:
         started = time.monotonic()
     except Exception:
+        session.unrecorded_calls += 1
         yield
         return
     trial = _Trial(route)
@@ -185,7 +215,7 @@ def usage_trial(prompt: str, route: str, command, model: str | None = None, *, d
                     "outcome": trial.outcome, "attempt": attempt,
                 })
         except Exception:
-            pass
+            session.unrecorded_calls += 1
 
 
 def note_output(output: object) -> None:

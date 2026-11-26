@@ -165,6 +165,10 @@ class StageError(RuntimeError):
     """A pipeline stage (or one of its units) failed."""
 
 
+class OwnerFirstRestoreError(StageError):
+    """The original target could not be restored and verified before rework."""
+
+
 class _RequiredArtifactSelectionError(StageError):
     """Artifact selection failed before wave planning started."""
 
@@ -1734,7 +1738,8 @@ class GreenfieldPipeline:
         # stacks with no declared oracle (Python today): see
         # codd.project_types.ImplementOracleSpec. Runs BEFORE the VB coverage gate
         # — code that does not even typecheck cannot have meaningful VB coverage.
-        self._enforce_implement_oracle_gate(project_root, tasks, options)
+        owner_first_enabled = self._enforce_implement_oracle_gate(project_root, tasks, options)
+        oracle_recheck_args = {"allow_owner_first": False} if owner_first_enabled is True else {}
 
         # Project-wide VB coverage + marker-authenticity gate — ONCE, after every
         # implement task has run and all covering tests therefore exist. Per-task
@@ -1747,18 +1752,31 @@ class GreenfieldPipeline:
         # never edited by a VB rerun) with gap feedback, and the native oracle is
         # re-asserted after each test edit.
         coverage_on = bool(options.get("coverage_gate", True))
+        vb_owner_first_args: dict[str, Any] = {}
+        if coverage_on and owner_first_enabled is True:
+            def _retry_authenticity(
+                violations: Sequence[Any], config: dict[str, Any], profile: Any
+            ) -> bool:
+                return self._try_vb_authenticity_owner_first(
+                    project_root, tasks, options, violations, config, profile
+                )
+
+            vb_owner_first_args["owner_first_retry"] = _retry_authenticity
         _enforce_stage_coverage_gate(
             project_root,
             coverage_gate=coverage_on,
             echo=self.echo,
             rerun=self._make_vb_rerun_callback(project_root, tasks, options) if coverage_on else None,
             rerun_oracle=(
-                (lambda: self._enforce_implement_oracle_gate(project_root, tasks, options))
+                (lambda: self._enforce_implement_oracle_gate(
+                    project_root, tasks, options, **oracle_recheck_args,
+                ))
                 if coverage_on
                 else None
             ),
             scope_resolver=self._make_vb_scope_resolver(project_root, tasks) if coverage_on else None,
             authenticity_profile=self._resolve_layout_profile(project_root) if coverage_on else None,
+            **vb_owner_first_args,
         )
         record["detail"] = f"{len(tasks)} task(s) implemented"
 
@@ -2516,7 +2534,10 @@ class GreenfieldPipeline:
         project_root: Path,
         tasks: list[ImplementTaskRef],
         options: dict[str, Any],
-    ) -> None:
+        *,
+        allow_rework: bool = True,
+        allow_owner_first: bool = True,
+    ) -> bool | None:
         """Run the implement-time native-oracle gate (see _stage_implement).
 
         Ensures the stack topology is scaffolded first (idempotent — the same
@@ -2531,7 +2552,10 @@ class GreenfieldPipeline:
         legacy shape the VB coverage gate uses). A non-passing final result is a
         StageError; an uncertifiable oracle scope (OracleScopeError) propagates
         as a hard failure. The whole gate is a NO-OP for a stack without a
-        declared implement-time oracle.
+        declared implement-time oracle. Returns True when this entry enables
+        copy retry, including on stacks with no active native oracle, so the
+        caller can wire the authenticity retry and keep later native checks
+        on ordinary rework.
         """
         from codd.implement_oracle import (
             ORACLE_STATE_UNSUPPORTED_EXPLICIT,
@@ -2543,6 +2567,11 @@ class GreenfieldPipeline:
 
         config, language, source_dirs, test_dirs = self._layout_inputs(project_root)
         project_name = self._layout_project_name(project_root, config)
+        implement = config.get("implement")
+        owner_first_enabled = (
+            allow_rework and allow_owner_first and isinstance(implement, dict)
+            and implement.get("owner_first_retry_on_copy") is True
+        )
 
         # NO-OP short-circuit — but the 4-state model decides WHICH "no oracle" this is
         # (Contract Kernel oracle dispatch §9). ``_stage_implement`` is strict by
@@ -2586,7 +2615,7 @@ class GreenfieldPipeline:
                 config=config,
                 echo=self.echo,
             )
-            return
+            return True if owner_first_enabled else None
         # A supported oracle resolved (resolved is not None) — fall through to
         # certify + run it below.
 
@@ -2621,6 +2650,21 @@ class GreenfieldPipeline:
         def _rerun(feedback: str, scope: Any = None) -> None:
             self._rerun_tasks_with_feedback(project_root, tasks, feedback, options, scope=scope)
 
+        oracle_gate_args: dict[str, Any] = {} if allow_rework else {"strict_observation": True}
+        if owner_first_enabled:
+            from codd.greenfield.owner_first_retry import try_owner_first
+
+            def _try_owner_first(
+                path: str, feedback: str, validate: Callable[[Path, Mapping[str, Any]], bool],
+            ) -> bool:
+                return try_owner_first(
+                    project_root, tasks, [path], feedback, config,
+                    reimplement=self._reimplement_tasks, validate=validate, echo=self.echo,
+                    ai_command=self.ai_command,
+                )
+
+            oracle_gate_args["owner_first"] = _try_owner_first
+
         try:
             result = run_implement_oracle_gate(
                 project_root,
@@ -2629,10 +2673,11 @@ class GreenfieldPipeline:
                 source_dirs=source_dirs,
                 test_dirs=test_dirs,
                 config=config,
-                rerun=_rerun,
+                rerun=_rerun if allow_rework else None,
                 echo=self.echo,
                 scope_index=scope_index,
                 manifest_paths=manifest_paths,
+                **oracle_gate_args,
             )
         except OracleScopeError as exc:
             raise StageError(str(exc)) from exc
@@ -2645,6 +2690,7 @@ class GreenfieldPipeline:
                 f"symbols/modules they import{paths}. Evidence categories: "
                 f"{result.category_counts()}. {result.detail}"
             )
+        return True if owner_first_enabled else None
 
     def _resolve_oracle_config_output_paths(
         self,
@@ -3110,6 +3156,77 @@ class GreenfieldPipeline:
                 )
 
         return _resolve
+
+    def _try_vb_authenticity_owner_first(
+        self,
+        project_root: Path,
+        tasks: list[ImplementTaskRef],
+        options: dict[str, Any],
+        violations: Sequence[Any],
+        config: dict[str, Any],
+        authenticity_profile: Any,
+    ) -> bool:
+        """Try the violation owners once, then judge the replacements project-wide."""
+        from codd.greenfield.owner_first_retry import try_owner_first
+        from codd.vb_marker_authenticity import build_authenticity_report
+        from codd.vb_rerun_scope import derive_vb_rerun_scope
+        from codd.verifiable_behavior_audit import (
+            _normalize_vb_id,
+            build_vb_coverage_audit,
+            collect_declared_vb_ids,
+            render_vb_contract,
+        )
+
+        scope = derive_vb_rerun_scope([], tasks, config=config, path_resolver=_output_paths_for_task)
+        scoped_ids = set(scope.task_ids)
+        eligible = [
+            task for task in tasks
+            if (not scope.allowed_paths or task.task_id in scoped_ids)
+            and not _task_declares_no_authored_artifact(task, config)
+        ]
+        if len(eligible) < 2:
+            return False
+
+        declarations = collect_declared_vb_ids(project_root, config=config)
+        baseline_ids = frozenset(_normalize_vb_id(item.vb_id) for item in declarations)
+        feedback = _build_authenticity_rework_feedback(
+            violations,
+            build_vb_coverage_audit(project_root, config=config).uncovered_rows,
+            contract=render_vb_contract(declarations),
+        )
+
+        def validate(judge_root: Path, copied_config: dict[str, Any]) -> bool:
+            self._enforce_implement_oracle_gate(judge_root, tasks, options, allow_rework=False)
+            judge_ids = frozenset(
+                _normalize_vb_id(item.vb_id)
+                for item in collect_declared_vb_ids(judge_root, config=copied_config)
+            )
+            if judge_ids != baseline_ids:
+                return False
+            profile = None
+            if authenticity_profile is not None:
+                profile = self._resolve_layout_profile(judge_root)
+                if profile is None:
+                    return False
+            auth = build_authenticity_report(
+                judge_root, config=copied_config, profile=profile, strict_observability=True
+            )
+            uncovered = build_vb_coverage_audit(judge_root, config=copied_config).uncovered_rows
+            return auth.passed and not uncovered
+
+        return try_owner_first(
+            project_root,
+            tasks,
+            [violation.path for violation in violations],
+            feedback,
+            config,
+            reimplement=self._reimplement_tasks,
+            validate=validate,
+            eligible_tasks=eligible,
+            skip_all_eligible=True,
+            echo=self.echo,
+            ai_command=self.ai_command,
+        )
 
     def _resolve_layout_profile(self, project_root: Path) -> Any:
         """Resolve the active :class:`~codd.project_types.LayoutProfile` (or None).
@@ -5162,6 +5279,7 @@ def _enforce_stage_coverage_gate(
     rerun_oracle: Callable[[], None] | None = None,
     scope_resolver: Callable[[list[str]], Any] | None = None,
     authenticity_profile: Any = None,
+    owner_first_retry: Callable[[Sequence[Any], dict[str, Any], Any], bool] | None = None,
 ) -> None:
     """Project-wide verifiable-behavior coverage + authenticity gate (implement STAGE).
 
@@ -5358,6 +5476,22 @@ def _enforce_stage_coverage_gate(
         for violation in auth.violations:
             echo(violation.message)
         raise StageError(_authenticity_failure_message(auth.violations))
+
+    implement = config.get("implement")
+    if (
+        owner_first_retry is not None
+        and isinstance(implement, dict)
+        and implement.get("owner_first_retry_on_copy") is True
+    ):
+        try:
+            accepted = owner_first_retry(auth.violations, config, authenticity_profile)
+        except OwnerFirstRestoreError:
+            raise
+        except Exception:  # Copy preparation and judgment failures fall back to ordinary rework.
+            accepted = False
+        if accepted:
+            echo("Test coverage gate: marker authenticity OK after owner-first retry.")
+            return
 
     _drive_vb_authenticity_rework(
         project_root,
