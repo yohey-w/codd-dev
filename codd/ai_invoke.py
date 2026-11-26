@@ -51,6 +51,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -321,6 +322,16 @@ def is_codex_exec_command(parts: list[str]) -> bool:
 # Invocation
 # ═══════════════════════════════════════════════════════════
 
+# A nonzero-exit exception can carry either stderr or stdout. Capture stderr
+# for each recovery attempt, starting empty. None disables capture outside it.
+_retry_stderr: ContextVar[str | None] = ContextVar("retry_stderr", default=None)
+
+
+def _record_retry_stderr(stderr: str) -> None:
+    if _retry_stderr.get() is not None:
+        _retry_stderr.set(stderr)
+
+
 class _CapturedFileOutput(str):
     """File blocks captured from disk, with per-file origin surviving cleanup.
 
@@ -392,6 +403,7 @@ def invoke_file_writing_agent(
     note_output(result.stdout)
     if result.returncode != 0:
         note_failure("nonzero_exit")
+        _record_retry_stderr(result.stderr)
         detail = (result.stderr.strip() or result.stdout.strip()
                   or f"exit code {result.returncode}")
         raise ValueError(f"AI command failed: {detail}")
@@ -562,6 +574,7 @@ def _invoke_subprocess(
     note_output(result.stdout)
     if result.returncode != 0:
         note_failure("nonzero_exit")
+        _record_retry_stderr(result.stderr)
         stderr = result.stderr.strip()
         exit_code = f"exit code {result.returncode}"
         detail = stderr or result.stdout.strip() or exit_code
@@ -650,6 +663,34 @@ def _error_text(exc: ValueError) -> str:
     return str(exc)
 
 
+def _transport_error_text(detail: str, stderr: str | None, prompt: str) -> str:
+    """Exclude only complete, standalone multiline echoes from transport classification."""
+    if not stderr:
+        return detail
+    # Text-mode subprocesses normalize line endings. A single nonblank line
+    # can coincide with a real CLI diagnostic, even when it matches verbatim.
+    prompt = prompt.replace("\r\n", "\n").replace("\r", "\n")
+    if "\n" not in prompt.strip():
+        return detail
+
+    stderr = stderr.replace("\r\n", "\n").replace("\r", "\n")
+    # A final newline in stdin must actually appear in stderr. Otherwise EOF
+    # also counts as a line boundary. Preserve all whitespace in the match.
+    end_boundary = "" if prompt.endswith("\n") else "\n"
+    echo = f"\n{prompt}{end_boundary}"
+    stderr = f"\n{stderr}{end_boundary}"
+    parts = []
+    cursor = 0
+    while (start := stderr.find(echo, cursor)) != -1:
+        parts.append(stderr[cursor:start])
+        # Adjacent copies can share the newline between them.
+        cursor = start + len(echo) - 1
+    if not parts:
+        return detail
+    parts.append(stderr[cursor:])
+    return "".join(parts).strip() or detail
+
+
 def _is_transient_error(stderr: str) -> bool:
     """True when *stderr* clearly describes a transient/recoverable transport
     failure (socket/connection drop, timeout, 429/5xx gateway, overload).
@@ -722,6 +763,7 @@ def _invoke_with_recovery(
     ceiling_recovered = False
     transient_attempts = 0
     while True:
+        token = _retry_stderr.set("")
         try:
             return attempt(prompt)
         except ValueError as exc:
@@ -750,7 +792,9 @@ def _invoke_with_recovery(
                 else:
                     return attempt(prompt, raised_env)
             # Transient transport: bounded auto-retry with backoff.
-            if transient_attempts < TRANSIENT_AUTO_RETRIES and _is_transient_error(detail):
+            if transient_attempts < TRANSIENT_AUTO_RETRIES and _is_transient_error(
+                _transport_error_text(detail, _retry_stderr.get(), prompt)
+            ):
                 transient_attempts += 1
                 print(
                     f"[codd] transient AI transport error "
@@ -761,6 +805,8 @@ def _invoke_with_recovery(
                 sleep(TRANSIENT_BACKOFF_SECONDS * transient_attempts)
                 continue
             raise
+        finally:
+            _retry_stderr.reset(token)
 
 
 def invoke_ai(
