@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import shlex
 import sys
 from pathlib import Path
@@ -314,6 +315,256 @@ def test_dependency_artifact_coverage_routes_task(project, producer_body, produc
     assert [called for called, _ in project.calls] == [role]
     if role == "normal":
         assert project.routing == [("standard", "incomplete_dependency_artifact", False)]
+
+
+def test_directory_dependency_artifacts_are_rendered_in_full(project):
+    artifacts = {
+        "src/producer/z-last.py": "value_z = 3\n# End of module\n",
+        "src/producer/middle.txt": "First line\nSecond line\n",
+        "src/producer/a/nested": "An extensionless artifact\n",
+        "src/producer/.settings": "An explicitly owned dotfile\n",
+        "src/producer/local-link.txt": "Content from an in-project file\n",
+    }
+    for path, content in artifacts.items():
+        if path.endswith("local-link.txt"):
+            target = project.put("src/link-target.txt", content)
+            (project.root / path).symlink_to(target)
+        else:
+            project.put(path, content)
+    project.put("src/producer/__pycache__/bytecode", "").write_bytes(b"\xff")
+    project.put("src/producer/.cache-local/cached.txt", "").write_bytes(b"\xff")
+    project.put("src/producer/ignored.txt", "").write_bytes(b"\xff")
+    cached = project.put("src/vendor/cached.txt", "Cache is not a deliverable.\n")
+    (project.root / "src/producer/cache-file-alias.txt").symlink_to(cached)
+    (project.root / "src/producer/cache-dir-alias").symlink_to(cached.parent, target_is_directory=True)
+    project.config["scan"] = {"exclude": ["ignored.txt"]}
+    project.plan(
+        ("produce", "docs/producer.md", ["src/producer/"], []),
+        ("consume", DESIGN, [OUTPUT], ["produce"]),
+    )
+    project.configure(normal=[SUCCESS], **{"one-shot": [SUCCESS]})
+
+    project.run(expected=[OUTPUT])
+
+    [(role, prompt)] = project.calls
+    blocks = [
+        f"--- BEGIN DEPENDENCY ARTIFACT {path} ---\n{content.rstrip()}\n--- END DEPENDENCY ARTIFACT {path} ---"
+        for path, content in sorted(artifacts.items())
+    ]
+    assert "\n\n".join(blocks) in prompt
+    for excluded in ("__pycache__", ".cache-local", "ignored.txt", "cache-file-alias", "cache-dir-alias"):
+        assert excluded not in prompt
+    assert role == "one-shot"
+    assert project.routing == [("one_shot", "complete_context", False)]
+
+
+@pytest.mark.parametrize("declaration", ["direct", "symlink-parent", "parent-traversal"])
+def test_directory_dependency_with_only_another_tasks_output_uses_standard(project, declaration):
+    directory = "src/shared"
+    foreign_file = f"{directory}/other.txt"
+    foreign_content = "Separate task output.\n"
+    project.put(foreign_file, foreign_content)
+    declared_file = foreign_file
+    if declaration == "symlink-parent":
+        (project.root / "src/alias").symlink_to("shared", target_is_directory=True)
+        declared_file = "src/alias/other.txt"
+    elif declaration == "parent-traversal":
+        (project.root / "src/extra").mkdir()
+        declared_file = f"src/extra/../{Path(foreign_file).relative_to('src')}"
+    project.plan(
+        ("directory_producer", "docs/directory.md", [f"{directory}/"], []),
+        ("file_producer", "docs/file.md", [declared_file], []),
+        ("consume", DESIGN, [OUTPUT], ["directory_producer"]),
+    )
+    project.configure(normal=[SUCCESS], **{"one-shot": [SUCCESS]})
+
+    project.run(expected=[OUTPUT])
+
+    [(role, prompt)] = project.calls
+    foreign_artifact = f"BEGIN DEPENDENCY ARTIFACT {foreign_file} ---"
+    assert (role, project.routing) == ("normal", [("standard", "incomplete_dependency_artifact", False)]), (
+        f"Other task output was rendered as an artifact: {foreign_artifact in prompt}"
+    )
+    assert foreign_file not in prompt
+    assert foreign_content not in prompt
+
+
+@pytest.mark.parametrize("directory_populated, file_is_dependency", [
+    (True, False), (True, True), (False, True),
+], ids=["mixed-ownership", "both-dependencies", "missing-directory-artifact"])
+def test_directory_dependency_preserves_direct_file_dependencies(project, directory_populated, file_is_dependency):
+    directory = "src/shared"
+    directory_file = f"{directory}/directory.txt"
+    foreign_file = f"./{directory}/other"
+    foreign_content = "Separate task output.\n"
+    project.put(foreign_file, foreign_content)
+    if directory_populated:
+        project.put(directory_file, "Directory task output.\n")
+    dependencies = ["directory_producer"]
+    if file_is_dependency:
+        dependencies.append("file_producer")
+    project.plan(
+        ("directory_producer", "docs/directory.md", [directory], []),
+        ("file_producer", "docs/file.md", [foreign_file], []),
+        ("consume", DESIGN, [OUTPUT], dependencies),
+    )
+    project.configure(normal=[SUCCESS], **{"one-shot": [SUCCESS]})
+
+    project.run(expected=[OUTPUT])
+
+    [(role, prompt)] = project.calls
+    directory_artifact = f"BEGIN DEPENDENCY ARTIFACT {directory_file} ---\nDirectory task output."
+    foreign_artifact = f"BEGIN DEPENDENCY ARTIFACT {foreign_file} ---\n{foreign_content}"
+    assert (directory_artifact in prompt) == directory_populated
+    assert (foreign_artifact in prompt) == file_is_dependency
+    assert prompt.count(foreign_content) == int(file_is_dependency)
+    if directory_populated:
+        assert role == "one-shot"
+        assert project.routing == [("one_shot", "complete_context", False)]
+    else:
+        assert role == "normal"
+        assert project.routing == [("standard", "incomplete_dependency_artifact", False)]
+
+
+@pytest.mark.parametrize("problem", [
+    "empty", "missing", "unreadable", "walk-error", "dangling", "inside-dir-link", "outside-file",
+    "outside-dir", "outside-output", "replaced-with-file", "excluded-root-alias", "shared-output-scope",
+])
+def test_incomplete_directory_dependency_artifacts_use_standard(project, tmp_path_factory, monkeypatch, problem):
+    producer = "src" if problem == "shared-output-scope" else "src/producer"
+    directory = project.root / producer
+    if problem == "empty":
+        directory.mkdir(parents=True)
+    elif problem not in {"missing", "outside-output", "replaced-with-file", "excluded-root-alias",
+                         "shared-output-scope"}:
+        project.put(f"{producer}/readable.txt", "Retain readable content.\n")
+    if problem == "unreadable":
+        project.put(f"{producer}/unreadable.txt", "").write_bytes(b"\xff")
+    elif problem == "walk-error":
+        blocked = project.put(f"{producer}/blocked/artifact.txt", "Unreadable subtree.\n").parent
+        scandir = os.scandir
+
+        def fail_in_blocked_directory(path):
+            if isinstance(path, (str, Path)) and Path(path) == blocked:
+                raise PermissionError("Cannot scan directory")
+            return scandir(path)
+
+        monkeypatch.setattr(os, "scandir", fail_in_blocked_directory)
+    elif problem == "dangling":
+        (directory / "dangling").symlink_to("absent.txt")
+    elif problem == "inside-dir-link":
+        (directory / "self").symlink_to(directory, target_is_directory=True)
+    elif problem == "replaced-with-file":
+        project.put(producer, "The declared directory is absent.\n")
+        producer += "/"
+    elif problem == "excluded-root-alias":
+        target = project.put("src/.cache/secret.txt", "Excluded output through an alias.\n").parent
+        directory.symlink_to(target, target_is_directory=True)
+    elif problem.startswith("outside"):
+        outside = tmp_path_factory.mktemp("outside-project")
+        outside_file = outside / "artifact.txt"
+        outside_file.write_text("Out-of-project content.\n", encoding="utf-8")
+        if problem == "outside-output":
+            directory.parent.mkdir(exist_ok=True)
+            directory.symlink_to(outside, target_is_directory=True)
+        elif problem == "outside-dir":
+            (directory / "external").symlink_to(outside, target_is_directory=True)
+        else:
+            (directory / "external.txt").symlink_to(outside_file)
+    project.plan(
+        ("produce", "docs/producer.md", [producer], []),
+        ("consume", DESIGN, [OUTPUT], ["produce"]),
+    )
+    project.configure(normal=[SUCCESS], **{"one-shot": [SUCCESS]})
+
+    project.run(output="src" if problem == "shared-output-scope" else OUTPUT, expected=[OUTPUT])
+
+    [(role, prompt)] = project.calls
+    assert role == "normal"
+    assert project.routing == [("standard", "incomplete_dependency_artifact", False)]
+    assert "Out-of-project content." not in prompt
+    assert "The declared directory is absent." not in prompt
+    assert "Excluded output through an alias." not in prompt
+    if (directory / "readable.txt").is_file():
+        assert f"BEGIN DEPENDENCY ARTIFACT {producer}/readable.txt ---\nRetain readable content." in prompt
+
+
+def test_directory_dependency_artifacts_share_budget_with_overlapping_outputs(project):
+    producer = "src/producer"
+    artifact = f"{producer}/nested/artifact.txt"
+    # Any duplicate at Tier 1 would push both copies over the full-content budget.
+    project.put(artifact, "x" * implementer.DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT)
+    project.put("src/distant/artifact.txt", "Distant directory content.\n")
+    project.plan(
+        ("distant", "docs/distant.md", [artifact, "src/distant"], []),
+        ("produce", "docs/producer.md", [producer, f"./{artifact}", f"{producer}/nested"], ["distant"]),
+        ("consume", DESIGN, [OUTPUT], ["produce"]),
+    )
+    project.configure(normal=[SUCCESS], **{"one-shot": [SUCCESS]})
+
+    project.run(expected=[OUTPUT])
+
+    [(role, prompt)] = project.calls
+    assert role == "one-shot"
+    assert project.routing == [("one_shot", "complete_context", False)]
+    assert prompt.count(f"BEGIN DEPENDENCY ARTIFACT {artifact} ---") == 1
+    assert prompt.count(artifact) == 2  # BEGIN and END markers for the same block.
+    assert "Distant directory content." not in prompt
+
+
+@pytest.mark.parametrize("overflow", [False, True], ids=["exact-limit", "overflow"])
+def test_directory_dependency_artifacts_use_existing_budget(project, overflow):
+    producer = "src/producer"
+    limit = implementer.DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT
+    artifacts = {f"{producer}/a.txt": "a" * (limit - 1), f"{producer}/b.txt": "é" * (1 + overflow)}
+    for path, content in artifacts.items():
+        project.put(path, content)
+    project.plan(
+        ("produce", "docs/producer.md", [producer], []),
+        ("consume", DESIGN, [OUTPUT], ["produce"]),
+    )
+    project.configure(normal=[SUCCESS], **{"one-shot": [SUCCESS]})
+
+    project.run(expected=[OUTPUT])
+
+    [(role, prompt)] = project.calls
+    if overflow:
+        assert role == "normal"
+        assert project.routing == [("standard", "incomplete_dependency_artifact", False)]
+        for path, content in artifacts.items():
+            assert f"DEPENDENCY ARTIFACT {path} (distance-1 producer — path only" in prompt
+            assert f"BEGIN DEPENDENCY ARTIFACT {path}" not in prompt
+            assert content not in prompt
+    else:
+        assert role == "one-shot"
+        assert project.routing == [("one_shot", "complete_context", False)]
+        for path, content in artifacts.items():
+            assert f"BEGIN DEPENDENCY ARTIFACT {path} ---\n{content}\n" in prompt
+
+
+@pytest.mark.parametrize("producer_body, role, route, reason, digest", [
+    ("value = 1\n", "one-shot", "one_shot", "complete_context",
+     "81a8c6d098a3c6a145330a999fe8e2189f2b87d89f6f90c171501fd90e802a2b"),
+    (None, "normal", "standard", "incomplete_dependency_artifact",
+     "95f431fb52471b8118a64a6e3ac42042b6db0b1911ea110ecb0c70b708deafb5"),
+], ids=["full", "missing"])
+def test_file_only_dependency_artifact_prompt_matches_baseline(project, producer_body, role, route, reason, digest):
+    producer = "src/producer.py"
+    if producer_body is not None:
+        project.put(producer, producer_body)
+    project.plan(
+        ("produce", "docs/producer.md", [producer], []),
+        ("consume", DESIGN, [OUTPUT], ["produce"]),
+    )
+    project.configure(normal=[SUCCESS], **{"one-shot": [SUCCESS]})
+
+    project.run(expected=[OUTPUT])
+
+    [(called, prompt)] = project.calls
+    assert called == role
+    assert project.routing == [(route, reason, False)]
+    # Full prompts captured with the same fixture on d943740 before the directory change.
+    assert hashlib.sha256(prompt.encode()).hexdigest() == digest
 
 
 def test_new_source_and_test_route_with_full_near_and_incomplete_distant_artifacts(project, capsys):
