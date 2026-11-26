@@ -1,5 +1,6 @@
 """Tests for wave-based template generation."""
 
+import hashlib
 from pathlib import Path
 import subprocess
 
@@ -238,6 +239,175 @@ def test_generate_uses_dependency_documents_as_ai_context(tmp_path, mock_ai_cli)
     assert "explicit cleanup/idempotent teardown" in prompt
     assert "Scenario fixtures:" in prompt
     assert "do not trust mutable shared seed state" in prompt
+
+
+def test_unmanaged_generation_prompts_match_legacy_bytes(tmp_path, mock_ai_cli):
+    project = _setup_project(tmp_path)
+    for wave in (1, 2, 3):
+        generate_wave(project, wave)
+
+    # Captured from d943740 with the same project and mocked AI responses.
+    assert [hashlib.sha256(call["input"].encode("utf-8")).hexdigest() for call in mock_ai_cli] == [
+        "d21ea2838648c5bf380efa56dd2ec425933fded255899e49b19dc4a24473d973",
+        "1912abf5245f42b134ef03cc1f532274711782e1f4ddc9609ee1df40841a6f55",
+        "4077b16fcbcc7e2047a061f6b836c6ae62e31dbe582d162d27a1654585483a03",
+        "ab9849784d3adda9519520c31d709f33a4eaa7204e67bf298b2cd9dd053cbb42",
+    ]
+
+
+def test_explicitly_disabled_generation_prompts_match_legacy_bytes(tmp_path, mock_ai_cli):
+    project = _setup_project(tmp_path)
+    config = yaml.safe_load(CoDD_YAML)
+    config["generate"] = {"design_consistency": False}
+    # Stale metadata and an existing declaration must not change the design prompt.
+    config["wave_config"]["2"][0].update(behavior_owners=["spec"], owns_operation_flow=True)
+    (project / "codd/codd.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    system_design = project / "docs/design/system_design.md"
+    system_design.parent.mkdir(parents=True)
+    system_design.write_text("# Old design\n\n```codd-behavior\nowns: {}\ncases: []\n```\n", encoding="utf-8")
+
+    generate_wave(project, 1)
+    generate_wave(project, 2, force=True)
+
+    # Captured from d943740 with the same project and mocked AI responses.
+    assert hashlib.sha256(mock_ai_cli[2]["input"].encode("utf-8")).hexdigest() == (
+        "460ff884952052ae7d29c16566970d3e3bde1fd9c031527072bc03466aac816a"
+    )
+
+
+def test_managed_generation_prompt_covers_each_listed_convention(tmp_path, monkeypatch):
+    project = _setup_project(tmp_path)
+    config_path = project / "codd/codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["wave_config"]["1"][0]["behavior_owners"] = []
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    prompts = []
+
+    def generate(_command, prompt):
+        prompts.append(prompt)
+        return (
+            "# Generated Content\n\n## Overview\n\n"
+            "This document contains concrete content.\n\n"
+            "```codd-behavior\nowns: {}\ncases: []\nunresolved: []\n```\n"
+        )
+
+    monkeypatch.setattr(generator_module, "_invoke_ai_command", generate)
+    generate_wave(project, 1)
+
+    prompt = prompts[0]
+    assert "Behavior ownership and concrete examples:" in prompt
+    assert "Cover the requirements assigned to this document." in prompt
+    assert "Cite the relevant owning section" in prompt
+    assert "For each listed convention and invariant" in prompt
+    assert "give the local concrete design and verification measure or cite its owning section" in prompt
+    assert "Do not omit any listed item." in prompt
+    assert "Targets: db:rls_policies" in prompt
+    assert "Targets: db_table:audit_logs" in prompt
+    assert "Global invariant" in prompt
+    assert "Artifact invariant" in prompt
+    assert "Behavior ownership and concrete examples:" not in prompts[1]
+
+
+def test_regeneration_cannot_remove_existing_behavior_declarations(tmp_path, monkeypatch):
+    project = _setup_project(tmp_path)
+    body = "# Generated Content\n\n## Overview\n\nThis document contains concrete content.\n"
+    original = body + "\n```codd-behavior\nowns: {}\ncases: []\nunresolved: []\n```\n"
+    path = project / "docs/test/acceptance_criteria.md"
+    path.parent.mkdir()
+    path.write_text(original, encoding="utf-8")
+    prompts = []
+
+    def omit_declarations(_command, prompt):
+        prompts.append(prompt)
+        return body
+
+    monkeypatch.setattr(generator_module, "_invoke_ai_command", omit_declarations)
+    with pytest.raises(ValueError, match="missing codd-behavior declarations"):
+        generator_module.regenerate_artifact(project, node_id="design:acceptance-criteria")
+
+    assert "Behavior ownership and concrete examples:" in prompts[0]
+    assert path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    ("role", "owner_elsewhere", "reference_only"),
+    [(False, False, False), (None, True, False), (False, True, True), (True, False, False)],
+)
+def test_managed_design_prompt_obeys_operation_flow_assignment(
+    tmp_path, monkeypatch, role, owner_elsewhere, reference_only,
+):
+    project = _setup_project(tmp_path)
+    config_path = project / "codd/codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["generate"] = {"design_consistency": True}
+    design = config["wave_config"]["2"][0]
+    design["depends_on"] = []
+    if role is not None:
+        design["owns_operation_flow"] = role
+    if owner_elsewhere:
+        config["wave_config"]["3"].append({
+            "node_id": "design:workflow",
+            "output": "docs/design/workflow.md",
+            "title": "Workflow",
+            "owns_operation_flow": True,
+        })
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    prompts = []
+
+    def generate(_command, prompt):
+        prompts.append(prompt)
+        body = (
+            "# Generated Content\n\n## Overview\n\n"
+            "This document contains concrete content.\n\n"
+            "```codd-behavior\nowns: {}\ncases: []\nunresolved: []\n```\n"
+        )
+        if role is True:
+            body += "\n```yaml\noperation_flow:\n  operations:\n    - id: process-input\n```\n"
+        return body
+
+    monkeypatch.setattr(generator_module, "_invoke_ai_command", generate)
+    generate_wave(project, 2)
+
+    prompt, = prompts
+    assert ("Operational Behavior Model (DESIGN-TIME, CRITICAL)" in prompt) is not reference_only
+    assert ("Do not emit operation_flow here." in prompt) is reference_only
+    assert ("Emit operation_flow for the operations assigned here." in prompt) is (role is True)
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_generate_applies_path_confinement_to_managed_artifacts(tmp_path, monkeypatch, managed):
+    project = _setup_project(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    design = project / "docs/design"
+    design.mkdir()
+    (design / "linked").symlink_to(outside, target_is_directory=True)
+    output = "docs/design/linked/subdir/system.md"
+    config_path = project / "codd/codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["wave_config"]["2"][0]["output"] = output
+    config["wave_config"]["2"][0]["depends_on"] = []
+    if managed:
+        config["wave_config"]["2"][0]["behavior_owners"] = []
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    prompts = []
+
+    def generate(_command, prompt):
+        prompts.append(prompt)
+        assert (outside / "subdir").is_dir()
+        return "# Generated Content\n\n## Overview\n\nThis document contains concrete content.\n"
+
+    monkeypatch.setattr(generator_module, "_invoke_ai_command", generate)
+    if managed:
+        with pytest.raises(ValueError, match="design output escapes the project"):
+            generate_wave(project, 2)
+        assert not prompts
+        assert not (outside / "subdir").exists()
+    else:
+        result, = generate_wave(project, 2)
+        assert result.path == project / output
+        assert len(prompts) == 1
+        assert (outside / "subdir/system.md").is_file()
 
 
 def test_design_prompt_requires_design_time_operational_behavior_model(tmp_path, mock_ai_cli):

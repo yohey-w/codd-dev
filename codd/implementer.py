@@ -25,6 +25,7 @@ from codd.discovery import (
     should_skip_path,
 )
 from codd.generator import DependencyDocument, _load_project_config, _normalize_conventions
+from codd.design_consistency import enforce_design_consistency
 from codd.languages import resolve_assertion_guidance, resolve_test_framework_guidance
 from codd.path_safety import resolve_project_path
 from codd.project_types import ProjectCapabilities
@@ -1334,6 +1335,9 @@ def implement_tasks(
 ) -> list[ImplementationResult]:
     project_root = Path(project_root).resolve()
     config = _load_project_config(project_root)
+    summary = enforce_design_consistency(project_root, config, complete=True)
+    if summary is not None:
+        print(summary, flush=True)
     if language:
         # Per-invocation language override (Issue #20, v-kato): mismatched
         # codd init --language doesn't force a full re-init; spec authors can

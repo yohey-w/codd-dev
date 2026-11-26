@@ -159,6 +159,13 @@ class StageError(RuntimeError):
     """A pipeline stage (or one of its units) failed."""
 
 
+class _DesignConsistencyStageError(StageError):
+    def __init__(self, message: str, *, dependency_repairs: dict[str, str] | None = None) -> None:
+        super().__init__(message)
+        self.dependency_repairs = dependency_repairs or {}
+        self.can_resume = False
+
+
 class EnvironmentProvisionError(StageError):
     """A provisioning failure that requires an operator action."""
 
@@ -191,6 +198,8 @@ class GreenfieldResult:
     failed_unit: str | None = None
     error: str | None = None
     next_step: str | None = None
+    can_resume: bool = True
+    inspect_command_override: str | None = None
 
     @property
     def inspect_command(self) -> str | None:
@@ -198,12 +207,14 @@ class GreenfieldResult:
             return self.next_step
         if self.failed_stage is None:
             return None
+        if self.inspect_command_override is not None:
+            return self.inspect_command_override
         template = _INSPECT_COMMANDS.get(self.failed_stage, "codd check")
         return template.replace("{unit}", str(self.failed_unit or "<unit>"))
 
     @property
-    def resume_command(self) -> str:
-        return RESUME_COMMAND
+    def resume_command(self) -> str | None:
+        return RESUME_COMMAND if self.can_resume else None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -240,7 +251,8 @@ def format_greenfield_result(result: GreenfieldResult, format_name: str) -> str:
         if result.error:
             lines.append(f"Error: {result.error}")
         lines.append(f"Inspect: {result.inspect_command}")
-        lines.append(f"Resume:  {result.resume_command}")
+        if result.resume_command:
+            lines.append(f"Resume:  {result.resume_command}")
     if result.session_path is not None:
         lines.append(f"Session: {result.session_path.as_posix()}")
     return "\n".join(lines) + "\n"
@@ -615,6 +627,17 @@ class GreenfieldPipeline:
             save_session(project_root, session)
             try:
                 runners[stage_name](project_root, record, options)
+            except _DesignConsistencyStageError as exc:
+                error = str(exc)
+                if not exc.can_resume:
+                    error += (
+                        "\nCorrect the reported design documents or wave_config, then run "
+                        "'codd generate --check-design'. Resolve disagreements in the documented decisions."
+                    )
+                return self._fail(
+                    project_root, session, options, stage_name, record, error,
+                    inspect_command="codd generate --check-design", can_resume=exc.can_resume,
+                )
             except EnvironmentProvisionError as exc:
                 return self._fail(
                     project_root, session, options, stage_name, record, str(exc),
@@ -656,6 +679,8 @@ class GreenfieldPipeline:
         error: str,
         *,
         next_step: str | None = None,
+        inspect_command: str | None = None,
+        can_resume: bool = True,
     ) -> GreenfieldResult:
         record["status"] = STATUS_FAILED
         record["detail"] = error
@@ -677,10 +702,13 @@ class GreenfieldPipeline:
             failed_unit=failed_unit,
             error=error,
             next_step=next_step,
+            inspect_command_override=inspect_command,
+            can_resume=can_resume,
         )
         self.echo(f"[greenfield] stage {stage_name} FAILED: {error}")
         self.echo(f"[greenfield] inspect: {result.inspect_command}")
-        self.echo(f"[greenfield] resume:  {result.resume_command}")
+        if result.resume_command:
+            self.echo(f"[greenfield] resume:  {result.resume_command}")
         self._notify(options, f"greenfield {project_root.name}: FAILED at {stage_name} — {error}")
         return result
 
@@ -1220,6 +1248,7 @@ class GreenfieldPipeline:
             raise StageError("wave_config is empty; run codd plan --init")
         units: dict[str, str] = record.get("units") or {}
         record["units"] = {str(wave): units.get(str(wave), STATUS_PENDING) for wave in waves}
+        all_waves_checkpointed = all(status == STATUS_DONE for status in record["units"].values())
 
         runner = self.generate_wave_runner or _default_generate_wave_runner
         for wave in waves:
@@ -1243,10 +1272,53 @@ class GreenfieldPipeline:
         # repair so a coherent registry exists before implement — or fail
         # honestly at generate. Runs BEFORE implement by construction.
         self._enforce_generate_vb_registry_gate(project_root, options)
+        try:
+            self._check_design_consistency(project_root)
+        except _DesignConsistencyStageError as exc:
+            if not exc.dependency_repairs:
+                raise
+            if not all_waves_checkpointed:
+                exc.can_resume = True
+                raise
+            from codd.generator import regenerate_artifact
+
+            # Use the normal per-document retry budget, once per affected output.
+            for output, feedback in exc.dependency_repairs.items():
+                self.echo(f"[greenfield] repairing design dependencies in {output}")
+                try:
+                    regenerate_artifact(project_root, output_path=output, feedback=feedback, ai_command=self.ai_command)
+                except (OSError, ValueError) as repair_error:
+                    raise _DesignConsistencyStageError(
+                        f"{exc}\nCould not repair {output}: {repair_error}"
+                    ) from repair_error
+            self._check_design_consistency(project_root)
+            try:
+                self._enforce_generate_vb_registry_gate(project_root, options, allow_repair=False)
+            except StageError as registry_error:
+                raise _DesignConsistencyStageError(str(registry_error)) from registry_error
         record["detail"] = f"{len(waves)} wave(s) generated"
 
+    def _check_design_consistency(self, project_root: Path) -> None:
+        from codd.config import load_project_config
+        from codd.design_consistency import DesignConsistencyError, enforce_design_consistency
+
+        try:
+            config = load_project_config(project_root)
+        except FileNotFoundError:
+            return
+        except ValueError as exc:
+            raise StageError(str(exc)) from exc
+        try:
+            summary = enforce_design_consistency(project_root, config, complete=True)
+        except DesignConsistencyError as exc:
+            raise _DesignConsistencyStageError(str(exc), dependency_repairs=exc.dependency_repairs) from exc
+        except (OSError, ValueError) as exc:
+            raise _DesignConsistencyStageError(str(exc)) from exc
+        if summary is not None:
+            self.echo(str(summary))
+
     def _enforce_generate_vb_registry_gate(
-        self, project_root: Path, options: dict[str, Any]
+        self, project_root: Path, options: dict[str, Any], *, allow_repair: bool = True,
     ) -> None:
         """Generate-time canonical VB-registry completeness gate + bounded repair.
 
@@ -1297,7 +1369,7 @@ class GreenfieldPipeline:
         issues = validate_vb_registry_completeness(project_root, config, strict=True)
         errors = [issue for issue in issues if issue.severity == "error"]
         attempt = 0
-        while errors and attempt < max_attempts:
+        while allow_repair and errors and attempt < max_attempts:
             attempt += 1
             feedback = self._build_vb_registry_repair_feedback(project_root, config, errors)
             self.echo(
@@ -1412,6 +1484,9 @@ class GreenfieldPipeline:
     # ── stage: implement ────────────────────────────────────
 
     def _stage_implement(self, project_root: Path, record: dict[str, Any], options: dict[str, Any]) -> None:
+        # A resumed session can skip generation altogether. Always re-read
+        # design evidence before starting (or resuming) implementation tasks.
+        self._check_design_consistency(project_root)
         lister = self.task_lister or _default_task_lister
         tasks = list(lister(project_root))
         if not tasks:
