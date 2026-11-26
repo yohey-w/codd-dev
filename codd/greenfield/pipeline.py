@@ -12,8 +12,8 @@ Stage sequence (CLI equivalents in parentheses):
   1. ``init``       (``codd init NAME --language LANG [--requirements FILE]``)
                     Skipped when a CoDD config dir already exists.
   2. ``elicit``     (``codd elicit`` + ``codd elicit apply``) — advisory and
-                    NEVER blocking: findings are applied automatically; any
-                    failure degrades to a warning and the pipeline continues.
+                    Findings are applied automatically. Discovery failures are
+                    advisory. An unreadable managed requirement stops the run.
   3. ``plan``       (``codd plan --init --force``) — writes ``wave_config``.
   4. ``generate``   (``codd generate --wave N`` for every wave, in order;
                     the ``--all-waves`` CLI flag is the shell equivalent).
@@ -99,12 +99,16 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path, PurePosixPath
 import shlex
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 # Leaf module (stdlib-only imports): safe to import at module load, no cycle.
 from codd.path_safety import has_plausible_file_extension, is_glob_decl
+from codd.requirement_appendix import UnreadableRequirementAppendix
+
+if TYPE_CHECKING:
+    from codd.planner import PlanInitResult
 
 
 SESSION_FILENAME = "greenfield_session.yaml"
@@ -141,6 +145,8 @@ DEFAULT_OPTIONS: dict[str, Any] = {
 }
 
 RESUME_COMMAND = "codd greenfield --resume"
+_SELECT_ARTIFACTS_COMMAND = "codd plan --derive --account-decisions"
+_PLAN_ARTIFACTS_COMMAND = "codd plan --init --force --use-required-artifacts"
 
 _INSPECT_COMMANDS: dict[str, str] = {
     "init": "codd init <name> --language <language>",
@@ -157,6 +163,17 @@ _INSPECT_COMMANDS: dict[str, str] = {
 
 class StageError(RuntimeError):
     """A pipeline stage (or one of its units) failed."""
+
+
+class _RequiredArtifactSelectionError(StageError):
+    """Artifact selection failed before wave planning started."""
+
+
+class _DesignConsistencyStageError(StageError):
+    def __init__(self, message: str, *, dependency_repairs: dict[str, str] | None = None) -> None:
+        super().__init__(message)
+        self.dependency_repairs = dependency_repairs or {}
+        self.can_resume = False
 
 
 class EnvironmentProvisionError(StageError):
@@ -191,6 +208,10 @@ class GreenfieldResult:
     failed_unit: str | None = None
     error: str | None = None
     next_step: str | None = None
+    can_resume: bool = True
+    inspect_command_override: str | None = None
+    design_reconciliation: str | None = None
+    required_artifact_report: str | None = None
 
     @property
     def inspect_command(self) -> str | None:
@@ -198,12 +219,14 @@ class GreenfieldResult:
             return self.next_step
         if self.failed_stage is None:
             return None
+        if self.inspect_command_override is not None:
+            return self.inspect_command_override
         template = _INSPECT_COMMANDS.get(self.failed_stage, "codd check")
         return template.replace("{unit}", str(self.failed_unit or "<unit>"))
 
     @property
-    def resume_command(self) -> str:
-        return RESUME_COMMAND
+    def resume_command(self) -> str | None:
+        return RESUME_COMMAND if self.can_resume else None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -220,6 +243,10 @@ class GreenfieldResult:
                 "inspect_command": self.inspect_command,
                 "resume_command": self.resume_command,
             }
+        if self.design_reconciliation is not None:
+            payload["design_reconciliation"] = self.design_reconciliation
+        if self.required_artifact_report is not None:
+            payload["required_artifact_report"] = self.required_artifact_report
         return payload
 
 
@@ -240,9 +267,14 @@ def format_greenfield_result(result: GreenfieldResult, format_name: str) -> str:
         if result.error:
             lines.append(f"Error: {result.error}")
         lines.append(f"Inspect: {result.inspect_command}")
-        lines.append(f"Resume:  {result.resume_command}")
+        if result.resume_command:
+            lines.append(f"Resume:  {result.resume_command}")
     if result.session_path is not None:
         lines.append(f"Session: {result.session_path.as_posix()}")
+    if result.design_reconciliation is not None:
+        lines.append(result.design_reconciliation)
+    if result.required_artifact_report is not None:
+        lines.append(result.required_artifact_report.rstrip())
     return "\n".join(lines) + "\n"
 
 
@@ -335,7 +367,7 @@ class ImplementTaskRef:
 # DI seam signatures (all keyword-overridable on the pipeline constructor).
 InitRunner = Callable[..., Any]
 ElicitRunner = Callable[..., str]
-PlanRunner = Callable[..., int]
+PlanRunner = Callable[..., "int | PlanInitResult"]
 WaveLister = Callable[[Path], list[int]]
 GenerateWaveRunner = Callable[..., str]
 TaskLister = Callable[[Path], list[ImplementTaskRef]]
@@ -375,7 +407,9 @@ class GreenfieldPipeline:
         requirements: str | Path | None = None,
         project_type: str | None = None,
         ai_command: str | None = None,
+        use_required_artifacts: bool = False,
         elicit: bool | None = None,
+        provisional_decisions: bool | None = None,
         max_repair_attempts: int | None = None,
         coverage_gate: bool | None = None,
         propagate_commit: bool | None = None,
@@ -404,6 +438,8 @@ class GreenfieldPipeline:
         self.requirements = str(requirements) if requirements is not None else None
         self.project_type = project_type
         self.ai_command = ai_command
+        self.use_required_artifacts = use_required_artifacts
+        self.provisional_decisions = provisional_decisions
         self._option_overrides = {
             "elicit": elicit,
             "max_repair_attempts": max_repair_attempts,
@@ -445,6 +481,8 @@ class GreenfieldPipeline:
             self.requirements = str(stored["requirements"])
         if self.project_type is None and stored.get("project_type"):
             self.project_type = str(stored["project_type"])
+        if self.provisional_decisions is None and stored.get("provisional_decisions") is True:
+            self.provisional_decisions = True
         for key, value in self._option_overrides.items():
             if value is None and stored.get(key) is not None:
                 self._option_overrides[key] = stored[key]
@@ -460,10 +498,31 @@ class GreenfieldPipeline:
     ) -> GreenfieldResult:
         project_root = _resolve_project_root(target_path)
         if dry_run:
+            if self.use_required_artifacts:
+                return self._dry_run(project_root, use_required_artifacts=True)
             return self._dry_run(project_root)
 
         session = load_session(project_root) if resume else None
+        stored_options = (session or {}).get("options", {})
+        if not isinstance(stored_options, dict):
+            stored_options = {}
+        stored_lineup_choice = stored_options.get("use_required_artifacts") is True
+        use_required_artifacts = self.use_required_artifacts or stored_lineup_choice
         if session is not None:
+            if self.use_required_artifacts and not stored_lineup_choice:
+                plan_record = session["stages"].get("plan", {})
+                if plan_record.get("status") in _COMPLETE_STATUSES:
+                    error = (
+                        "The saved plan already completed in legacy mode. Run "
+                        "'codd greenfield --use-required-artifacts' without --resume to start a new plan."
+                    )
+                    plan_record.update(status=STATUS_FAILED, detail=error)
+                    return GreenfieldResult(
+                        project_root=project_root, status="failed", stages=_stage_outcomes(session),
+                        session_path=session_path(project_root), failed_stage="plan", error=error,
+                        inspect_command_override="codd greenfield --use-required-artifacts", can_resume=False,
+                    )
+                session["options"] = {**stored_options, "use_required_artifacts": True}
             # A resumed run must continue with the SAME options the original
             # run recorded — most critically ai_command: silently falling back
             # to the project-config default mid-pipeline switches the AI model
@@ -472,6 +531,8 @@ class GreenfieldPipeline:
             # Explicit CLI overrides on the resume invocation still win.
             self._restore_session_options(session)
         options = self._resolve_options(project_root)
+        if use_required_artifacts:
+            options["use_required_artifacts"] = True
         if session is None:
             session = new_session(
                 {
@@ -483,6 +544,9 @@ class GreenfieldPipeline:
                     **options,
                 }
             )
+        elif options.get("provisional_decisions"):
+            stored = session.get("options")
+            session["options"] = {**(stored if isinstance(stored, dict) else {}), "provisional_decisions": True}
         session["result"] = {"status": "running", "failed_stage": None, "failed_unit": None, "error": None}
         self._session_ref = session
 
@@ -615,10 +679,26 @@ class GreenfieldPipeline:
             save_session(project_root, session)
             try:
                 runners[stage_name](project_root, record, options)
+            except _DesignConsistencyStageError as exc:
+                error = str(exc)
+                if not exc.can_resume:
+                    error += (
+                        "\nCorrect the reported design documents or wave_config, then run "
+                        "'codd generate --check-design'. Resolve disagreements in the documented decisions."
+                    )
+                return self._fail(
+                    project_root, session, options, stage_name, record, error,
+                    inspect_command="codd generate --check-design", can_resume=exc.can_resume,
+                )
             except EnvironmentProvisionError as exc:
                 return self._fail(
                     project_root, session, options, stage_name, record, str(exc),
                     next_step=exc.next_step,
+                )
+            except _RequiredArtifactSelectionError as exc:
+                return self._fail(
+                    project_root, session, options, stage_name, record, str(exc),
+                    inspect_command=_SELECT_ARTIFACTS_COMMAND,
                 )
             except StageError as exc:
                 return self._fail(project_root, session, options, stage_name, record, str(exc))
@@ -637,11 +717,15 @@ class GreenfieldPipeline:
         session["result"]["status"] = "success"
         path = save_session(project_root, session)
         self._notify(options, f"greenfield {project_root.name}: SUCCESS — system built")
+        from codd.generator import design_reconciliation_notice
+
         return GreenfieldResult(
             project_root=project_root,
             status="success",
             stages=_stage_outcomes(session),
             session_path=path,
+            design_reconciliation=design_reconciliation_notice(project_root),
+            required_artifact_report=(session["stages"].get("plan") or {}).get("required_artifact_report"),
         )
 
     # ── failure handling ────────────────────────────────────
@@ -656,7 +740,13 @@ class GreenfieldPipeline:
         error: str,
         *,
         next_step: str | None = None,
+        inspect_command: str | None = None,
+        can_resume: bool = True,
     ) -> GreenfieldResult:
+        from codd.generator import design_reconciliation_notice
+
+        if inspect_command is None and stage_name == "plan" and options.get("use_required_artifacts"):
+            inspect_command = _PLAN_ARTIFACTS_COMMAND
         record["status"] = STATUS_FAILED
         record["detail"] = error
         record["finished_at"] = _utc_now()
@@ -677,10 +767,15 @@ class GreenfieldPipeline:
             failed_unit=failed_unit,
             error=error,
             next_step=next_step,
+            inspect_command_override=inspect_command,
+            can_resume=can_resume,
+            design_reconciliation=design_reconciliation_notice(project_root),
+            required_artifact_report=(session["stages"].get("plan") or {}).get("required_artifact_report"),
         )
         self.echo(f"[greenfield] stage {stage_name} FAILED: {error}")
         self.echo(f"[greenfield] inspect: {result.inspect_command}")
-        self.echo(f"[greenfield] resume:  {result.resume_command}")
+        if result.resume_command:
+            self.echo(f"[greenfield] resume:  {result.resume_command}")
         self._notify(options, f"greenfield {project_root.name}: FAILED at {stage_name} — {error}")
         return result
 
@@ -887,6 +982,8 @@ class GreenfieldPipeline:
                 resolved[key] = deepcopy(config_section[key])
             else:
                 resolved[key] = deepcopy(default)
+        if self.provisional_decisions:
+            resolved["provisional_decisions"] = True
         return resolved
 
     # ── notifications (notify-only, never blocking) ─────────
@@ -957,7 +1054,7 @@ class GreenfieldPipeline:
         except SystemExit as exc:
             raise StageError(f"codd init failed (exit {exc.code})") from exc
 
-    # ── stage: elicit (advisory, never blocking) ────────────
+    # ── stage: elicit (advisory discovery) ─────────────────
 
     def _stage_elicit(self, project_root: Path, record: dict[str, Any], options: dict[str, Any]) -> None:
         if not options.get("elicit", True):
@@ -966,7 +1063,14 @@ class GreenfieldPipeline:
             return
         try:
             runner = self.elicit_runner or _default_elicit_runner
-            record["detail"] = str(runner(project_root, ai_command=self.ai_command))
+            if self.elicit_runner is None and options.get("provisional_decisions"):
+                record["detail"] = _default_elicit_runner(
+                    project_root, ai_command=self.ai_command, provisional_decisions=True, echo=self.echo
+                )
+            else:
+                record["detail"] = str(runner(project_root, ai_command=self.ai_command))
+        except UnreadableRequirementAppendix as exc:
+            raise StageError(str(exc)) from exc
         except Exception as exc:  # noqa: BLE001 — elicit is advisory and must never block the autopilot.
             record["status"] = STATUS_WARNING
             record["detail"] = f"elicit skipped (non-blocking): {exc}"
@@ -974,13 +1078,31 @@ class GreenfieldPipeline:
     # ── stage: plan ─────────────────────────────────────────
 
     def _stage_plan(self, project_root: Path, record: dict[str, Any], options: dict[str, Any]) -> None:
+        use_required_artifacts = options.get("use_required_artifacts", False)
+        if use_required_artifacts:
+            from codd.required_artifacts_deriver import plan_accounted_artifacts
+
+            record.pop("required_artifact_report", None)
+            try:
+                plan_accounted_artifacts(
+                    project_root, self.ai_command, select_if_unaccounted_empty=True, warn=self.echo,
+                )
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                raise _RequiredArtifactSelectionError(f"{_SELECT_ARTIFACTS_COMMAND} failed: {exc}") from exc
+
         # Deterministic, default-permissive, fail-safe requirements intake: iff the
         # resolved profile declares >=1 optional deliverable surface, classify which
         # (if any) the requirements exclude and persist them BEFORE the plan runs.
         self._classify_deliverable_surfaces(project_root)
         runner = self.plan_runner or _default_plan_runner
+        lineup_options = {"use_required_artifacts": True} if use_required_artifacts else {}
         try:
-            wave_count = int(runner(project_root, ai_command=self.ai_command, force=True))
+            result = runner(project_root, ai_command=self.ai_command, force=True, **lineup_options)
+            if use_required_artifacts and not isinstance(result, int):
+                wave_count = len(result.wave_config)
+                record["required_artifact_report"] = result.required_artifact_report
+            else:
+                wave_count = int(result)
         except (FileNotFoundError, ValueError) as exc:
             raise StageError(f"plan --init failed: {exc}") from exc
         record["detail"] = f"{wave_count} wave(s)"
@@ -1214,12 +1336,21 @@ class GreenfieldPipeline:
     # ── stage: generate ─────────────────────────────────────
 
     def _stage_generate(self, project_root: Path, record: dict[str, Any], options: dict[str, Any]) -> None:
+        from codd.design_consistency import DesignConsistencyError
+        from codd.generator import reconcile_generated_design
+
         lister = self.wave_lister or _default_wave_lister
         waves = list(lister(project_root))
         if not waves:
+            if options.get("use_required_artifacts"):
+                plan_record = self._session_ref["stages"].get("plan", {})
+                if plan_record.get("waves") == 0:
+                    record["detail"] = "0 waves generated"
+                    return
             raise StageError("wave_config is empty; run codd plan --init")
         units: dict[str, str] = record.get("units") or {}
         record["units"] = {str(wave): units.get(str(wave), STATUS_PENDING) for wave in waves}
+        all_waves_checkpointed = all(status == STATUS_DONE for status in record["units"].values())
 
         runner = self.generate_wave_runner or _default_generate_wave_runner
         for wave in waves:
@@ -1230,10 +1361,19 @@ class GreenfieldPipeline:
                 detail = runner(project_root, wave, ai_command=self.ai_command)
             except (FileNotFoundError, ValueError) as exc:
                 record["units"][key] = STATUS_FAILED
+                if isinstance(exc, DesignConsistencyError) and exc.disagreements:
+                    raise _DesignConsistencyStageError(f"wave {wave}: {exc}") from exc
                 raise StageError(f"wave {wave}: {exc}") from exc
             record["units"][key] = STATUS_DONE
             self._checkpoint(project_root)
             self.echo(f"[greenfield] generate wave {wave}: {detail}")
+
+        # A resumed run can skip the waves that wrote these reporters. Resolve
+        # them before validating the VB registry against the resulting documents.
+        try:
+            reconcile_generated_design(project_root, ai_command=self.ai_command)
+        except DesignConsistencyError as exc:
+            raise _DesignConsistencyStageError(str(exc)) from exc
 
         # After ALL waves are generated, enforce the canonical VB-registry
         # completeness contract (model-independence): a weak model can reference
@@ -1243,10 +1383,53 @@ class GreenfieldPipeline:
         # repair so a coherent registry exists before implement — or fail
         # honestly at generate. Runs BEFORE implement by construction.
         self._enforce_generate_vb_registry_gate(project_root, options)
+        try:
+            self._check_design_consistency(project_root)
+        except _DesignConsistencyStageError as exc:
+            if not exc.dependency_repairs:
+                raise
+            if not all_waves_checkpointed:
+                exc.can_resume = True
+                raise
+            from codd.generator import regenerate_artifact
+
+            # Use the normal per-document retry budget, once per affected output.
+            for output, feedback in exc.dependency_repairs.items():
+                self.echo(f"[greenfield] repairing design dependencies in {output}")
+                try:
+                    regenerate_artifact(project_root, output_path=output, feedback=feedback, ai_command=self.ai_command)
+                except (OSError, ValueError) as repair_error:
+                    raise _DesignConsistencyStageError(
+                        f"{exc}\nCould not repair {output}: {repair_error}"
+                    ) from repair_error
+            self._check_design_consistency(project_root)
+            try:
+                self._enforce_generate_vb_registry_gate(project_root, options, allow_repair=False)
+            except StageError as registry_error:
+                raise _DesignConsistencyStageError(str(registry_error)) from registry_error
         record["detail"] = f"{len(waves)} wave(s) generated"
 
+    def _check_design_consistency(self, project_root: Path) -> None:
+        from codd.config import load_project_config
+        from codd.design_consistency import DesignConsistencyError, enforce_design_consistency
+
+        try:
+            config = load_project_config(project_root)
+        except FileNotFoundError:
+            return
+        except ValueError as exc:
+            raise StageError(str(exc)) from exc
+        try:
+            summary = enforce_design_consistency(project_root, config, complete=True)
+        except DesignConsistencyError as exc:
+            raise _DesignConsistencyStageError(str(exc), dependency_repairs=exc.dependency_repairs) from exc
+        except (OSError, ValueError) as exc:
+            raise _DesignConsistencyStageError(str(exc)) from exc
+        if summary is not None:
+            self.echo(str(summary))
+
     def _enforce_generate_vb_registry_gate(
-        self, project_root: Path, options: dict[str, Any]
+        self, project_root: Path, options: dict[str, Any], *, allow_repair: bool = True,
     ) -> None:
         """Generate-time canonical VB-registry completeness gate + bounded repair.
 
@@ -1297,7 +1480,7 @@ class GreenfieldPipeline:
         issues = validate_vb_registry_completeness(project_root, config, strict=True)
         errors = [issue for issue in issues if issue.severity == "error"]
         attempt = 0
-        while errors and attempt < max_attempts:
+        while allow_repair and errors and attempt < max_attempts:
             attempt += 1
             feedback = self._build_vb_registry_repair_feedback(project_root, config, errors)
             self.echo(
@@ -1412,6 +1595,9 @@ class GreenfieldPipeline:
     # ── stage: implement ────────────────────────────────────
 
     def _stage_implement(self, project_root: Path, record: dict[str, Any], options: dict[str, Any]) -> None:
+        # A resumed session can skip generation altogether. Always re-read
+        # design evidence before starting (or resuming) implementation tasks.
+        self._check_design_consistency(project_root)
         lister = self.task_lister or _default_task_lister
         tasks = list(lister(project_root))
         if not tasks:
@@ -3409,7 +3595,7 @@ class GreenfieldPipeline:
 
     # ── dry run ─────────────────────────────────────────────
 
-    def _dry_run(self, project_root: Path) -> GreenfieldResult:
+    def _dry_run(self, project_root: Path, *, use_required_artifacts: bool = False) -> GreenfieldResult:
         options = self._resolve_options(project_root)
         from codd.config import find_codd_dir
 
@@ -3430,8 +3616,14 @@ class GreenfieldPipeline:
             if options.get("elicit", True)
             else "skip — disabled"
         )
+        if options.get("elicit", True) and options.get("provisional_decisions"):
+            elicit_detail = "codd elicit --provisional-decisions (advisory)"
         outcomes.append(StageOutcome("elicit", STATUS_PENDING, elicit_detail))
-        outcomes.append(StageOutcome("plan", STATUS_PENDING, "codd plan --init --force"))
+        plan_detail = (
+            f"{_SELECT_ARTIFACTS_COMMAND} (if selection is needed), then {_PLAN_ARTIFACTS_COMMAND}"
+            if use_required_artifacts else _INSPECT_COMMANDS["plan"]
+        )
+        outcomes.append(StageOutcome("plan", STATUS_PENDING, plan_detail))
 
         waves: list[int] = []
         if codd_dir is not None:
@@ -3494,20 +3686,39 @@ def _default_notifier(topic: str, message: str) -> bool:
     return _post_ntfy(topic, message)
 
 
-def _default_elicit_runner(project_root: Path, *, ai_command: str | None) -> str:
+def _default_elicit_runner(
+    project_root: Path,
+    *,
+    ai_command: str | None,
+    provisional_decisions: bool = False,
+    echo: Callable[[str], None] = print,
+) -> str:
     import codd.cli as cli_module
     from codd.elicit.apply import ElicitApplyEngine
     from codd.elicit.engine import ElicitEngine
 
     lexicon_config = cli_module._load_elicit_lexicon_configs(project_root, None)
-    result = ElicitEngine(ai_command=ai_command).run(project_root, lexicon_config=lexicon_config)
+    engine = ElicitEngine(ai_command=ai_command)
+    if provisional_decisions:
+        from codd.elicit.workflow import provisional_detail_lines, provisional_summary, run_provisional_elicit
+
+        _, decisions = run_provisional_elicit(project_root, engine, lexicon_config)
+        for line in provisional_detail_lines(decisions):
+            echo(f"[greenfield] elicit: {line.lstrip()}")
+        return provisional_summary(decisions, include_issues=True)
+
+    result = engine.run(project_root, lexicon_config=lexicon_config)
     applied = ElicitApplyEngine(project_root).apply(result.findings)
     return f"findings={len(result.findings)}, applied={applied.applied_count}, skipped={applied.skipped_count}"
 
 
-def _default_plan_runner(project_root: Path, *, ai_command: str | None, force: bool) -> int:
+def _default_plan_runner(
+    project_root: Path, *, ai_command: str | None, force: bool, use_required_artifacts: bool = False,
+) -> int | PlanInitResult:
     from codd.planner import plan_init
 
+    if use_required_artifacts:
+        return plan_init(project_root, force=force, ai_command=ai_command, use_required_artifacts=True)
     result = plan_init(project_root, force=force, ai_command=ai_command)
     return len(result.wave_config)
 

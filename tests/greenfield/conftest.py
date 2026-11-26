@@ -63,6 +63,8 @@ STUB_WAVE_CONFIG = {
             "depends_on": [{"id": "__REQ_NODE__", "relation": "implements"}],
             "conventions": [],
             "modules": ["core"],
+            "behavior_owners": ["adding-numbers"],
+            "owns_operation_flow": False,
         }
     ],
     "2": [
@@ -73,6 +75,8 @@ STUB_WAVE_CONFIG = {
             "depends_on": [{"id": "design:core-design", "relation": "implements"}],
             "conventions": [],
             "modules": ["cli"],
+            "behavior_owners": [],
+            "owns_operation_flow": False,
         }
     ],
 }
@@ -184,6 +188,9 @@ def design_document():
         parts.append("")
         if index == 0:
             parts.extend(["```mermaid", "graph TD; CORE[Core] --> CLI[CLI];", "```", ""])
+    if "Behavior ownership and concrete examples:" in PROMPT:
+        owns = '{adding-numbers: "exposes an add(a, b) operation"}' if title == "Core Design" else "{}"
+        parts.extend(["```codd-behavior", "owns: " + owns, "cases: []", "```", ""])
     return "\\n".join(parts)
 
 

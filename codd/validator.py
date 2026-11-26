@@ -16,6 +16,7 @@ from codd.coherence_engine import EventBus
 from codd.discovery import matches_exclude_pattern, scan_exclude_patterns
 from codd.frontmatter import parse_frontmatter
 from codd.path_safety import resolve_project_path
+from codd.requirement_appendix import is_requirement_appendix
 
 
 NODE_ID_PATTERN = re.compile(r"^(?P<prefix>[a-z_]+):(?P<name>.+)$")
@@ -489,6 +490,8 @@ def _iter_doc_files(project_root: Path, config: dict[str, Any]):
             if resolve_project_path(project_root, file_path) is None:
                 continue
             rel_text = file_path.relative_to(project_root).as_posix()
+            if is_requirement_appendix(project_root, rel_text):
+                continue
             if any(
                 matches_exclude_pattern(rel_text, pattern)
                 for pattern in exclude_patterns

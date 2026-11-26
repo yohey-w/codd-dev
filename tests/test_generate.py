@@ -1,5 +1,8 @@
 """Tests for wave-based template generation."""
 
+from contextlib import contextmanager
+import hashlib
+import json
 from pathlib import Path
 import subprocess
 
@@ -9,6 +12,7 @@ import yaml
 
 import codd.generator as generator_module
 from codd.cli import main
+from codd.design_consistency import DesignConsistencyError
 from codd.generator import generate_wave
 from codd.scanner import _extract_frontmatter
 
@@ -96,6 +100,210 @@ Tenant isolation and audit logging are mandatory.
         encoding="utf-8",
     )
     return project
+
+
+RECONCILIATION_OWNER = "docs/governance/decisions.md"
+RECONCILIATION_PEER = "docs/design/system_design.md"
+RECONCILIATION_REPORTER = "docs/plan/implementation_plan.md"
+RECONCILIATION_LOG = ".codd/audit/design-reconciliations.jsonl"
+ACCEPTANCE_CRITERIA = "docs/test/acceptance_criteria.md"
+DISPUTED_POLICY = "The system design does not follow the approved import size limit."
+UNRESTRICTED_IMPORT = "Validation accepts files of any size."
+BOUNDED_IMPORT = "Validation rejects files larger than 100 bytes."
+
+
+def _reconciliation_document(rule, *, spec=None, disagreement=None):
+    quote = disagreement[0] if disagreement else None
+    declarations = {
+        "owns": {spec: rule} if spec else {},
+        "cases": [],
+        "unresolved": [{"documents": list(disagreement[1]), "quote": quote}] if disagreement else [],
+    }
+    paragraphs = [rule, quote] if quote else [rule]
+    return (
+        "# File Import\n\n## Overview\n\n"
+        + "\n\n".join(paragraphs)
+        + f"\n\n```codd-behavior\n{yaml.safe_dump(declarations)}```\n"
+    )
+
+
+def _write_reconciliation_document(project, output, content):
+    path = project / output
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _report_import_disagreement():
+    return _reconciliation_document(
+        "The implementation plan relies on the approved import size limit.",
+        disagreement=(DISPUTED_POLICY, (RECONCILIATION_OWNER, RECONCILIATION_PEER)),
+    )
+
+
+@pytest.fixture
+def reconciliation_project(tmp_path, monkeypatch):
+    project = _setup_project(tmp_path)
+    config = yaml.safe_load(CoDD_YAML)
+    config["generate"] = {"design_consistency": True, "body_retry": {"max_retries": 1}}
+    config["wave_config"]["2"][0]["depends_on"] = ["governance:decisions"]
+    config["wave_config"]["3"][0]["depends_on"] = ["design:system-design"]
+    (project / "codd/codd.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    _write_reconciliation_document(project, RECONCILIATION_OWNER, _reconciliation_document(
+        "The approved import size limit is 100 bytes.", spec="import-policy",
+    ))
+    _write_reconciliation_document(project, RECONCILIATION_PEER, _reconciliation_document(
+        UNRESTRICTED_IMPORT, spec="import-validation",
+    ))
+    calls = []
+
+    def generate(_command, prompt):
+        if "Select reconciliation edit locations" in prompt:
+            # The invalid target in this fixture has an additional unresolved
+            # report. Only the eligibility regression should ever reach it.
+            lines = (project / RECONCILIATION_PEER).read_text(encoding="utf-8").splitlines()
+            return json.dumps({"replace_lines": list(range(5, len(lines))), "insert_after": []})
+        if "Node ID: design:system-design" in prompt:
+            calls.append("rewrite")
+            return _reconciliation_document(BOUNDED_IMPORT, spec="import-validation")
+        assert "Node ID: design:implementation-plan" in prompt
+        calls.append("reporter")
+        if BOUNDED_IMPORT in prompt:
+            return _reconciliation_document("The implementation plan enforces the 100 byte limit.")
+        return _report_import_disagreement()
+
+    monkeypatch.setattr(generator_module, "_invoke_ai_command", generate)
+    return project, calls
+
+
+def test_zero_reconciliation_budget_does_not_reread_cited_documents(reconciliation_project, monkeypatch):
+    project, calls = reconciliation_project
+    config_path = project / "codd/codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["generate"]["body_retry"]["max_retries"] = 0
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    read_bytes = Path.read_bytes
+    snapshots = []
+
+    def record_cited_snapshot(path):
+        if path in {project / RECONCILIATION_OWNER, project / RECONCILIATION_PEER}:
+            snapshots.append(path.relative_to(project).as_posix())
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", record_cited_snapshot)
+
+    with pytest.raises(DesignConsistencyError, match=DISPUTED_POLICY):
+        generate_wave(project, 3)
+
+    assert calls == ["reporter"]
+    assert snapshots == []
+    assert not (project / RECONCILIATION_REPORTER).exists()
+    assert not (project / RECONCILIATION_LOG).exists()
+
+
+def test_reconciliation_cannot_rewrite_a_document_later_in_the_same_wave(reconciliation_project):
+    project, calls = reconciliation_project
+    config_path = project / "codd/codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["wave_config"]["2"] = config["wave_config"].pop("3") + config["wave_config"]["2"]
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    peer = project / RECONCILIATION_PEER
+    before = peer.read_bytes()
+
+    with pytest.raises(DesignConsistencyError, match=DISPUTED_POLICY):
+        generate_wave(project, 2)
+
+    assert calls == ["reporter"]
+    assert peer.read_bytes() == before
+    assert not (project / RECONCILIATION_REPORTER).exists()
+    assert not (project / RECONCILIATION_LOG).exists()
+
+
+def test_reconciliation_cannot_rewrite_a_cited_document_with_its_own_disagreement(reconciliation_project):
+    project, calls = reconciliation_project
+    _write_reconciliation_document(project, ACCEPTANCE_CRITERIA, _reconciliation_document(
+        "The acceptance criteria exercise the approved import size limit.",
+    ))
+    _write_reconciliation_document(project, RECONCILIATION_PEER, _reconciliation_document(
+        UNRESTRICTED_IMPORT, spec="import-validation",
+        disagreement=(
+            "The decisions and acceptance criteria disagree about empty input files.",
+            (RECONCILIATION_OWNER, ACCEPTANCE_CRITERIA),
+        ),
+    ))
+    peer = project / RECONCILIATION_PEER
+    before = peer.read_bytes()
+
+    with pytest.raises(DesignConsistencyError, match=DISPUTED_POLICY):
+        generate_wave(project, 3)
+
+    assert calls == ["reporter"]
+    assert peer.read_bytes() == before
+    assert not (project / RECONCILIATION_REPORTER).exists()
+    assert not (project / RECONCILIATION_LOG).exists()
+
+
+@pytest.mark.parametrize("failure", ["document", "audit"])
+def test_reconciliation_restores_documents_when_publication_fails(reconciliation_project, monkeypatch, failure):
+    project, calls = reconciliation_project
+    peer = project / RECONCILIATION_PEER
+    reporter = project / RECONCILIATION_REPORTER
+    log = project / RECONCILIATION_LOG
+    before = peer.read_bytes()
+    previous_log = b'{"review_dependents": []}\n'
+    log.parent.mkdir(parents=True)
+    log.write_bytes(previous_log)
+    write_bytes = Path.write_bytes
+    temporary_file = generator_module.NamedTemporaryFile
+
+    def partial_document_write(path, data):
+        if path == reporter:
+            write_bytes(path, data[:10])
+            raise OSError("publication failed")
+        return write_bytes(path, data)
+
+    @contextmanager
+    def partial_audit_write(**kwargs):
+        with temporary_file(**kwargs) as handle:
+            write = handle.write
+
+            def fail_after_prefix(data):
+                assert data.startswith(previous_log)
+                write(data[:len(previous_log) + 10])
+                raise OSError("publication failed")
+
+            monkeypatch.setattr(handle, "write", fail_after_prefix)
+            yield handle
+
+    if failure == "document":
+        monkeypatch.setattr(Path, "write_bytes", partial_document_write)
+    else:
+        monkeypatch.setattr(generator_module, "NamedTemporaryFile", partial_audit_write)
+
+    with pytest.raises(OSError, match="publication failed"):
+        generate_wave(project, 3)
+
+    assert calls == ["reporter", "rewrite", "reporter"]
+    assert peer.read_bytes() == before
+    assert not reporter.exists()
+    assert log.read_bytes() == previous_log
+    assert list(log.parent.iterdir()) == [log]
+
+
+def test_complete_reconciliation_rejects_staged_documents_when_a_planned_document_is_missing(reconciliation_project):
+    project, calls = reconciliation_project
+    _write_reconciliation_document(project, RECONCILIATION_REPORTER, _report_import_disagreement())
+    peer = project / RECONCILIATION_PEER
+    reporter = project / RECONCILIATION_REPORTER
+    peer_before = peer.read_bytes()
+    reporter_before = reporter.read_bytes()
+
+    with pytest.raises(DesignConsistencyError, match=f"{ACCEPTANCE_CRITERIA}: planned document is missing"):
+        generator_module.reconcile_generated_design(project)
+
+    assert calls == ["rewrite", "reporter"]
+    assert peer.read_bytes() == peer_before
+    assert reporter.read_bytes() == reporter_before
+    assert not (project / RECONCILIATION_LOG).exists()
 
 
 @pytest.fixture
@@ -238,6 +446,175 @@ def test_generate_uses_dependency_documents_as_ai_context(tmp_path, mock_ai_cli)
     assert "explicit cleanup/idempotent teardown" in prompt
     assert "Scenario fixtures:" in prompt
     assert "do not trust mutable shared seed state" in prompt
+
+
+def test_unmanaged_generation_prompts_match_legacy_bytes(tmp_path, mock_ai_cli):
+    project = _setup_project(tmp_path)
+    for wave in (1, 2, 3):
+        generate_wave(project, wave)
+
+    # Captured from d943740 with the same project and mocked AI responses.
+    assert [hashlib.sha256(call["input"].encode("utf-8")).hexdigest() for call in mock_ai_cli] == [
+        "d21ea2838648c5bf380efa56dd2ec425933fded255899e49b19dc4a24473d973",
+        "1912abf5245f42b134ef03cc1f532274711782e1f4ddc9609ee1df40841a6f55",
+        "4077b16fcbcc7e2047a061f6b836c6ae62e31dbe582d162d27a1654585483a03",
+        "ab9849784d3adda9519520c31d709f33a4eaa7204e67bf298b2cd9dd053cbb42",
+    ]
+
+
+def test_explicitly_disabled_generation_prompts_match_legacy_bytes(tmp_path, mock_ai_cli):
+    project = _setup_project(tmp_path)
+    config = yaml.safe_load(CoDD_YAML)
+    config["generate"] = {"design_consistency": False}
+    # Stale metadata and an existing declaration must not change the design prompt.
+    config["wave_config"]["2"][0].update(behavior_owners=["spec"], owns_operation_flow=True)
+    (project / "codd/codd.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    system_design = project / "docs/design/system_design.md"
+    system_design.parent.mkdir(parents=True)
+    system_design.write_text("# Old design\n\n```codd-behavior\nowns: {}\ncases: []\n```\n", encoding="utf-8")
+
+    generate_wave(project, 1)
+    generate_wave(project, 2, force=True)
+
+    # Captured from d943740 with the same project and mocked AI responses.
+    assert hashlib.sha256(mock_ai_cli[2]["input"].encode("utf-8")).hexdigest() == (
+        "460ff884952052ae7d29c16566970d3e3bde1fd9c031527072bc03466aac816a"
+    )
+
+
+def test_managed_generation_prompt_covers_each_listed_convention(tmp_path, monkeypatch):
+    project = _setup_project(tmp_path)
+    config_path = project / "codd/codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["wave_config"]["1"][0]["behavior_owners"] = []
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    prompts = []
+
+    def generate(_command, prompt):
+        prompts.append(prompt)
+        return (
+            "# Generated Content\n\n## Overview\n\n"
+            "This document contains concrete content.\n\n"
+            "```codd-behavior\nowns: {}\ncases: []\nunresolved: []\n```\n"
+        )
+
+    monkeypatch.setattr(generator_module, "_invoke_ai_command", generate)
+    generate_wave(project, 1)
+
+    prompt = prompts[0]
+    assert "Behavior ownership and concrete examples:" in prompt
+    assert "Cover the requirements assigned to this document." in prompt
+    assert "Cite the relevant owning section" in prompt
+    assert "For each listed convention and invariant" in prompt
+    assert "give the local concrete design and verification measure or cite its owning section" in prompt
+    assert "Do not omit any listed item." in prompt
+    assert "Targets: db:rls_policies" in prompt
+    assert "Targets: db_table:audit_logs" in prompt
+    assert "Global invariant" in prompt
+    assert "Artifact invariant" in prompt
+    assert "Behavior ownership and concrete examples:" not in prompts[1]
+
+
+def test_regeneration_cannot_remove_existing_behavior_declarations(tmp_path, monkeypatch):
+    project = _setup_project(tmp_path)
+    body = "# Generated Content\n\n## Overview\n\nThis document contains concrete content.\n"
+    original = body + "\n```codd-behavior\nowns: {}\ncases: []\nunresolved: []\n```\n"
+    path = project / "docs/test/acceptance_criteria.md"
+    path.parent.mkdir()
+    path.write_text(original, encoding="utf-8")
+    prompts = []
+
+    def omit_declarations(_command, prompt):
+        prompts.append(prompt)
+        return body
+
+    monkeypatch.setattr(generator_module, "_invoke_ai_command", omit_declarations)
+    with pytest.raises(ValueError, match="missing codd-behavior declarations"):
+        generator_module.regenerate_artifact(project, node_id="design:acceptance-criteria")
+
+    assert "Behavior ownership and concrete examples:" in prompts[0]
+    assert path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    ("role", "owner_elsewhere", "reference_only"),
+    [(False, False, False), (None, True, False), (False, True, True), (True, False, False)],
+)
+def test_managed_design_prompt_obeys_operation_flow_assignment(
+    tmp_path, monkeypatch, role, owner_elsewhere, reference_only,
+):
+    project = _setup_project(tmp_path)
+    config_path = project / "codd/codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["generate"] = {"design_consistency": True}
+    design = config["wave_config"]["2"][0]
+    design["depends_on"] = []
+    if role is not None:
+        design["owns_operation_flow"] = role
+    if owner_elsewhere:
+        config["wave_config"]["3"].append({
+            "node_id": "design:workflow",
+            "output": "docs/design/workflow.md",
+            "title": "Workflow",
+            "owns_operation_flow": True,
+        })
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    prompts = []
+
+    def generate(_command, prompt):
+        prompts.append(prompt)
+        body = (
+            "# Generated Content\n\n## Overview\n\n"
+            "This document contains concrete content.\n\n"
+            "```codd-behavior\nowns: {}\ncases: []\nunresolved: []\n```\n"
+        )
+        if role is True:
+            body += "\n```yaml\noperation_flow:\n  operations:\n    - id: process-input\n```\n"
+        return body
+
+    monkeypatch.setattr(generator_module, "_invoke_ai_command", generate)
+    generate_wave(project, 2)
+
+    prompt, = prompts
+    assert ("Operational Behavior Model (DESIGN-TIME, CRITICAL)" in prompt) is not reference_only
+    assert ("Do not emit operation_flow here." in prompt) is reference_only
+    assert ("Emit operation_flow for the operations assigned here." in prompt) is (role is True)
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_generate_applies_path_confinement_to_managed_artifacts(tmp_path, monkeypatch, managed):
+    project = _setup_project(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    design = project / "docs/design"
+    design.mkdir()
+    (design / "linked").symlink_to(outside, target_is_directory=True)
+    output = "docs/design/linked/subdir/system.md"
+    config_path = project / "codd/codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["wave_config"]["2"][0]["output"] = output
+    config["wave_config"]["2"][0]["depends_on"] = []
+    if managed:
+        config["wave_config"]["2"][0]["behavior_owners"] = []
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    prompts = []
+
+    def generate(_command, prompt):
+        prompts.append(prompt)
+        assert (outside / "subdir").is_dir()
+        return "# Generated Content\n\n## Overview\n\nThis document contains concrete content.\n"
+
+    monkeypatch.setattr(generator_module, "_invoke_ai_command", generate)
+    if managed:
+        with pytest.raises(ValueError, match="design output escapes the project"):
+            generate_wave(project, 2)
+        assert not prompts
+        assert not (outside / "subdir").exists()
+    else:
+        result, = generate_wave(project, 2)
+        assert result.path == project / output
+        assert len(prompts) == 1
+        assert (outside / "subdir/system.md").is_file()
 
 
 def test_design_prompt_requires_design_time_operational_behavior_model(tmp_path, mock_ai_cli):

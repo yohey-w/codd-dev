@@ -16,7 +16,15 @@ from typing import Any, Callable, Literal, Mapping
 
 import yaml
 
+from codd.ai_invoke import file_block_paths
 from codd.claude_cli import with_default_claude_permission_bypass
+from codd.requirement_appendix import (
+    RequirementAppendixWriteError,
+    implementation_step_outputs,
+    preserve_requirement_appendix,
+    protect_requirement_appendix,
+    with_requirement_appendix,
+)
 
 
 RunStatus = Literal["SUCCESS", "PARTIAL", "TIMEOUT", "USER_INTERRUPTED"]
@@ -147,6 +155,11 @@ class ChunkedRunner:
 
         completed = _read_completed_chunks(history_path) if resume else []
         completed_by_index = {chunk.chunk_index: chunk for chunk in completed}
+        protect_requirement_appendix(project_root, [
+            path for index, chunk in enumerate(chunks) if index not in completed_by_index
+            for step in chunk for payload in [_step_payload(step)]
+            for path in implementation_step_outputs(payload.get("expected_outputs"), payload.get("target_path_hint"))
+        ])
         try:
             for chunk_index, chunk in enumerate(chunks):
                 if chunk_index in completed_by_index:
@@ -158,9 +171,15 @@ class ChunkedRunner:
                     chunk_index=chunk_index,
                     total_chunks=total_chunks,
                 )
+                prompt = with_requirement_appendix(prompt, project_root)
                 started = time.monotonic()
                 try:
-                    output, exit_code = self._invoke(ai_command, prompt, project_root)
+                    with preserve_requirement_appendix(project_root):
+                        output, exit_code = self._invoke(ai_command, prompt, project_root)
+                    protect_requirement_appendix(project_root, file_block_paths(output))
+                except RequirementAppendixWriteError as exc:
+                    print(str(exc), file=sys.stderr)
+                    return self._finish(history_path, completed, total_chunks, "PARTIAL")
                 except _ChunkTimeout as exc:
                     timed_out = ChunkedExecution(
                         chunk_index=chunk_index,
