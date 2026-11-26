@@ -567,6 +567,60 @@ def test_file_only_dependency_artifact_prompt_matches_baseline(project, producer
     assert hashlib.sha256(prompt.encode()).hexdigest() == digest
 
 
+@pytest.mark.parametrize("limit, role, routing", [
+    (None, "normal", ("standard", "incomplete_dependency_artifact", False)),
+    (20_999, "normal", ("standard", "incomplete_dependency_artifact", False)),
+    (21_000, "one-shot", ("one_shot", "complete_context", False)),
+], ids=["unset", "one-character-over", "exact-limit"])
+def test_dependency_artifact_prompt_limit_routes_by_total_characters(project, limit, role, routing):
+    # Each producer fits the default alone; together they need 21,000 characters.
+    producers = ["src/producer_a.py", "src/producer_b.py"]
+    body = "#" + "界" * 10_498 + "\n"
+    for path in producers:
+        project.put(path, body)
+    project.plan(
+        ("produce", "docs/producer.md", producers, []),
+        ("consume", DESIGN, [OUTPUT], ["produce"]),
+    )
+    if limit is not None:
+        project.config["implement"]["dependency_artifact_files_prompt_limit"] = limit
+    project.configure(normal=[SUCCESS], **{"one-shot": [SUCCESS]})
+
+    project.run(expected=[OUTPUT])
+
+    [(called, prompt)] = project.calls
+    assert called == role
+    assert project.routing == [routing]
+    for path in producers:
+        assert (f"--- BEGIN DEPENDENCY ARTIFACT {path} ---\n{body}" in prompt) == (role == "one-shot")
+
+
+@pytest.mark.parametrize("limit, size, role", [
+    (None, 21_000, "normal"),
+    ("21000", 21_000, "normal"),
+    (21_000.5, 21_000, "normal"),
+    (True, 32, "one-shot"),
+    (False, 32, "one-shot"),
+    (0, 32, "one-shot"),
+    (-1, 32, "one-shot"),
+    ([], 32, "one-shot"),
+    ({}, 32, "one-shot"),
+], ids=["null", "numeric-string", "float", "true", "false", "zero", "negative", "list", "mapping"])
+def test_dependency_artifact_prompt_limit_invalid_values_use_default(project, limit, size, role):
+    producer = "src/producer.py"
+    project.put(producer, "#" + "x" * (size - 2) + "\n")
+    project.plan(
+        ("produce", "docs/producer.md", [producer], []),
+        ("consume", DESIGN, [OUTPUT], ["produce"]),
+    )
+    project.config["implement"]["dependency_artifact_files_prompt_limit"] = limit
+    project.configure(normal=[SUCCESS], **{"one-shot": [SUCCESS]})
+
+    project.run(expected=[OUTPUT])
+
+    assert [called for called, _ in project.calls] == [role]
+
+
 def test_new_source_and_test_route_with_full_near_and_incomplete_distant_artifacts(project, capsys):
     output_test = "tests/test_unit.py"
     shared_design = "docs/shared.md"
@@ -860,3 +914,29 @@ def test_existing_output_over_budget_uses_standard_even_if_shown_in_steps(projec
     assert original in project.calls[1][1]
     assert project.routing == [("standard", "existing_output_over_budget", False)]
     assert (project.root / OUTPUT).read_text().endswith("value = 2\n")
+
+
+@pytest.mark.parametrize("limit, shown_in_full", [(None, False), (40_000, True)], ids=["unset", "raised"])
+def test_dependency_artifact_prompt_limit_also_sets_the_budget_left_for_distant_artifacts(
+    project, limit, shown_in_full,
+):
+    # The distant producer alone exceeds what the default leaves after the near one.
+    near, far = "src/near_producer.py", "src/far_producer.py"
+    near_body = "#near\n"
+    far_body = "#" + "y" * 24_998 + "\n"
+    project.put(near, near_body)
+    project.put(far, far_body)
+    project.plan(
+        ("produce_far", "docs/far.md", [far], []),
+        ("produce_near", "docs/near.md", [near], ["produce_far"]),
+        ("consume", DESIGN, [OUTPUT], ["produce_near"]),
+    )
+    if limit is not None:
+        project.config["implement"]["dependency_artifact_files_prompt_limit"] = limit
+    project.configure(normal=[SUCCESS], **{"one-shot": [SUCCESS]})
+
+    project.run(expected=[OUTPUT])
+
+    [(_called, prompt)] = project.calls
+    assert f"--- BEGIN DEPENDENCY ARTIFACT {near} ---\n{near_body}" in prompt
+    assert (far_body in prompt) == shown_in_full

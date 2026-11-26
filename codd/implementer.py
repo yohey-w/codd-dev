@@ -2864,7 +2864,7 @@ def _existing_output_files_context(
     return "\n\n".join(sections)
 
 
-#: Cap on total bytes of dependency-produced file content folded into an
+#: Default cap on total characters of dependency-produced file content folded into an
 #: implement prompt by ``_dependency_artifact_files_context`` (PART 2 of the
 #: cross-artifact symbol-coherence fix). Mirrors
 #: ``EXISTING_OUTPUT_FILES_PROMPT_LIMIT``: full producer content is the
@@ -2872,6 +2872,15 @@ def _existing_output_files_context(
 #: pathological producer must never blow the prompt budget — on overflow the
 #: block degrades to a name-level surface, then to paths only.
 DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT = 20000
+
+
+def _dependency_artifact_files_prompt_limit(config: dict[str, Any]) -> int:
+    section = config.get("implement")
+    if isinstance(section, dict):
+        value = section.get("dependency_artifact_files_prompt_limit")
+        if type(value) is int and value > 0:
+            return value
+    return DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT
 
 
 def _dependency_artifact_degraded_entry(project_root: Path, path_text: str) -> str:
@@ -3393,6 +3402,7 @@ def _dependency_artifact_files_context(
     track_full_content = coverage is not None or full_prompt_files is not None
     incomplete_tier1 = set() if track_full_content else None
     incomplete_tier2 = set() if track_full_content else None
+    limit = _dependency_artifact_files_prompt_limit(config)
     incomplete_directories: set[str] = set()
     expanded_paths: set[Path] = set()
     tier1_files = list(_read_dependency_artifacts(
@@ -3402,11 +3412,11 @@ def _dependency_artifact_files_context(
         incomplete_directories=incomplete_directories,
     ))
     tier1_sections, tier1_used = _render_tier1_dependency_artifacts(
-        project_root, tier1_files, DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT, incomplete=incomplete_tier1,
+        project_root, tier1_files, limit, incomplete=incomplete_tier1,
     )
     if expanded_paths:
         tier2 = [path for path in tier2 if project_root / path not in expanded_paths]
-    remaining = max(0, DEPENDENCY_ARTIFACT_FILES_PROMPT_LIMIT - tier1_used)
+    remaining = max(0, limit - tier1_used)
     tier2_block = _render_dependency_artifact_files(project_root, tier2, remaining, incomplete=incomplete_tier2)
 
     if full_prompt_files is not None:
