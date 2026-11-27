@@ -955,7 +955,9 @@ def test_ordering_respects_an_indirect_order_created_by_another_rule(tmp_path, m
     assert [dep["id"] for dep in waves["4"][1]["depends_on"]] == [REQ_NODE]
 
 
-def test_conflicting_ordering_rules_name_the_rule_and_preserve_saved_files(tmp_path, monkeypatch):
+def test_saved_selection_does_not_borrow_contradicting_current_rules(tmp_path, monkeypatch):
+    # Planning from a saved selection only borrows the current catalog's rules; a catalog
+    # problem there never stops planning (main has no rules). Selection still rejects it.
     base, final = "design:base", "design:final"
     catalog = [_catalog_row(base, "Base design"), _catalog_row(final, "Final design")]
     config_path = _project(tmp_path, catalog)
@@ -964,16 +966,17 @@ def test_conflicting_ordering_rules_name_the_rule_and_preserve_saved_files(tmp_p
     config["required_artifacts"]["default_artifacts"][0]["ordered_after"] = [final]
     config["required_artifacts"]["default_artifacts"][1]["ordered_after"] = [base]
     config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
-    lexicon_path = tmp_path / "project_lexicon.yaml"
-    original_config, original_lexicon = config_path.read_bytes(), lexicon_path.read_bytes()
-    prompts = _replies(monkeypatch)
+    prompts = _replies(monkeypatch, _saved_plan({"2": [_ordering_entry(base), _ordering_entry(final)]}))
 
     result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
 
-    assert result.exit_code == 1, result.output
-    assert f"{base!r} ordered_after {final!r} creates a dependency cycle" in result.output
-    assert prompts == []
-    assert config_path.read_bytes() == original_config and lexicon_path.read_bytes() == original_lexicon
+    assert result.exit_code == 0, result.output
+    assert len(prompts) == 1
+    assert not [line for line in result.output.splitlines() if "ordered_after" in line]
+    waves = yaml.safe_load(config_path.read_bytes())["wave_config"]
+    assert sorted(entry["node_id"] for entry in waves["2"]) == sorted(
+        [_ordering_entry(base)["node_id"], _ordering_entry(final)["node_id"]]
+    )
 
 
 @pytest.mark.parametrize(("target", "other_field"), [
@@ -1002,3 +1005,38 @@ def test_derivation_rejects_catalog_ordering_cycles_before_using_a_response(tmp_
     assert calls == []
     assert config_path.read_bytes() == original_config
     assert not (tmp_path / "project_lexicon.yaml").exists()
+
+
+def test_saved_selection_skips_a_borrowed_rule_that_would_close_a_cycle(tmp_path, monkeypatch):
+    # cycle_only_when_mixing_catalog_versions: each catalog version alone is valid.
+    a, b = "design:a", "design:b"
+    catalog = [_catalog_row(a, "Design A"), _catalog_row(b, "Design B") | {"depends_on": [a]}]
+    config_path = _project(tmp_path, catalog)
+    _ordering_selection(tmp_path, monkeypatch, catalog, {a, b})
+    config = yaml.safe_load(config_path.read_bytes())
+    config["required_artifacts"]["default_artifacts"][0]["ordered_after"] = [b]
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    prompts = _replies(monkeypatch, _saved_plan({"2": [_ordering_entry(a), _ordering_entry(b)]}))
+
+    result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
+
+    assert result.exit_code == 0, result.output
+    assert len(prompts) == 1
+    assert not [line for line in result.output.splitlines() if "ordered_after" in line]
+
+
+def test_saved_selection_ignores_an_unreadable_current_catalog(tmp_path, monkeypatch):
+    # unrelated_malformed_override: an unselected row's defect must not stop planning.
+    a, b, c = "design:a", "design:b", "design:c"
+    catalog = [_catalog_row(a, "Design A"), _catalog_row(b, "Design B"), _catalog_row(c, "Design C")]
+    config_path = _project(tmp_path, catalog)
+    _ordering_selection(tmp_path, monkeypatch, catalog, {a, b})
+    config = yaml.safe_load(config_path.read_bytes())
+    del config["required_artifacts"]["default_artifacts"][2]["scope"]
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    prompts = _replies(monkeypatch, _saved_plan({"2": [_ordering_entry(a), _ordering_entry(b)]}))
+
+    result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
+
+    assert result.exit_code == 0, result.output
+    assert len(prompts) == 1

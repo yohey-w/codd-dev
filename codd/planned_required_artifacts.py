@@ -335,6 +335,38 @@ class RequiredArtifactLineup:
         return "\n".join(lines)
 
 
+def _borrowed_ordering(
+    project_root: Path, saved: dict[str, dict[str, Any]], ordering: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    """Lend the current catalog's rules to rows saved before ``ordered_after`` existed.
+
+    Borrowing never stops planning: when the current catalog cannot be read, or a
+    borrowed rule would close a cycle with the saved selection, that rule is not used
+    and planning behaves as it did before the rule existed.
+    """
+    try:
+        deriver = RequiredArtifactsDeriver(project_root, warn=lambda _message: None)
+        current = {row["id"].strip(): row for row in deriver._load_defaults(deriver.project_type)}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+    dependencies = {
+        artifact_id: [str(dep).strip() for dep in candidate.get("depends_on", []) or []]
+        for artifact_id, candidate in saved.items()
+    }
+    for artifact_id, predecessors in ordering.items():
+        dependencies.setdefault(artifact_id, []).extend(predecessors)
+    borrowed: dict[str, list[str]] = {}
+    for artifact_id, candidate in saved.items():
+        if "ordered_after" in candidate:
+            continue
+        for after in (current.get(artifact_id) or {}).get("ordered_after") or []:
+            if after not in saved or after == artifact_id or _depends_on(after, artifact_id, dependencies):
+                continue
+            dependencies.setdefault(artifact_id, []).append(after)
+            borrowed.setdefault(artifact_id, []).append(after)
+    return borrowed
+
+
 def load_required_artifact_lineup(
     project_root: Path, requirements: list[RequirementDocument],
 ) -> RequiredArtifactLineup:
@@ -390,18 +422,15 @@ def load_required_artifact_lineup(
     }
     if len(registry_rows) > 1:
         raise ValueError(f"Several selected rows denote the same canonical registry. {_REDERIVE}")
-    deriver = RequiredArtifactsDeriver(project_root, warn=lambda _message: None)
-    defaults = {row["id"].strip(): row for row in deriver._load_defaults(deriver.project_type)}
-    # Use current rules for old snapshots while preserving the saved selection and scopes.
-    selected_candidates = {
-        artifact_id: {**defaults.get(artifact_id, {}), **(candidates.get(artifact_id) or {})}
-        for artifact_id in rows
-    }
-    validate_catalog_ordering(selected_candidates, source="required_artifact_snapshot.candidates")
+    # Rules saved with the selection belong to it and are validated as before.
+    saved = {artifact_id: candidates.get(artifact_id) or {} for artifact_id in rows}
+    validate_catalog_ordering(saved, source="required_artifact_snapshot.candidates")
     ordering = {
-        artifact_id: candidate["ordered_after"]
-        for artifact_id, candidate in selected_candidates.items() if candidate.get("ordered_after")
+        artifact_id: list(candidate["ordered_after"])
+        for artifact_id, candidate in saved.items() if candidate.get("ordered_after")
     }
+    for artifact_id, predecessors in _borrowed_ordering(project_root, saved, ordering).items():
+        ordering.setdefault(artifact_id, []).extend(predecessors)
     return RequiredArtifactLineup(
         project_root, rows, candidates, omissions,
         requirement_paths, existing_rows, registry_rows, ordering,
