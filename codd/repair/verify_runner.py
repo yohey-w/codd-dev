@@ -849,20 +849,24 @@ class VerifyRunner:
 
     def feedback_test_command(
         self, settings: dict[str, Any],
-    ) -> tuple[str | tuple[str, ...], Path, dict[str, str]] | None:
-        """The verifier's command, working directory, and spawn environment."""
+    ) -> tuple[str | tuple[str, ...], Path, dict[str, str], float] | None:
+        """The verifier's command, working directory, spawn environment, and timeout."""
+        from codd.languages.verify_executor import DEFAULT_VERIFY_TIMEOUT_SECONDS
+
         route = self._resolve_test_route(settings)
         if route.failure is not None:
             raise ValueError(route.failure[2].message)
         if route.plan is not None:
             command = route.plan.argv
             cwd = self.project_root / (route.plan.cwd or ".")
+            timeout = DEFAULT_VERIFY_TIMEOUT_SECONDS
         else:
             command = self._legacy_detected_test_command(settings, route.profile)
             cwd = self.project_root
+            timeout = _test_timeout_seconds(settings)
         if not command:
             return None
-        return command, cwd, self.test_command_environment(settings, include_shell_assignments=False)
+        return command, cwd, self.test_command_environment(settings, include_shell_assignments=False), timeout
 
     def _resolve_test_route(self, settings: dict[str, Any]) -> _TestRoute:
         """Resolve and run the project's test command — CONTRACT-FIRST (Step 6).

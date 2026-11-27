@@ -1,12 +1,26 @@
 """Regression cases from the independent feedback review."""
 
 import shlex
+import subprocess
 import sys
 import textwrap
+from types import SimpleNamespace
 
 import pytest
+import yaml
+
+from codd.greenfield import implement_test_feedback as feedback_engine
+from codd.languages import verify_executor
+from codd.languages.adapters.runner_report import CTestJunitReportAdapter
+from codd.languages.registry import default_adapter_registry
 
 from .test_implement_test_feedback import APP, FIXED, HELPER, TEST_FILE, TESTS, feedback, project_factory
+
+
+_MANIFEST = (
+    b'[project]\nname = "stub-app"\nversion = "0.1.0"\n\n'
+    b'[tool.pytest.ini_options]\ntestpaths = ["checks"]\npythonpath = ["src"]\n'
+)
 
 
 def _trace(path):
@@ -130,6 +144,151 @@ def test_round_cleanup_keeps_accepted_output_and_restores_suite_side_effects(pro
     [attempt] = _round(root)["attempts"]
     assert attempt["decision"] == "accepted"
     assert "[7][0]" in (root / TEST_FILE).read_text()
+
+
+@pytest.mark.parametrize("decision", ["accepted", "rejected"])
+def test_round_cleanup_preserves_provisioned_dependencies(project_factory, decision):
+    pipeline, root, _, _ = project_factory(
+        verdict_failure="coverage" if decision == "rejected" else None,
+    )
+    manifest = root / "pyproject.toml"
+    prepared = _MANIFEST.replace(b'\n\n', b'\ndependencies = ["test-asset"]\n\n', 1)
+    manifest.write_bytes(_MANIFEST)
+    provision = pipeline._provision_env
+    seen = []
+
+    def prepare(project_root):
+        provision(project_root)
+        seen.append(manifest.read_bytes())
+        if len(seen) == 1:
+            manifest.write_bytes(prepared)
+
+    pipeline._provision_env = prepare
+    result = pipeline.run(root)
+
+    assert result.status == "success", result.error
+    [attempt] = _round(root)["attempts"]
+    assert attempt["decision"] == decision
+    assert seen == [_MANIFEST, prepared]
+    assert manifest.read_bytes() == prepared
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_reprovisioned_dependencies_survive_round_cleanup(project_factory, monkeypatch, resume):
+    asset = ".venv/runtime-asset.txt"
+    pipeline, root, trace, _ = project_factory(
+        fixes={"case": {"files": {TEST_FILE: FIXED}, "direct": {asset: "candidate"}}},
+    )
+    manifest = root / "pyproject.toml"
+    prepared = _MANIFEST.replace(b'\n\n', b'\ndependencies = ["test-asset"]\n\n', 1)
+    reprovisioned = prepared.replace(b'"test-asset"]', b'"test-asset", "runtime-asset"]')
+    manifest.write_bytes(_MANIFEST)
+    runtime = root / asset
+    provision = pipeline._provision_env
+    seen = []
+
+    def prepare(project_root):
+        provision(project_root)
+        seen.append((manifest.read_bytes(), runtime.exists()))
+        if len(seen) in (1, 2):
+            manifest.write_bytes(prepared if len(seen) == 1 else reprovisioned)
+            runtime.parent.mkdir(exist_ok=True)
+            runtime.write_text("prepared", encoding="utf-8")
+
+    pipeline._provision_env = prepare
+    if resume:
+        rerun = pipeline._reimplement_tasks
+
+        def interrupt(*args, **kwargs):
+            rerun(*args, **kwargs)
+            raise KeyboardInterrupt
+
+        with monkeypatch.context() as patch:
+            patch.setattr(pipeline, "_reimplement_tasks", interrupt)
+            with pytest.raises(KeyboardInterrupt):
+                pipeline.run(root)
+
+    result = pipeline.run(root, resume=resume)
+
+    assert result.status == "success", result.error
+    [attempt] = _round(root)["attempts"]
+    assert attempt["decision"] == "rejected"
+    assert _trace(trace).count("feedback case") == 1
+    assert seen == [(_MANIFEST, False), (prepared, False), (reprovisioned, True)]
+    assert manifest.read_bytes() == reprovisioned
+    assert runtime.read_text(encoding="utf-8") == "prepared"
+
+
+@pytest.mark.parametrize("route", ["profile", "legacy"])
+def test_feedback_suite_and_isolation_share_verifier_timeout(project_factory, monkeypatch, route):
+    tests = "\n".join(f"def test_case_{i}():\n    actual = {i}\n    assert actual < 0\n" for i in range(3))
+    pipeline, root, _, _ = project_factory(
+        initial={"case": {TEST_FILE: tests}},
+        owned={"case": (TEST_FILE,), "ambiguous": ("checks/",)},
+        timeout=29,
+    )
+    monkeypatch.setattr(verify_executor, "DEFAULT_VERIFY_TIMEOUT_SECONDS", 13)
+    if route == "profile":
+        # The built-in Python profile needs a report parser to enter the executor.
+        monkeypatch.setitem(default_adapter_registry._adapters, (
+            "runner_report", "pytest-junit-xml",
+        ), CTestJunitReportAdapter())
+        config = root / "codd/codd.yaml"
+        settings = yaml.safe_load(config.read_text(encoding="utf-8"))
+        del settings["verify"]["test_command"]
+        config.write_text(yaml.safe_dump(settings), encoding="utf-8")
+        (root / "tests").mkdir(exist_ok=True)
+        (root / "tests/test_budget.py").write_text(tests, encoding="utf-8")
+
+    expected = 13 if route == "profile" else 29
+    # Two isolated runs exhaust the aggregate budget without wall-clock sleeps.
+    elapsed = expected * 0.75
+    clock = 0.0
+    feedback_timeouts = []
+    verify_timeouts = []
+    monkeypatch.setattr(feedback_engine, "time", SimpleNamespace(monotonic=lambda: clock))
+    popen = subprocess.Popen
+
+    def launch(*args, **kwargs):
+        process = popen(*args, **kwargs)
+        env = kwargs.get("env") or {}
+        if "CODD_TEST_FEEDBACK_CASE" in env:
+            communicate = process.communicate
+
+            def observe(timeout):
+                nonlocal clock
+                feedback_timeouts.append(timeout)
+                result = communicate(timeout=timeout)
+                if env["CODD_TEST_FEEDBACK_CASE"]:
+                    clock += elapsed
+                return result
+
+            process.communicate = observe
+        return process
+
+    monkeypatch.setattr(feedback_engine, "subprocess", SimpleNamespace(
+        Popen=launch, PIPE=subprocess.PIPE, TimeoutExpired=subprocess.TimeoutExpired,
+    ))
+    verify = pipeline.verify_runner
+    run = subprocess.run
+
+    def record_verify_timeout(project_root, **kwargs):
+        def observe(*args, **kwargs):
+            if str(kwargs.get("cwd")) == str(project_root):
+                verify_timeouts.append(kwargs["timeout"])
+            return run(*args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(subprocess, "run", observe)
+            return verify(project_root, **kwargs)
+
+    pipeline.verify_runner = record_verify_timeout
+    result = pipeline.run(root)
+
+    assert result.status == "success", result.error
+    assert verify_timeouts == [expected]
+    assert feedback_timeouts == [expected, expected, expected - elapsed]
+    assert _round(root)["over_isolation_budget"] == 1
 
 
 def test_removing_callable_assertion_rejects_candidate(project_factory):

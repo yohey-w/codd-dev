@@ -31,7 +31,7 @@ from codd.languages.contract import resolve_language_profile
 from codd.languages.registry import UnknownLanguageError, default_adapter_registry
 from codd.operational_e2e_audit import _COVER_MARKER_RE
 from codd.reference_resolution import AUDIT_RELATIVE_PATH
-from codd.repair.verify_runner import VerifyRunner, _command_output_tail, _test_timeout_seconds
+from codd.repair.verify_runner import VerifyRunner, _command_output_tail
 from codd.verifiable_behavior_audit import coverage_gate_enabled
 from codd.vb_marker_authenticity import _scan_cover_markers_with_lines
 
@@ -242,19 +242,29 @@ def _round_target(snapshot, round_record) -> dict[str, _Entry]:
     return snapshot.read(_round_archive(snapshot, round_record, round_record.get("kept_attempt", 0)))
 
 
+def _restore_round_for_provisioning(snapshot, round_record) -> bool:
+    if not round_record.get("baseline_saved"):
+        return False
+    snapshot.restore(_round_target(snapshot, round_record))
+    # Recovery must not restore this pre-provisioning target again if the next
+    # provisioning pass is interrupted before it can save the new baseline.
+    round_record.pop("baseline_saved")
+    round_record.pop("kept_attempt", None)
+    return True
+
+
 def recover_interrupted_feedback(root, record, echo, checkpoint) -> None:
     state = record["test_feedback"]
     snapshot = _Snapshot(root, tuple(state["ignored"]), state.get("environment_paths", ()))
     for round_record in state["rounds"]:
         if round_record.get("done"):
             continue
-        if round_record.get("baseline_saved"):
-            snapshot.restore(_round_target(snapshot, round_record))
+        had_baseline = _restore_round_for_provisioning(snapshot, round_record)
         round_record["screened"].clear()
         for attempt in round_record["attempts"]:
             if attempt["decision"] != "started":
                 continue
-            if not round_record.get("baseline_saved"):
+            if not had_baseline:
                 snapshot.restore(snapshot.read(snapshot.archive))
             if snapshot.environment_changed(attempt.get("environment_before")):
                 snapshot.discard_environment()
@@ -262,6 +272,8 @@ def recover_interrupted_feedback(root, record, echo, checkpoint) -> None:
             checkpoint(root)
             snapshot.archive.unlink(missing_ok=True)
             echo(f"[implement test feedback] {attempt['owner']}: {attempt['reason']}")
+        if had_baseline:
+            checkpoint(root)
 
 
 @dataclass
@@ -285,7 +297,6 @@ class _Feedback:
         self.test_roots = test_roots
         self.sources = sources
         self.callable_assertions = callable_assertions
-        self.timeout = _test_timeout_seconds(config)
         self.snapshot = _Snapshot(root, tuple(state["ignored"]), state["environment_paths"])
         self.outputs = {task.task_id: DeclaredOutputs(root, task.expected_outputs) for task in tasks}
         self.logs = {AUDIT_RELATIVE_PATH}
@@ -300,7 +311,7 @@ class _Feedback:
         self.pipeline.echo(f"[implement test feedback] {message}")
         self.pipeline._checkpoint(self.root)
 
-    def prepare(self) -> str | None:
+    def prepare(self, round_record) -> str | None:
         try:
             self.pipeline._provision_env(self.root)
             invocation = VerifyRunner(self.root, self.config).feedback_test_command(self.config)
@@ -308,8 +319,14 @@ class _Feedback:
             return f"test environment unavailable: {exc}"
         if invocation is None:
             return "no test command detected"
-        self.command, self.cwd, self.env = invocation
+        self.command, self.cwd, self.env, self.timeout = invocation
         self.display = self.command if isinstance(self.command, str) else shlex.join(self.command)
+        try:
+            self.snapshot.persist(self.snapshot.capture(), _round_archive(self.snapshot, round_record))
+        except OSError as exc:
+            return f"cannot snapshot project artifacts: {exc}"
+        round_record["baseline_saved"] = True
+        self.pipeline._checkpoint(self.root)
         return None
 
     def run_tests(self, round_record, purpose, case=None, timeout=None) -> _Suite:
@@ -617,13 +634,17 @@ class _Feedback:
                         self.keep_outputs(round_record, owner, before, checked)
             except Exception as exc:
                 reason = f"could not evaluate the candidate: {exc}"
-        if reason is not None:
+        if environment_changed:
+            _restore_round_for_provisioning(self.snapshot, round_record)
+            self.snapshot.discard_environment()
+            candidate = suite
+        elif reason is not None:
             self.snapshot.restore(before)
             candidate = suite
-        if environment_changed:
-            self.snapshot.discard_environment()
-            candidate.unavailable = self.prepare()
         attempt.update(decision="rejected" if reason else "accepted", reason=reason or "failures decreased")
+        if environment_changed:
+            self.pipeline._checkpoint(self.root)
+            candidate.unavailable = self.prepare(round_record)
         self.emit(
             f"{owner}: {attempt['decision']} · {attempt['reason']} · "
             f"owner {attempt['before']} → {attempt['after'] if attempt['after'] is not None else '—'} · "
@@ -647,14 +668,7 @@ class _Feedback:
                 if round_record["stop"]:
                     break
                 continue
-            try:
-                if not round_record.get("baseline_saved"):
-                    self.snapshot.persist(self.snapshot.capture(), _round_archive(self.snapshot, round_record))
-                    round_record["baseline_saved"] = True
-                    self.pipeline._checkpoint(self.root)
-                problem = self.prepare()
-            except OSError as exc:
-                problem = f"cannot snapshot project artifacts: {exc}"
+            problem = self.prepare(round_record)
             suite = _Suite(unavailable=problem) if problem else self.run_tests(round_record, f"round {index + 1} suite")
             groups = []
             while not suite.unavailable and suite.failures:
@@ -682,9 +696,8 @@ class _Feedback:
                 f"round {index + 1}: {len(suite.failures)} failure(s)/error(s) remain · "
                 f"{round_record['passed_in_isolation']} passed in isolation"
             )
-            if round_record.get("baseline_saved"):
-                for attempt_index in range(len(round_record["attempts"]) + 1):
-                    _round_archive(self.snapshot, round_record, attempt_index).unlink(missing_ok=True)
+            for attempt_index in range(len(round_record["attempts"]) + 1):
+                _round_archive(self.snapshot, round_record, attempt_index).unlink(missing_ok=True)
             if stop:
                 break
 
