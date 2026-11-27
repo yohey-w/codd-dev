@@ -526,6 +526,32 @@ def test_malformed_wave_shape_is_only_checked_after_opt_in(scenario, waves, diag
     assert not commands.calls and not calls
 
 
+@pytest.mark.parametrize("waves", [
+    "not a mapping", {1: "not a list of entries"}, {1: ["not a mapping"]},
+])
+def test_empty_declaration_ignores_malformed_wave_shape(scenario, waves):
+    project, commands, calls, _, resume = scenario
+    config = project / "codd/codd.yaml"
+    settings = yaml.safe_load(config.read_text())
+    settings["wave_config"] = waves
+    config.write_text(yaml.safe_dump(settings))
+    _strategy(project, "")
+    assert resume().status == "success"
+    _checkpoint(project)
+    commands.calls.clear()
+    calls.clear()
+    assert resume().status == "success"
+    absent_commands, absent_calls = list(commands.calls), list(calls)
+    _checkpoint(project)
+    commands.calls.clear()
+    calls.clear()
+
+    _strategy(project, _block())
+    assert resume().status == "success"
+    assert commands.calls == absent_commands
+    assert calls == absent_calls
+
+
 @pytest.mark.parametrize("fence", ["````", "~~~", "~~~~"])
 def test_long_and_tilde_fences_provision_packages(scenario, fence):
     project, commands, _, _, resume = scenario

@@ -62,6 +62,14 @@ def read_test_environment(project_root: Path, config: dict) -> TestEnvironmentDe
     marked = {doc: block for doc in sorted(documents) if (block := _probe_block(project_root, doc))}
     if not marked:
         return None
+    # An empty declaration asks for nothing, so it behaves exactly as no
+    # declaration, whatever the surrounding configuration looks like. Malformed
+    # blocks still stop (``_parse_declaration`` raises for them).
+    if all(not isinstance(block, ValueError) for block in marked.values()) and all(
+        _parse_declaration(doc.relative_to(project_root).as_posix(), *block) is None
+        for doc, block in marked.items()
+    ):
+        return None
 
     errors: list[str] = []
     if coverage is not None and not isinstance(coverage, dict):
