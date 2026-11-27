@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 import subprocess
+import sys
 import time
 import warnings
 
@@ -268,6 +269,50 @@ def _link_target_note(path: Path) -> str:
         return f"{NODE_MODULES_DIRNAME} -> {os.readlink(path)}"
     except OSError:
         return NODE_MODULES_DIRNAME
+
+
+_SHELL_SPACE = re.compile(r"(?:[ \t]|\\\n)*")
+_SHELL_ASSIGNMENT = re.compile(_SHELL_SPACE.pattern + r"[A-Za-z_][A-Za-z_0-9]*=")
+
+
+def _shell_word_end(command: str, start: int) -> int:
+    """Find the end of an assignment word without evaluating its expansions."""
+    closers: list[str] = []
+    index = start
+    while index < len(command):
+        char = command[index]
+        closer = closers[-1] if closers else None
+        following = command[index + 1:index + 2]
+        if char == closer:
+            closers.pop()
+        elif closer == "'":
+            pass
+        elif char == "\\":
+            index += 1
+        elif char == "$" and following in ("(", "{"):
+            closers.append(")" if following == "(" else "}")
+            index += 1
+        elif char == "`" or (char in "'\"" and closer != '"'):
+            closers.append(char)
+        elif char == "(" and closer == ")":
+            closers.append(")")
+        elif not closers and char in " \t\n;&|<>()":
+            return index
+        index += 1
+    if closers or index > len(command):
+        raise ValueError("unterminated shell word in the test command's leading environment assignments")
+    return len(command)
+
+
+def _shell_assignment_prefix(command: str) -> str:
+    """Return just the assignments preceding the first simple shell command."""
+    end = 0
+    while assignment := _SHELL_ASSIGNMENT.match(command, end):
+        end = _shell_word_end(command, assignment.end())
+    tail = command[_SHELL_SPACE.match(command, end).end():]
+    if tail and tail[0] not in "\n;&|()#":
+        return command[:end]
+    return ""
 
 
 class VerifyRunner:
@@ -995,7 +1040,28 @@ class VerifyRunner:
         from codd.languages.verify_plan import build_verify_plan
         from codd.test_detection import _explicit_test_command
 
-        if not _explicit_test_command(settings) and not structural_only_allowed(settings):
+        command = _explicit_test_command(settings)
+        if command is not None and os.name == "posix":
+            prefix = _shell_assignment_prefix(command)
+            if prefix:
+                # Run only the assignment prefix, through the same shell and
+                # provisioned PATH as the test. The verifier's command stays untouched.
+                probe = shlex.join((
+                    sys.executable, "-I", "-S", "-c",
+                    "import json, os; print(json.dumps(dict(os.environ)))",
+                ))
+                try:
+                    completed = self._run_evidence_subprocess(
+                        f"{prefix} {probe}", timeout=_test_timeout_seconds(settings),
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise ValueError(
+                        f"evaluating the test command's leading environment assignments exceeded {exc.timeout:g}s"
+                    ) from exc
+                if completed.returncode:
+                    raise ValueError("could not evaluate the test command's leading environment assignments")
+                return json.loads(completed.stdout)
+        if not command and not structural_only_allowed(settings):
             contract = resolve_language_contract(
                 settings, language_registry=self._language_registry, adapter_registry=self._adapter_registry,
             )
@@ -1014,6 +1080,13 @@ class VerifyRunner:
             env = dict(env if env is not None else os.environ)
             env["PATH"] = os.pathsep.join([*prepend, env.get("PATH", "")])
         return env
+
+    def _run_evidence_subprocess(self, command: str, *, timeout: float) -> subprocess.CompletedProcess:
+        # The same provisioned PATH applies to the verifier and its preflight.
+        return subprocess.run(
+            command, shell=True, cwd=self.project_root, capture_output=True,
+            text=True, timeout=timeout, env=self._evidence_spawn_env(),
+        )
 
     def _legacy_test_command(
         self, settings: dict[str, Any], *, reason: str, profile: LanguageProfile | None = None
@@ -1180,24 +1253,11 @@ class VerifyRunner:
         observed failure IS execution evidence; only "never ran" is not).
         """
         timeout = _test_timeout_seconds(settings)
-        # Apply the SAME harness-recorded PATH prepend the contract executor uses, so
-        # the legacy/explicit-command spawn resolves an unchanged bare ``argv[0]`` the
-        # same way (no divergence between the two paths). Empty prepend keeps the env
-        # exactly as before (``_go_aware_env`` → None for non-Go = ambient inherit).
-        env = self._evidence_spawn_env()
         observation = VerificationObservation(check_name, command, str(self.project_root), False,
                                               started_at=datetime.now(timezone.utc).isoformat())
         self._observations.append(observation)
         try:
-            completed = subprocess.run(
-                command,
-                shell=True,
-                cwd=self.project_root,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=env,
-            )
+            completed = self._run_evidence_subprocess(command, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             observation.executed = True
             observation.timed_out = True

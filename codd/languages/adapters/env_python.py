@@ -49,17 +49,16 @@ _SPECIFIER = (
     rf"(?:(?:==|!=)\s*(?:{_RELEASE}\.\*|{_VERSION}{_LOCAL})"
     rf"|(?:<=|>=|<|>)\s*{_VERSION}"
     rf"|~=\s*v?(?:[0-9]+!)?[0-9]+(?:\.[0-9]+)+{_SUFFIX}"
-    r"|===\s*[a-z0-9][a-z0-9._+-]*)"
+    r")"
 )
 _SPECIFIERS = rf"{_SPECIFIER}(?:\s*,\s*{_SPECIFIER})*\s*,?"
 _REGISTRY_REQUIREMENT = re.compile(
     rf"(?P<name>{_NAME})(?:\s*\[\s*(?:{_NAME}(?:\s*,\s*{_NAME})*)?\s*\])?"
-    rf"(?:\s*(?:{_SPECIFIERS}|\(\s*{_SPECIFIERS}\s*\)))?",
+    rf"(?:\s*(?P<versions>{_SPECIFIERS}|\(\s*{_SPECIFIERS}\s*\)))?",
     re.IGNORECASE | re.ASCII,
 )
-_ARCHIVE_SUFFIXES = (
-    ".whl", ".zip", ".tar", ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.lz", ".tar.lzma",
-    ".tgz", ".tbz", ".txz", ".tlz",
+_ARCHIVE_EXTENSION = re.compile(
+    r"\.(?:whl|zip|tar|tgz|tbz2?|txz|tlz)(?![a-z0-9])", re.IGNORECASE | re.ASCII,
 )
 
 
@@ -300,8 +299,16 @@ def provision_python_env(
         return _provision_python_base_env(project_root, profile, propose_dependencies)
 
     for package in declaration.packages:
+        if "===" in package:
+            return _env_build_error(
+                f"{declaration.location}: invalid test package requirement {package!r}: "
+                "the === version operator is not accepted",
+                "Use a standard registry version constraint, such as == or >=.",
+            )
         match = _REGISTRY_REQUIREMENT.fullmatch(package.strip())
-        if match is None or match["name"].lower().endswith(_ARCHIVE_SUFFIXES):
+        if match is None or _ARCHIVE_EXTENSION.search(match["name"]) or (
+            match["versions"] and _ARCHIVE_EXTENSION.search(match["versions"])
+        ):
             return _env_build_error(
                 f"{declaration.location}: invalid test package requirement {package!r}",
                 "Use a registry package name with optional extras and version constraints.",
@@ -331,10 +338,13 @@ def _prepare_declared_environment(
         and isinstance(cached, dict)
         and cached.get("declaration") == summary
         and cached.get("packages_installed") is True
+        and cached.get("test_toolchain") == _PYTHON_TEST_TOOLCHAIN_PIN
     )
     state = json.loads(state_path.read_text(encoding="utf-8"))
     checks: dict[str, str] = {}
     record = {"declaration": summary, "packages_installed": False, "asset_checks": checks}
+    if declaration.packages:
+        record["test_toolchain"] = _PYTHON_TEST_TOOLCHAIN_PIN
     state["test_environment"] = record
     notices = []
     try:
@@ -347,7 +357,13 @@ def _prepare_declared_environment(
         if asset_specs:
             from codd.repair.verify_runner import VerifyRunner
 
-            env = VerifyRunner(project_root, config).test_command_environment(config)
+            try:
+                env = VerifyRunner(project_root, config).test_command_environment(config)
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                return _env_build_error(
+                    f"{declaration.location}: could not prepare the test command environment: {exc}",
+                    "Correct the leading environment assignments in the configured test command.",
+                )
             verify = config.get("verify")
             acquire = isinstance(verify, Mapping) and verify.get("acquire_test_assets") is True
             for name, spec in asset_specs.items():
@@ -372,7 +388,9 @@ def _install_test_packages(
     project_root: Path, declaration: TestEnvironmentDeclaration,
 ) -> EnvProvisionResult:
     interpreter = _venv_interpreter(project_root / ".venv")
-    argv = _pip_install_argv(interpreter, "--", *(package.strip() for package in declaration.packages))
+    argv = _pip_install_argv(
+        interpreter, _PYTHON_TEST_TOOLCHAIN_PIN, "--", *(package.strip() for package in declaration.packages),
+    )
     packages = ", ".join(declaration.packages)
     label = f"{declaration.location}: could not install declared test packages ({packages})"
     next_step = f"Correct the diagnostic, then retry or run manually: {shlex.join(argv)}."

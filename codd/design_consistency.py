@@ -220,9 +220,6 @@ def _contract_blocks(
     text: str, *, name: str = "codd-behavior", line_offset: int = 0,
 ) -> list[tuple[int, int]]:
     """Find explicit blocks, ignoring sample fences inside other fenced code."""
-    opener = CONTRACT_FENCE if name == "codd-behavior" else re.compile(
-        rf"[ \t]*```{re.escape(name)}[ \t]*"
-    )
     blocks: list[tuple[int, int]] = []
     opened: str | None = None
     start: int | None = None
@@ -233,7 +230,13 @@ def _contract_blocks(
         marker, tail = fence.groups()
         if opened is None:
             opened = marker
-            start = i if opener.fullmatch(line) else None
+            if name == "codd-behavior":
+                start = i if CONTRACT_FENCE.fullmatch(line) else None
+            else:
+                info = tail.split(maxsplit=1)
+                start = i if info and info[0] == name else None
+                if start is not None and len(info) > 1:
+                    raise ValueError(f"line {i + line_offset + 1}: invalid {name} fence info")
         elif marker.startswith(opened) and not tail.strip():
             if start is not None:
                 blocks.append((start, i))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -138,13 +139,13 @@ def scenario(tmp_path, monkeypatch):
     return project, commands, verify_calls, echo, resume
 
 
-def _assert_stopped(result, calls, diagnostic):
+def _assert_stopped(result, calls, diagnostic, *, path=STRATEGY):
     assert result.status == "failed"
     assert result.failed_stage == "verify"
     assert not calls
     report = format_greenfield_result(result, "text")
     assert diagnostic in report
-    assert "docs/test/test_strategy.md:" in report
+    assert f"{path}:" in report
     assert "codd greenfield --resume" in report
     assert "starting automatic repair" not in report
     return report
@@ -363,10 +364,204 @@ def test_empty_declaration_matches_absent_in_full_pipeline(tmp_path, monkeypatch
     assert absent == empty
 
 
-def test_only_a_body_fence_in_the_canonical_strategy_is_read(scenario):
+def test_nested_example_fence_is_ignored(scenario):
     project, commands, _, _, resume = scenario
     malformed = _block(packages=["--bad"])
     _strategy(project, "````markdown\n" + malformed + "````\n")
-    (project / "docs/test/acceptance_criteria.md").write_text(malformed)
     assert resume().status == "success"
     assert commands.kinds == ["venv", "base-install", "base-probe", "verify-command"]
+
+
+@pytest.mark.parametrize(("package", "reason"), [
+    ("demo===audit.zip", "the === version operator is not accepted"),
+    ("demo===1!2.0", "the === version operator is not accepted"),
+    ("demo.ZIP>=1", "invalid test package requirement"),
+    ("demo==1.2+build.tar.gz", "invalid test package requirement"),
+    ("demo==1.2/local", "invalid test package requirement"),
+    (r"demo==1.2\local", "invalid test package requirement"),
+])
+def test_package_archive_and_arbitrary_equality_are_rejected(scenario, package, reason):
+    project, commands, calls, _, resume = scenario
+    (project / "demo===audit.zip").write_bytes(b"")
+    _strategy(project, _block(packages=[package]))
+    _assert_stopped(resume(), calls, reason)
+    assert not commands.calls
+
+
+def test_standard_epoch_and_version_operators_reach_pip(scenario):
+    project, commands, _, _, resume = scenario
+    packages = ["demo==1!2.0", "demo[fast] (~=1!2.1, !=1!2.3.*, >=1!2.1rc1, <=2)"]
+    _strategy(project, _block(packages=packages))
+    assert resume().status == "success"
+    assert commands.calls[-2][0] == "package-install"
+    assert commands.calls[-2][1][-2:] == tuple(packages)
+
+
+@pytest.mark.parametrize("marked", [False, True], ids=["absent", "present"])
+def test_malformed_coverage_pin_is_only_checked_after_opt_in(scenario, marked):
+    project, commands, calls, _, resume = scenario
+    config = project / "codd/codd.yaml"
+    settings = yaml.safe_load(config.read_text())
+    settings["test_coverage"] = {"gate": False, "docs": [7]}
+    config.write_text(yaml.safe_dump(settings))
+    _strategy(project, _block(packages=["fake-test-dependency"]) if marked else "")
+    result = resume()
+    if marked:
+        assert result.status == "failed" and result.failed_stage == "verify"
+        report = format_greenfield_result(result, "text")
+        assert "test_coverage.docs entry must be a nonempty path string: 7" in report
+        assert "codd greenfield --resume" in report
+        assert not commands.calls and not calls
+    else:
+        assert result.status == "success"
+        assert commands.kinds == ["venv", "base-install", "base-probe", "verify-command"]
+
+
+def test_archived_strategy_declaration_stops_verification(scenario):
+    project, commands, calls, _, resume = scenario
+    _strategy(project, _block(packages=["canonical-package"]))
+    archive = project / "docs/test/archive/test_strategy.md"
+    archive.parent.mkdir()
+    archive.write_text(_block(packages=["wrong-copy"]))
+    archive_path = archive.relative_to(project).as_posix()
+    report = _assert_stopped(resume(), calls, "declaration is in a noncanonical test document", path=archive_path)
+    assert f"{archive_path}:1:" in report
+    assert not commands.calls
+
+
+@pytest.mark.parametrize("selector", ["wave", "coverage", "outside", "unassigned-wave"])
+def test_alternate_strategy_is_selected_by_wave_then_pin(scenario, selector):
+    project, commands, _, _, resume = scenario
+    _strategy(project, "")
+    alternate = "docs/verification-policy.md" if selector == "outside" else "docs/test/verification-policy.md"
+    (project / alternate).write_text(_block(packages=["fake-test-dependency"]))
+    config = project / "codd/codd.yaml"
+    settings = yaml.safe_load(config.read_text())
+    settings["test_coverage"] = {"gate": False, "docs": [alternate]}
+    if selector == "wave":
+        settings["test_coverage"]["docs"] = [STRATEGY]
+        settings["wave_config"] = {"1": [
+            {"node_id": "test:archive", "output": "docs/test/archive/test_strategy.md"},
+            {"node_id": "test:test-strategy", "output": alternate},
+        ]}
+    if selector == "unassigned-wave":
+        settings["wave_config"] = {"1": [{"node_id": "test:test-strategy"}]}
+    config.write_text(yaml.safe_dump(settings))
+    assert resume().status == "success"
+    assert commands.calls[-2][0] == "package-install"
+    assert commands.calls[-2][1][-1] == "fake-test-dependency"
+
+
+@pytest.mark.parametrize("fence", ["````", "~~~", "~~~~"])
+def test_long_and_tilde_fences_provision_packages(scenario, fence):
+    project, commands, _, _, resume = scenario
+    _strategy(project, _block(packages=["fake-missing-package"]).replace("```", fence))
+    assert resume().status == "success"
+    assert commands.calls[-2][0] == "package-install"
+    assert commands.calls[-2][1][-1] == "fake-missing-package"
+
+
+@pytest.mark.parametrize(("body", "reason", "line"), [
+    (_block() + _block(packages=["fake-missing-package"]).replace("```", "~~~"),
+     "only one codd-test-environment block", 13),
+    (_block().replace("```codd-test-environment", "````codd-test-environment"),
+     "unclosed codd-test-environment block", 8),
+    (_block().replace("```codd-test-environment", "~~~ codd-test-environment invalid"),
+     "invalid codd-test-environment fence info", 8),
+])
+def test_mixed_or_unreadable_fences_fail_with_document_line(scenario, body, reason, line):
+    project, commands, calls, _, resume = scenario
+    _strategy(project, body)
+    report = _assert_stopped(resume(), calls, reason)
+    assert f"{STRATEGY}:{line}:" in report or f"{STRATEGY}:line {line}:" in report
+    assert not commands.calls
+
+
+def test_declared_environment_in_non_utf8_document_stops(scenario):
+    project, commands, calls, _, resume = scenario
+    strategy = _strategy(project, _block(packages=["fake-missing-package"]))
+    strategy.write_bytes(strategy.read_bytes().replace(b"fake-missing-package", b"fake-\xffmissing-package"))
+    report = _assert_stopped(resume(), calls, "document is not UTF-8")
+    assert f"{STRATEGY}:11:" in report
+    assert not commands.calls
+
+
+@pytest.mark.parametrize("version", ["!!int nope", "!!bool maybe", "!!timestamp yesterday"])
+def test_yaml_tag_conversion_errors_report_the_value_line(scenario, version):
+    project, commands, calls, _, resume = scenario
+    _strategy(project, _block().replace("version: 1", f"version: {version}"))
+    report = _assert_stopped(resume(), calls, "invalid codd-test-environment YAML")
+    assert f"{STRATEGY}:11:" in report
+    assert not commands.calls
+
+
+def test_asset_commands_share_inline_environment_with_the_test(scenario, monkeypatch):
+    project, commands, _, _, resume = scenario
+    _configure(project, "python", acquire=True)
+    _strategy(project, _block(assets=[commands.asset]))
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "/ambient/cache")
+    monkeypatch.setenv("SYNTHETIC_CACHE_ROOT", "/synthetic")
+    observed = project / "test-env.json"
+    probe = shlex.join([sys.executable, "-I", "-S", "-c",
+        "import json, os; from pathlib import Path; "
+        "Path('test-env.json').write_text(json.dumps(dict(os.environ))); print('1 passed')",
+    ])
+    config = project / "codd/codd.yaml"
+    settings = yaml.safe_load(config.read_text())
+    settings["verify"]["test_command"] = (
+        'PLAYWRIGHT_BROWSERS_PATH="${SYNTHETIC_CACHE_ROOT}/test cache" '
+        'ASSET_MODE=$(printf "%s %s" provisioned mode) ' + probe
+    )
+    config.write_text(yaml.safe_dump(settings))
+
+    run = subprocess.run
+
+    def check_cache(argv, *args, **kwargs):
+        if argv in (commands.spec.check, commands.spec.acquire):
+            assert not observed.exists()
+            commands.acquire_works = kwargs["env"]["PLAYWRIGHT_BROWSERS_PATH"] == "/synthetic/test cache"
+        return run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", check_cache)
+    result = resume()
+    assert result.status == "success", format_greenfield_result(result, "text")
+    test_env = json.loads(observed.read_text())
+    assert test_env["PLAYWRIGHT_BROWSERS_PATH"] == "/synthetic/test cache"
+    assert test_env["ASSET_MODE"] == "provisioned mode"
+    assert test_env["PATH"].split(os.pathsep)[0] == str(project / ".venv" / "bin")
+    asset_calls = [(kind, kwargs["env"]) for kind, _, kwargs in commands.calls if kind.startswith("asset-")]
+    assert [kind for kind, _ in asset_calls] == ["asset-check", "asset-acquire", "asset-check"]
+    assert all(env == test_env for _, env in asset_calls)
+
+
+@pytest.mark.parametrize("cached_legacy", [False, True])
+def test_declared_package_cannot_replace_the_pinned_test_toolchain(scenario, monkeypatch, cached_legacy):
+    project, commands, calls, _, resume = scenario
+    package = "pytest==7.4.4"
+    if cached_legacy:
+        assert resume().status == "success"
+        state = json.loads((project / STATE).read_text())
+        state["test_environment"] = {
+            "declaration": {"packages": [package], "assets": []},
+            "packages_installed": True,
+            "asset_checks": {},
+        }
+        (project / STATE).write_text(json.dumps(state))
+        calls.clear()
+        commands.calls.clear()
+        _checkpoint(project)
+    _strategy(project, _block(packages=[package]))
+    run = subprocess.run
+
+    def resolve(argv, *args, **kwargs):
+        result = run(argv, *args, **kwargs)
+        if isinstance(argv, list) and package in argv and "pytest>=8,<10" in argv:
+            return subprocess.CompletedProcess(argv, 1, "", "ResolutionImpossible: conflicting pytest requirements")
+        return result
+
+    monkeypatch.setattr(subprocess, "run", resolve)
+    report = _assert_stopped(resume(), calls, "ResolutionImpossible: conflicting pytest requirements")
+    assert package in report
+    assert commands.kinds[-1] == "package-install"
+    record = json.loads((project / STATE).read_text())["test_environment"]
+    assert record["packages_installed"] is False
