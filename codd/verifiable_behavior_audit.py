@@ -741,11 +741,13 @@ def discover_vb_documents(
     *,
     config: dict[str, Any] | None = None,
     docs: Iterable[Path | str] | None = None,
+    pattern: str = "*.md",
 ) -> list[Path]:
     """Resolve the test documents to scan for VB tables.
 
     Priority: explicit ``docs`` argument, then ``test_coverage.docs`` from the
-    project config, then auto-discovery of ``docs/test/**/*.md``.
+    project config, then auto-discovery under ``docs/test``. ``pattern`` applies
+    when scanning a directory.
     """
 
     project_root = Path(project_root).resolve()
@@ -770,7 +772,7 @@ def discover_vb_documents(
             if path.is_file():
                 resolved.append(path)
             elif path.is_dir():
-                for match in sorted(path.rglob("*.md")):
+                for match in sorted(path.rglob(pattern)):
                     # Per-file skip: the declared ROOT is in-root and valid; only
                     # drop an individual smuggled match (e.g. a symlink inside the
                     # tree whose target escapes), keeping the rest of the evidence.
@@ -781,7 +783,7 @@ def discover_vb_documents(
 
     default_dir = project_root / _DEFAULT_VB_DOC_DIR
     if default_dir.is_dir():
-        for match in sorted(default_dir.rglob("*.md")):
+        for match in sorted(default_dir.rglob(pattern)):
             confined = resolve_project_path(project_root, match)
             if confined is not None:
                 resolved.append(confined)

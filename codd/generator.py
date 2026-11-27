@@ -60,11 +60,10 @@ from codd.project_types import (
 from codd.requirement_appendix import protect_requirement_appendix, with_requirement_appendix
 from codd.requirements_meta import normalize_operation_flow, ui_pattern_choices
 from codd.test_environment import (
+    EnvironmentDocumentRole,
     MissingTestEnvironment,
-    TestEnvironmentDocumentRole,
     parse_generated_test_environment,
     resolve_test_environment_documents,
-    test_environment_wave_output,
 )
 from codd.verifiable_behavior_audit import VB_BLOCKER_SCOPE_GUIDANCE
 
@@ -1121,9 +1120,8 @@ def _artifact_generator(
 ) -> Callable[..., GenerationResult]:
     from codd.scanner import build_document_node_path_map
 
-    root = project_root.resolve()
-    environment_roles, strategy_error = resolve_test_environment_documents(
-        root, config, pending_outputs=(artifact.output for artifact in artifacts),
+    environment_roles, _ = resolve_test_environment_documents(
+        project_root, config, pending_outputs=(artifact.output for artifact in artifacts),
     )
 
     resolved_ai_command = _resolve_ai_command(config, ai_command, command_name="generate")
@@ -1141,7 +1139,6 @@ def _artifact_generator(
         layout_placement=_resolve_layout_placement_contract(config, project_root),
         environment_roles=environment_roles,
         environment_language=environment_language,
-        strategy_error=strategy_error,
     )
 
 
@@ -1157,9 +1154,8 @@ def _generate_one_artifact(
     body_max_retries: int,
     capabilities: "ProjectCapabilities | None",
     project_language: str | None,
-    environment_roles: dict[Path, TestEnvironmentDocumentRole],
+    environment_roles: dict[Path, EnvironmentDocumentRole],
     environment_language: str | None,
-    strategy_error: str | None,
     layout_placement: str = "",
     feedback: str | None,
     drafts: dict[str, str | None] | None = None,
@@ -1201,9 +1197,11 @@ def _generate_one_artifact(
     )
     environment_guidance: tuple[str, ...] = ()
     root = project_root.resolve()
-    target = resolve_project_path(root, artifact.output)
+    # Wave outputs are written verbatim. Verification strips whitespace from
+    # the wave's test-document paths, so those spellings must not be conflated.
+    target = resolve_project_path(root, artifact.output) if artifact.output == artifact.output.strip() else None
     role = environment_roles.get(target) if target is not None else None
-    canonical_environment = role is TestEnvironmentDocumentRole.CANONICAL
+    canonical_environment = role is EnvironmentDocumentRole.CANONICAL
     if canonical_environment:
         from codd.greenfield.pipeline import resolve_verify_language
 
@@ -1213,9 +1211,7 @@ def _generate_one_artifact(
 
     def check_environment(text: str) -> None:
         if target is not None and role is not None:
-            declaration = parse_generated_test_environment(
-                root, target, text, roles=environment_roles, strategy_error=strategy_error,
-            )
+            declaration = parse_generated_test_environment(target.relative_to(root), text, role=role)
             if declaration is not None:
                 validate_declared_test_environment(declaration, environment_language)
 
@@ -1912,11 +1908,6 @@ def _load_wave_artifacts(
                 raise ValueError(
                     f"wave_config[{wave_key!r}] entry is missing required fields: {', '.join(missing)}"
                 )
-            output = test_environment_wave_output(entry)
-            if output is None:
-                output = str(entry["output"])
-            elif not output:
-                raise ValueError(f"wave_config[{wave_key!r}] test output must be a nonempty path")
 
             owners = None
             owns_operation_flow = None
@@ -1955,7 +1946,7 @@ def _load_wave_artifacts(
                 WaveArtifact(
                     wave=wave,
                     node_id=str(entry["node_id"]),
-                    output=output,
+                    output=str(entry["output"]),
                     title=str(entry["title"]),
                     depends_on=_normalize_dependencies(entry.get("depends_on", [])),
                     conventions=_normalize_conventions(entry.get("conventions", [])),

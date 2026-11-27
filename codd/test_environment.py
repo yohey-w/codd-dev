@@ -40,7 +40,7 @@ class MissingTestEnvironment(ValueError):
     """The generated strategy omitted its environment declaration."""
 
 
-class TestEnvironmentDocumentRole(Enum):
+class EnvironmentDocumentRole(Enum):
     CANONICAL = auto()
     NONCANONICAL = auto()
 
@@ -61,7 +61,7 @@ def read_test_environment(project_root: Path, config: dict) -> TestEnvironmentDe
     if error:
         raise ValueError(error)
     for doc, (block, _) in marked.items():
-        if roles[doc] is TestEnvironmentDocumentRole.NONCANONICAL:
+        if roles[doc] is EnvironmentDocumentRole.NONCANONICAL:
             raise _noncanonical_declaration(doc.relative_to(project_root), block)
     [(_, declaration)] = marked.values()
     if isinstance(declaration, ValueError):
@@ -69,8 +69,8 @@ def read_test_environment(project_root: Path, config: dict) -> TestEnvironmentDe
     return declaration
 
 
-def test_environment_wave_output(entry: dict) -> str | None:
-    """Use the same wave path spelling for discovery and for writing the document."""
+def _wave_test_document_output(entry: dict) -> str | None:
+    """Read the wave's test-document path using verification's spelling."""
     output = entry.get("output")
     node_id = entry.get("node_id") or entry.get("id")
     if isinstance(output, str) and isinstance(node_id, str) and node_id.strip().casefold().startswith("test:"):
@@ -80,17 +80,17 @@ def test_environment_wave_output(entry: dict) -> str | None:
 
 def resolve_test_environment_documents(
     project_root: Path, config: dict, *, pending_outputs: Iterable[str] = (),
-) -> tuple[dict[Path, TestEnvironmentDocumentRole], str | None]:
+) -> tuple[dict[Path, EnvironmentDocumentRole], str | None]:
     """Classify the paths E1 probes, including documents E2 is about to write."""
     project_root = project_root.resolve()
     pending = {
         path for output in pending_outputs if (path := _document_path(project_root, output)) is not None
     }
-    documents = set(discover_vb_documents(project_root))
+    documents = set(discover_vb_documents(project_root, pattern="*"))
     pin_paths = _coverage_pin_paths(project_root, config)
     for path in pin_paths.values():
         try:
-            documents.update(discover_vb_documents(project_root, docs=[path]))
+            documents.update(discover_vb_documents(project_root, docs=[path], pattern="*"))
         except (OSError, PathEscapeError, RuntimeError):
             continue
 
@@ -98,7 +98,7 @@ def resolve_test_environment_documents(
     if default_doc is not None:
         documents.add(default_doc)
     for entry in _planned_entries(config):
-        if path := _document_path(project_root, test_environment_wave_output(entry)):
+        if path := _document_path(project_root, _wave_test_document_output(entry)):
             documents.add(path)
 
     # A pinned directory can be created by generating a document under it.
@@ -112,12 +112,11 @@ def resolve_test_environment_documents(
         directories.add(default_dir)
     documents.update(
         path for path in pending
-        if path == canonical or path in pin_paths.values()
-        or (path.match("*.md") and any(directory in path.parents for directory in directories))
+        if path == canonical or path in pin_paths.values() or any(directory in path.parents for directory in directories)
     )
     return {
-        path: TestEnvironmentDocumentRole.CANONICAL if path == canonical else TestEnvironmentDocumentRole.NONCANONICAL
-        for path in documents
+        path: EnvironmentDocumentRole.CANONICAL if path == canonical else EnvironmentDocumentRole.NONCANONICAL
+        for path in documents if path.suffix.casefold() in {".md", ".markdown"}
     }, error
 
 
@@ -172,7 +171,7 @@ def _resolve_test_strategy_path(
             else _document_path(project_root, _CANONICAL_VB_OUTPUT_PATH)
         )
     else:
-        canonical = _document_path(project_root, test_environment_wave_output(strategy_entry))
+        canonical = _document_path(project_root, _wave_test_document_output(strategy_entry))
         if canonical is None:
             errors.append("wave_config test:test-strategy output must be a path inside the project")
     error = f"invalid test strategy configuration: {', '.join(errors)}" if errors else None
@@ -249,28 +248,18 @@ def _find_declaration_block(path: str, text: str) -> _Block | None:
 
 
 def parse_generated_test_environment(
-    project_root: Path, doc: Path, text: str, *,
-    roles: dict[Path, TestEnvironmentDocumentRole], strategy_error: str | None,
+    path: Path, text: str, *, role: EnvironmentDocumentRole,
 ) -> TestEnvironmentDeclaration | None:
     """Check the declaration in a generated document before it is written."""
-    role = roles[doc]
-    path = doc.relative_to(project_root)
     block = _find_declaration_block(path.as_posix(), text)
     if block is None:
-        if role is TestEnvironmentDocumentRole.CANONICAL:
+        if role is EnvironmentDocumentRole.CANONICAL:
             raise MissingTestEnvironment(f"{path}: write exactly one {_FENCE} block")
         return None
     declaration = _parse_block(path, block)
     if declaration is None:
         return None
-    if isinstance(declaration, ValueError) and not isinstance(block, ValueError):
-        marked = _probe_declarations(project_root, roles.keys() - {doc})
-        marked[doc] = (block, declaration)
-        if _first_yaml_error(marked) is declaration:
-            raise declaration
-    if strategy_error:
-        raise ValueError(strategy_error)
-    if role is TestEnvironmentDocumentRole.NONCANONICAL:
+    if role is EnvironmentDocumentRole.NONCANONICAL:
         raise _noncanonical_declaration(path, block)
     if isinstance(declaration, ValueError):
         raise declaration

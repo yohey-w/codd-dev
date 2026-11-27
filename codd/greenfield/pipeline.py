@@ -303,9 +303,12 @@ def resolve_verify_language(
     """Apply verify's precedence: invocation, saved option, then project config."""
     if language is None:
         if session is None and project_root is not None:
-            path = resolve_project_path(project_root, session_path(project_root.resolve()))
-            if path is not None and path.is_file():
-                session = load_session(project_root)
+            try:
+                path = resolve_project_path(project_root, session_path(project_root.resolve()))
+                if path is not None and path.is_file():
+                    session = load_session(project_root)
+            except (OSError, UnicodeDecodeError, RuntimeError):
+                session = None
         options = (session or {}).get("options")
         if isinstance(options, dict) and options.get("language"):
             language = str(options["language"])

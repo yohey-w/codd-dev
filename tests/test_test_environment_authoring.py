@@ -1,15 +1,19 @@
 """Exercise test environment guidance and validation through document generation."""
 
+import subprocess
+import sys
+
 import pytest
 import yaml
 
-from codd import generator
+from codd import generator, test_environment
 from codd.greenfield.pipeline import (
     EnvironmentProvisionError,
     GreenfieldPipeline,
     load_session,
     new_session,
     save_session,
+    session_path,
 )
 from codd.languages.adapters import env_python
 from codd.project_types import EnvProvisionResult, provision_project_env
@@ -188,7 +192,7 @@ def test_pinned_noncanonical_environment_matches_verification(author, pins):
     (True, "noncanonical test document"),
     (False, "version must be the integer 1"),
 ], ids=["active-strategy", "malformed-archive-only"])
-def test_malformed_noncanonical_environment_matches_verification(author, has_strategy, reason):
+def test_malformed_noncanonical_environment_uses_document_role(author, has_strategy, reason):
     archive = "docs/test/z_archive/test_strategy.md"
     body = BODY + environment(version=2)
     project, config, prompts = author(body, body, body, entries=[artifact(archive, "test:archive")])
@@ -196,8 +200,36 @@ def test_malformed_noncanonical_environment_matches_verification(author, has_str
     path.parent.mkdir(parents=True)
     if has_strategy:
         (project / STRATEGY).write_text(BODY + environment(packages=["demo-helper>=1"]), encoding="utf-8")
-    assert_rejection_matches_verification(project, config, path, body, reason)
+    path.write_text(body, encoding="utf-8")
+    with pytest.raises(ValueError, match=reason):
+        read_test_environment(project, config)
+    path.unlink()
+    with pytest.raises(ValueError, match="noncanonical test document"):
+        generator.generate_wave(project, 1)
+    assert not path.exists()
     assert len(prompts) == 3 and all(NO_DECLARATION in prompt for prompt in prompts)
+
+
+def test_noncanonical_generation_leaves_peer_diagnostics_to_verification(author, monkeypatch):
+    current = "docs/test/z.md"
+    peer = "docs/test/a.md"
+    body = BODY + "\n~~~codd-test-environment\npackages: []\n~~~\n"
+    project, config, prompts = author(body, body, body, entries=[artifact(current, "test:archive")])
+    path = project / current
+    path.parent.mkdir(parents=True)
+    (project / peer).write_text(BODY + environment(version=2), encoding="utf-8")
+    path.write_text(body, encoding="utf-8")
+    with pytest.raises(ValueError, match=r"docs/test/a\.md:\d+:.*version must be the integer 1"):
+        read_test_environment(project, config)
+    path.unlink()
+
+    def fail_if_probed(*args):
+        pytest.fail("generation must not probe declarations in existing documents")
+
+    monkeypatch.setattr(test_environment, "_probe_block", fail_if_probed)
+    with pytest.raises(ValueError, match=r"docs/test/z\.md:\d+:.*noncanonical test document"):
+        generator.generate_wave(project, 1)
+    assert len(prompts) == 3 and not path.exists()
 
 
 def assert_rejection_matches_verification(project, config, path, body, reason):
@@ -212,17 +244,90 @@ def assert_rejection_matches_verification(project, config, path, body, reason):
     assert not path.exists()
 
 
-def test_strategy_wave_path_trailing_space_matches_verification(author):
-    project, config, prompts = author(
-        BODY + environment(packages=["demo-helper>=1"]), entries=[artifact(STRATEGY + " ")],
-    )
+def test_strategy_wave_path_retains_trailing_space(author):
+    output = STRATEGY + " "
+    project, config, prompts = author(BODY, entries=[artifact(output)])
     [result] = generator.generate_wave(project, 1)
-    assert result.path == project / STRATEGY
-    assert not (project / (STRATEGY + " ")).exists()
-    assert len(prompts) == 1 and INSTRUCTION in prompts[0]
+    assert result.path == project / output
+    assert result.path.is_file() and not (project / STRATEGY).exists()
+    [prompt] = prompts
+    assert "codd-test-environment" not in prompt
+    assert read_test_environment(project, config) is None
+
+    (project / STRATEGY).write_text(BODY + environment(packages=["demo-helper>=1"]), encoding="utf-8")
     declaration = read_test_environment(project, config)
     assert declaration.packages == ("demo-helper>=1",)
     assert declaration.location.startswith(f"{STRATEGY}:")
+
+
+def test_existing_strategy_with_trailing_space_is_skipped(author):
+    output = STRATEGY + " "
+    project, _, prompts = author(entries=[artifact(output)])
+    path = project / output
+    path.parent.mkdir(parents=True)
+    path.write_text(BODY, encoding="utf-8")
+
+    [result] = generator.generate_wave(project, 1)
+
+    assert result.status == "skipped" and result.path == path
+    assert path.read_text(encoding="utf-8") == BODY
+    assert not (project / STRATEGY).exists() and not prompts
+
+
+def test_non_utf8_session_uses_configured_language(author):
+    project, _, prompts = author(BODY + environment(packages=["demo-helper>=1"]))
+    path = session_path(project)
+    path.parent.mkdir()
+    path.write_bytes(b"options:\n  language: \xff\nstages: {}\n")
+
+    [result] = generator.generate_wave(project, 1)
+
+    assert result.status == "generated"
+    [prompt] = prompts
+    assert "list registry packages" in prompt
+
+
+def test_javascript_declaration_example_is_ignored(author):
+    output = "tests/e2e/fixture.spec.js"
+    code = '''const assert = require("node:assert/strict");
+const test = require("node:test");
+test("fixture preserves version", () => {
+  const text = `
+~~~codd-test-environment
+version: 2
+~~~
+`;
+  assert.match(text, /version: 2/);
+});
+'''
+    project, config, prompts = author(code, entries=[artifact(output, "test:fixture")])
+
+    [result] = generator.generate_wave(project, 1)
+
+    assert result.path.read_text(encoding="utf-8") == (
+        "// @generated-by: codd generate\n// @codd-node-id: test:fixture\n\n" + code
+    )
+    [prompt] = prompts
+    assert "codd-test-environment" not in prompt
+    assert read_test_environment(project, config) is None
+
+
+@pytest.mark.parametrize("suffix", [".MD", ".markdown", ".MARKDOWN"])
+def test_markdown_declarations_are_discovered_in_test_directory(author, suffix):
+    project, config, _ = author()
+    path = project / "docs/test" / f"appendix{suffix}"
+    path.parent.mkdir(parents=True)
+    path.write_text(BODY + environment(packages=["demo-helper>=1"]), encoding="utf-8")
+    with pytest.raises(ValueError, match="noncanonical test document"):
+        read_test_environment(project, config)
+
+
+def test_environment_module_collects_no_tests(tmp_path):
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", test_environment.__file__],
+        cwd=tmp_path, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == pytest.ExitCode.NO_TESTS_COLLECTED, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("existing", [True, False], ids=["existing-archive", "generated-archive"])
