@@ -453,8 +453,19 @@ def test_unmanaged_generation_prompts_match_legacy_bytes(tmp_path, mock_ai_cli):
     for wave in (1, 2, 3):
         generate_wave(project, wave)
 
+    prompts = [call["input"] for call in mock_ai_cli]
+    # The browser runtime rules gained two lines on purpose; everything else must stay byte-identical.
+    for added in (
+        "- Bind the server under test to a loopback port chosen at runtime (an unused ephemeral port), "
+        "never a fixed port number, so a leftover or concurrent server cannot collide with it.\n",
+        "- The readiness check MUST prove that the server answering is the one this run started "
+        "(for example, a per-run token the server reports, or the address the started process itself reports), "
+        "not merely that some server answers on that address.\n",
+    ):
+        assert prompts[0].count(added) == 1
+        prompts[0] = prompts[0].replace(added, "", 1)
     # Captured from d943740 with the same project and mocked AI responses.
-    assert [hashlib.sha256(call["input"].encode("utf-8")).hexdigest() for call in mock_ai_cli] == [
+    assert [hashlib.sha256(prompt.encode("utf-8")).hexdigest() for prompt in prompts] == [
         "d21ea2838648c5bf380efa56dd2ec425933fded255899e49b19dc4a24473d973",
         "1912abf5245f42b134ef03cc1f532274711782e1f4ddc9609ee1df40841a6f55",
         "4077b16fcbcc7e2047a061f6b836c6ae62e31dbe582d162d27a1654585483a03",
