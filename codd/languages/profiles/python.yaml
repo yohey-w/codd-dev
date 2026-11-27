@@ -104,6 +104,8 @@ implement_oracle:
 tests:
   semantics_adapter: python-test-semantics
   runner_report_adapter: pytest-junit-xml
+  feedback_adapter: pytest-feedback
+  feedback_runtime_paths: [".venv/**", "**/__pycache__/**", "__pycache__/**"]
 
   environment_assets:
     playwright-chromium:

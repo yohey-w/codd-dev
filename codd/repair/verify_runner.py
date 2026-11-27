@@ -319,6 +319,14 @@ def _shell_assignment_prefix(command: str) -> str:
     return prefix
 
 
+@dataclass(frozen=True)
+class _TestRoute:
+    plan: VerifyRunPlan | None = None
+    profile: LanguageProfile | None = None
+    reason: str | None = None
+    failure: tuple[str | None, str, VerificationFailure] | None = None
+
+
 class VerifyRunner:
     """Run CoDD verification inside the current Python process."""
 
@@ -811,11 +819,53 @@ class VerifyRunner:
     def _run_test_command(
         self, settings: dict[str, Any]
     ) -> tuple[bool, str | None, str, VerificationFailure | None]:
-        """Resolve and run the project's test command — CONTRACT-FIRST (Step 6).
+        route = self._resolve_test_route(settings)
+        if route.reason is not None:
+            return self._legacy_test_command(settings, reason=route.reason, profile=route.profile)
 
-        Returns ``(tests_executed, test_command, tests_summary, test_failure)`` —
-        ``test_failure is not None`` ⇒ a failure (``passed=False``);
-        ``tests_executed`` feeds ``executed_anything`` / the honesty rule.
+        self._mark_contract_path()
+        if route.failure is not None:
+            return (False, *route.failure)
+
+        from codd.languages.verify_executor import execute_verify_plan
+
+        plan = route.plan
+        assert plan is not None
+        started_at = datetime.now(timezone.utc).isoformat()
+        result = execute_verify_plan(
+            plan,
+            self.project_root,
+            adapter_registry=self._test_adapter_registry(),
+            exec_path_prepend=self._exec_path_prepend(),
+        )
+        mapped = self._tuple_from_execution(plan, result)
+        self._observations[-1].started_at = started_at
+        return mapped
+
+    def _test_adapter_registry(self):
+        from codd.languages.registry import default_adapter_registry
+
+        return self._adapter_registry if self._adapter_registry is not None else default_adapter_registry
+
+    def feedback_test_command(
+        self, settings: dict[str, Any],
+    ) -> tuple[str | tuple[str, ...], Path, dict[str, str]] | None:
+        """The verifier's command, working directory, and spawn environment."""
+        route = self._resolve_test_route(settings)
+        if route.failure is not None:
+            raise ValueError(route.failure[2].message)
+        if route.plan is not None:
+            command = route.plan.argv
+            cwd = self.project_root / (route.plan.cwd or ".")
+        else:
+            command = self._legacy_detected_test_command(settings, route.profile)
+            cwd = self.project_root
+        if not command:
+            return None
+        return command, cwd, self.test_command_environment(settings, include_shell_assignments=False)
+
+    def _resolve_test_route(self, settings: dict[str, Any]) -> _TestRoute:
+        """Resolve and run the project's test command — CONTRACT-FIRST (Step 6).
 
         This is THE single live point where the Contract Kernel's anti-false-green
         verify executor enters production verify. Decision tree (in order):
@@ -863,10 +913,7 @@ class VerifyRunner:
         """
         from codd.test_detection import _explicit_test_command
         from codd.languages.contract import resolve_language_contract
-        from codd.languages.registry import (
-            UnknownLanguageError,
-            default_adapter_registry,
-        )
+        from codd.languages.registry import UnknownLanguageError
         from codd.languages.verify_plan import build_verify_plan
 
         # (1) Resolve the language contract — a declared-unknown language is RED.
@@ -877,9 +924,7 @@ class VerifyRunner:
                 adapter_registry=self._adapter_registry,
             )
         except UnknownLanguageError as exc:
-            self._mark_contract_path()
-            return (
-                False,
+            return _TestRoute(failure=(
                 None,
                 "unknown declared language",
                 VerificationFailure(
@@ -892,7 +937,7 @@ class VerifyRunner:
                     ),
                     details={"failure_class": "unknown_declared_language"},
                 ),
-            )
+            ))
 
         # (2) Explicit author command override (checked AFTER the unknown-language
         # RED, BEFORE all other routing). An explicit fix/verify.test_command is a
@@ -902,7 +947,7 @@ class VerifyRunner:
         # Pre-execution legacy fallback; the legacy guards still prevent green-on-
         # nothing. Language-agnostic + migration debt (fallback_used=True).
         if _explicit_test_command(settings):
-            return self._legacy_test_command(settings, reason="explicit_test_command")
+            return _TestRoute(reason="explicit_test_command")
 
         # (2b) Structural-only opt-out. ``verify.allow_structural_only: true`` is the
         # author's EXPLICIT declaration that structural DAG coherence is the whole
@@ -915,33 +960,26 @@ class VerifyRunner:
         # opt-out, like the explicit-command override: route to legacy (which, with no
         # detected command, yields the structural-only result the author asked for).
         if structural_only_allowed(settings):
-            return self._legacy_test_command(
-                settings, reason="structural_only", profile=contract.profile if contract else None
+            return _TestRoute(
+                reason="structural_only", profile=contract.profile if contract else None
             )
 
         # (3) No declared language → legacy fallback (the common existing case).
         if contract is None:
-            return self._legacy_test_command(settings, reason="no_language")
+            return _TestRoute(reason="no_language")
 
         # (4) No verify command in the profile → legacy fallback.
         plan = build_verify_plan(contract)
         if plan is None:
-            return self._legacy_test_command(settings, reason="no_verify_plan", profile=contract.profile)
+            return _TestRoute(reason="no_verify_plan", profile=contract.profile)
 
         # (5) Scoped runner_report-adapter gate (NOT full require_complete()). The
         # executor reads the report via ``default_adapter_registry.get("runner_report",
         # plan.report_adapter)`` — so we gate on exactly that capability, ensuring
         # builtins are registered first. Only when the plan REQUIRES a report.
-        registry = (
-            self._adapter_registry
-            if self._adapter_registry is not None
-            else default_adapter_registry
-        )
-        if not _verify_report_available(plan, registry):
+        if not _verify_report_available(plan, self._test_adapter_registry()):
             if contract.profile.strictness == "strict":
-                self._mark_contract_path()
-                return (
-                    False,
+                return _TestRoute(failure=(
                     plan.command_str,
                     "required runner_report adapter unavailable (strict)",
                     VerificationFailure(
@@ -960,26 +998,13 @@ class VerifyRunner:
                             "language": contract.language_id,
                         },
                     ),
-                )
+                ))
             # legacy_compatible → pre-execution fallback (NOT a RED).
-            return self._legacy_test_command(
-                settings, reason="missing_adapter_legacy_compatible", profile=contract.profile
+            return _TestRoute(
+                reason="missing_adapter_legacy_compatible", profile=contract.profile
             )
 
-        # (6) Run the contract executor. Its verdict is FINAL (no legacy rescue).
-        from codd.languages.verify_executor import execute_verify_plan
-
-        self._mark_contract_path()
-        started_at = datetime.now(timezone.utc).isoformat()
-        result = execute_verify_plan(
-            plan,
-            self.project_root,
-            adapter_registry=registry,
-            exec_path_prepend=self._exec_path_prepend(),
-        )
-        mapped = self._tuple_from_execution(plan, result)
-        self._observations[-1].started_at = started_at
-        return mapped
+        return _TestRoute(plan=plan)
 
     def _mark_contract_path(self) -> None:
         """Record that the live contract executor produced this run's test verdict."""
@@ -1036,7 +1061,9 @@ class VerifyRunner:
         env["PATH"] = os.pathsep.join([*prepend, env.get("PATH", "")])
         return env
 
-    def test_command_environment(self, settings: dict[str, Any]) -> dict[str, str]:
+    def test_command_environment(
+        self, settings: dict[str, Any], *, include_shell_assignments: bool = True,
+    ) -> dict[str, str]:
         """Environment for a preflight command that must see the same assets as tests."""
         from codd.languages.contract import resolve_language_contract
         from codd.languages.registry import default_adapter_registry
@@ -1045,7 +1072,7 @@ class VerifyRunner:
         from codd.test_detection import _explicit_test_command
 
         command = _explicit_test_command(settings)
-        if command is not None:
+        if command is not None and include_shell_assignments:
             prefix = _shell_assignment_prefix(command)
             if prefix and os.name == "posix":
                 # Run only the assignment prefix, through the same shell and
@@ -1107,18 +1134,24 @@ class VerifyRunner:
         self._verify_path = "legacy_fallback"
         self._fallback_used = True
         self._fallback_reason = reason
-        command = detect_test_command(self.project_root, config=settings)
+        command = self._legacy_detected_test_command(settings, profile)
         if not command:
             return False, None, "no test command detected", None
-        if profile is not None:
-            runner = command.split(maxsplit=1)[0]
-            launcher = profile.test_runner_argv(runner)
-            if len(launcher) > 1:
-                command = f"{shlex.join(launcher[:-1])} {command}"
         executed, summary, failure = self._run_evidence_command(
             command, settings, check_name="test_command", label="test command"
         )
         return executed, command, summary, failure
+
+    def _legacy_detected_test_command(
+        self, settings: dict[str, Any], profile: LanguageProfile | None,
+    ) -> str | None:
+        command = detect_test_command(self.project_root, config=settings)
+        if command and profile is not None:
+            runner = command.split(maxsplit=1)[0]
+            launcher = profile.test_runner_argv(runner)
+            if len(launcher) > 1:
+                return f"{shlex.join(launcher[:-1])} {command}"
+        return command
 
     def _tuple_from_execution(
         self, plan: "VerifyRunPlan", result: "VerifyExecutionResult"

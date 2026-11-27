@@ -430,6 +430,8 @@ class TestsSpec:
     environment_assets: Mapping[str, TestAssetSpec] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    feedback_adapter: str | None = None
+    feedback_runtime_paths: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------

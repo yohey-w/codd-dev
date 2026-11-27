@@ -339,18 +339,23 @@ class _CapturedFileOutput(str):
     classified as a file-writing agent. Keep normal string behavior for callers.
     """
 
-    def __new__(cls, output: str, captured_paths: set[Path] | frozenset[Path]) -> _CapturedFileOutput:
+    def __new__(
+        cls, output: str, captured_paths: set[Path] | frozenset[Path],
+        changed_paths: frozenset[Path] | None = None,
+    ) -> _CapturedFileOutput:
         instance = super().__new__(cls, output)
         instance.captured_paths = frozenset(captured_paths)
+        instance.changed_paths = instance.captured_paths if changed_paths is None else changed_paths
         return instance
 
-    def __getnewargs__(self) -> tuple[str, frozenset[Path]]:
-        return str(self), self.captured_paths
+    def __getnewargs__(self) -> tuple[str, frozenset[Path], frozenset[Path]]:
+        return str(self), self.captured_paths, self.changed_paths
 
 
 def invoke_file_writing_agent(
     command: list[str], prompt: str, project_root: Path,
     *, env: Mapping[str, str] | None = None, timeout: float | None = None,
+    file_capture_exclusions: tuple[str, ...] = (),
 ) -> str:
     """Invoke an AI agent that writes files directly, capture changes as === FILE: === blocks.
 
@@ -373,7 +378,10 @@ def invoke_file_writing_agent(
     if preserve_appendix:
         # Keep Git cleanup from obscuring a direct write to the appendix.
         exclusions.append(f":(literal,exclude){PROVISIONAL_DECISIONS_PATH.as_posix()}")
-    project_paths = ["--", ".", *exclusions] if relative_log is not None or preserve_appendix else []
+    exclusions.extend(f":(literal,exclude){path}" for path in file_capture_exclusions)
+    project_paths = (
+        ["--", ".", *exclusions] if relative_log is not None or preserve_appendix or file_capture_exclusions else []
+    )
     checkout_paths = project_paths or ["--", "."]
     # Stage the repository-wide baseline even when cwd is a subdirectory.
     repo_paths = ["--", ":/", *exclusions] if exclusions else []
@@ -497,7 +505,10 @@ def invoke_file_writing_agent(
 
     # Resolve against the restored baseline, as the writer will. An atomic
     # save can replace a symlink with a regular file during the agent's run.
-    return _CapturedFileOutput("\n".join(parts), {path.resolve() for path in captured_paths})
+    return _CapturedFileOutput(
+        "\n".join(parts), {path.resolve() for path in captured_paths},
+        frozenset(project_root / path for path in all_files),
+    )
 
 
 #: Message raised on a wall-clock timeout. Carries the ``AI command failed:``
@@ -516,6 +527,7 @@ def _invoke_subprocess(
     ai_command: str, prompt: str, *, project_root: Path | None = None,
     env: Mapping[str, str] | None = None, timeout: float | None = None,
     working_directory: Path | None = None,
+    file_capture_exclusions: tuple[str, ...] = (),
 ) -> str:
     """Single-attempt subprocess invocation (the historical generator path).
 
@@ -544,9 +556,10 @@ def _invoke_subprocess(
         # project_root) signature keep working (the common path passes env=None
         # and timeout=None, and invoke_file_writing_agent self-resolves the same
         # shared timeout default via resolve_ai_call_timeout()).
-        if env is not None or timeout is not None:
+        if env is not None or timeout is not None or file_capture_exclusions:
             return invoke_file_writing_agent(
-                command, prompt, project_root, env=env, timeout=call_timeout
+                command, prompt, project_root, env=env, timeout=call_timeout,
+                **({"file_capture_exclusions": file_capture_exclusions} if file_capture_exclusions else {}),
             )
         return invoke_file_writing_agent(command, prompt, project_root)
 
@@ -821,6 +834,8 @@ def invoke_ai(
     force_print_on_claude: bool = False,
     config: Mapping[str, Any] | None = None,
     stage: str | None = None,
+    recover: bool = True,
+    file_capture_exclusions: tuple[str, ...] = (),
 ) -> str:
     """Invoke the AI CLI through the one unified path.
 
@@ -848,6 +863,10 @@ def invoke_ai(
             transport (and its fallback chain) is honored. ``None`` keeps the
             direct subprocess path.
         stage: Optional usage label; otherwise the Click subcommand path or empty.
+        recover: Enable the shared transport and output-ceiling recovery. A
+            caller that budgets a single invocation can disable these retries.
+        file_capture_exclusions: Project-relative harness files excluded from
+            staging and capture by the file-writing command path.
 
     Wall-clock timeout: every direct-subprocess AI call carries a finite
     per-call timeout (resolved via :func:`resolve_ai_call_timeout`; default
@@ -903,6 +922,7 @@ def invoke_ai(
                         output = _invoke_subprocess(
                             command_str, current_prompt, project_root=subprocess_root, env=env,
                             **({"working_directory": effective_root} if harden_read_only else {}),
+                            **({"file_capture_exclusions": file_capture_exclusions} if file_capture_exclusions else {}),
                         )
                         note_output(output)
                         return output
@@ -911,6 +931,8 @@ def invoke_ai(
             max_attempts = max(0, retries) + 1
             for attempt_index in range(max_attempts):
                 try:
+                    if not recover:
+                        return attempt(current_prompt)
                     return _invoke_with_recovery(attempt, current_prompt, adapter_routed=config is not None)
                 except ValueError as exc:
                     if attempt_index + 1 >= max_attempts or not _is_transient_failure(exc):

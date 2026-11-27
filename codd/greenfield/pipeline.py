@@ -299,10 +299,21 @@ def save_session(project_root: Path, session: dict[str, Any]) -> Path:
     session["updated_at"] = _utc_now()
     path = session_path(project_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        yaml.safe_dump(session, sort_keys=False, allow_unicode=True),
-        encoding="utf-8",
-    )
+    body = yaml.safe_dump(session, sort_keys=False, allow_unicode=True)
+    if (session.get("stages") or {}).get("implement", {}).get("test_feedback"):
+        # The started-attempt checkpoint must survive an interrupted write.
+        from tempfile import NamedTemporaryFile
+
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            try:
+                stream.write(body)
+                stream.close()
+                temporary.replace(path)
+            finally:
+                temporary.unlink(missing_ok=True)
+    else:
+        path.write_text(body, encoding="utf-8")
     return path
 
 
@@ -984,6 +995,11 @@ class GreenfieldPipeline:
                 resolved[key] = deepcopy(default)
         if self.provisional_decisions:
             resolved["provisional_decisions"] = True
+        # Keep opt-in settings out of the serialized defaults for a fresh project.
+        if config_section.get("implement_test_feedback") is True:
+            rounds = config_section.get("implement_test_feedback_rounds", 1)
+            resolved["implement_test_feedback"] = True
+            resolved["implement_test_feedback_rounds"] = 1 if rounds is None else rounds
         return resolved
 
     # ── notifications (notify-only, never blocking) ─────────
@@ -1595,6 +1611,10 @@ class GreenfieldPipeline:
     # ── stage: implement ────────────────────────────────────
 
     def _stage_implement(self, project_root: Path, record: dict[str, Any], options: dict[str, Any]) -> None:
+        if record.get("test_feedback"):
+            from codd.greenfield.implement_test_feedback import recover_interrupted_feedback
+
+            recover_interrupted_feedback(project_root, record, self.echo, self._checkpoint)
         # A resumed session can skip generation altogether. Always re-read
         # design evidence before starting (or resuming) implementation tasks.
         self._check_design_consistency(project_root)
@@ -1760,6 +1780,10 @@ class GreenfieldPipeline:
             scope_resolver=self._make_vb_scope_resolver(project_root, tasks) if coverage_on else None,
             authenticity_profile=self._resolve_layout_profile(project_root) if coverage_on else None,
         )
+        if options.get("implement_test_feedback"):
+            from codd.greenfield.implement_test_feedback import run_implement_test_feedback
+
+            run_implement_test_feedback(self, project_root, tasks, record, options)
         record["detail"] = f"{len(tasks)} task(s) implemented"
 
     def _enforce_api_facade_coverage(
@@ -2527,6 +2551,8 @@ class GreenfieldPipeline:
         project_root: Path,
         tasks: list[ImplementTaskRef],
         options: dict[str, Any],
+        *,
+        verdict_only: bool = False,
     ) -> None:
         """Run the implement-time native-oracle gate (see _stage_implement).
 
@@ -2604,23 +2630,15 @@ class GreenfieldPipeline:
         # The oracle needs the scaffolded config (tsconfig) present NOW, at
         # implement-time — verify's scaffold runs later. Idempotent + non-
         # clobbering, so verify's re-scaffold is a no-op.
-        self._ensure_test_runner(project_root)
+        if not verdict_only:
+            self._ensure_test_runner(project_root)
 
-        # The path→owning-task index for the SCOPED rerun: declared task outputs
-        # UNION the config-derived output paths (incl. the permissive
-        # ``_output_paths_for_task`` fallback so the index knows where to LOOK).
+        # Keep the ownership and orphan-artifact checks in verdict-only runs.
+        # The index includes permissive fallback paths so it knows where to look.
+        # Certification uses only exclusive claims from task outputs and
+        # explicitly configured defaults. A permissive source/package fallback
+        # may overlap across tasks without asserting ownership.
         config_output_paths = self._resolve_oracle_config_output_paths(tasks, config)
-        # HARD owner-uniqueness gate (contract artifact.owner.unique.v1): runs
-        # BEFORE the index build (and OUTSIDE its best-effort except) so an
-        # ambiguous-ownership topology honest-fails deterministically rather than
-        # letting the index's first-owner-wins setdefault silently pick a winner.
-        # It reasons over EXCLUSIVE ownership CLAIMS only — declared task outputs
-        # (read internally) + config-DECLARED default_output_paths — NOT the
-        # permissive fallback the index uses. Passing the fallback false-RED's a
-        # NORMAL Python src-layout (source_root nests package_root) whenever ≥2
-        # tasks with no declared output fall to ``_route_source_into_package``'s
-        # ``src`` + ``src/<pkg>`` accept-list (a "may write here", not an exclusive
-        # claim). See ``_resolve_owner_uniqueness_config_paths``.
         self._certify_output_owner_uniqueness(
             tasks, self._resolve_owner_uniqueness_config_paths(tasks, config)
         )
@@ -2640,7 +2658,7 @@ class GreenfieldPipeline:
                 source_dirs=source_dirs,
                 test_dirs=test_dirs,
                 config=config,
-                rerun=_rerun,
+                rerun=None if verdict_only else _rerun,
                 echo=self.echo,
                 scope_index=scope_index,
                 manifest_paths=manifest_paths,
@@ -2923,6 +2941,7 @@ class GreenfieldPipeline:
         config: dict[str, Any],
         *,
         feedback_rows: Any = None,
+        feedback_output_paths: tuple[str, ...] = (),
     ) -> dict[str, float]:
         """Re-run ``implement_tasks`` for each given task carrying ``feedback``.
 
@@ -3021,11 +3040,8 @@ class GreenfieldPipeline:
                     continue
                 task_feedback = format_gap_feedback(scoped_rows)
 
-            output_paths = (
-                list(task.output_paths)
-                if task.output_paths
-                else _output_paths_for_task(config, task)
-            )
+            declared_paths = feedback_output_paths or task.output_paths
+            output_paths = list(declared_paths) if declared_paths else _output_paths_for_task(config, task)
             started = time.monotonic()
             try:
                 implement_tasks(
@@ -3038,8 +3054,11 @@ class GreenfieldPipeline:
                     ai_command=self.ai_command,
                     use_derived_steps=True,
                     feedback=task_feedback,
+                    **({"_single_attempt": True} if feedback_output_paths else {}),
                 )
             except CoddCLIError as exc:
+                if feedback_output_paths:
+                    raise
                 failed_task_ids.append(task.task_id)
                 self.echo(
                     f"[greenfield] re-implement {task.task_id}: produced no usable output "

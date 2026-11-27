@@ -83,6 +83,9 @@ def ensure_builtin_adapters_registered(registry: AdapterRegistry | None = None) 
         SurefireXmlReportAdapter,
         VitestJsonReportAdapter,
     )
+    from codd.languages.adapters.pytest_feedback import PytestFeedbackAdapter
+
+    _register_once(target, "test_feedback", "pytest-feedback", PytestFeedbackAdapter())
 
     _register_once(target, "runner_report", "vitest-json", VitestJsonReportAdapter())
     _register_once(target, "runner_report", "go-test-json", GoTestJsonReportAdapter())
