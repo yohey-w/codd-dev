@@ -107,19 +107,26 @@ def test_render_vb_contract_enumerates_closed_list_and_rules(tmp_path):
 def test_render_vb_contract_explains_how_to_supply_assertion_evidence(tmp_path):
     block = render_vb_contract(collect_declared_vb_ids(_make_project(tmp_path)))
     quality = block.split("2. ASSERTION QUALITY", 1)[1].split("3. COVERAGE", 1)[0]
+    placement, direct, external = quality.split("\n- ")[1:]
 
-    assert "inside or immediately above the test" in quality
-    assert "executable test declaration recognized by the checker" in quality
-    assert "keep the test enabled" in quality
-    assert "assertion directly in the marked test body" in quality
-    assert "helper whose definition resolves within this repository" in quality
-    assert "an `assert` or `check` prefix" in quality
-    assert "Assert on a helper argument or a value derived from it." in quality
-    assert "pass the argument through to the assertion" in quality
-    assert "An unresolved external assertion helper supplies no evidence, even through a local wrapper." in quality
-    assert "only when the checker recognizes them for the active test profile" in quality
-    assert "follow it with a recognized assertion on the observed value" in quality
-    assert "Checking library or built-in behavior alone supplies no evidence." in quality
+    assert "immediately above the individual test declaration, above any decorators or annotations" in placement
+    assert "executable declaration the checker recognizes" in placement
+    assert "free of skip or disable directives, including conditional ones" in placement
+    assert "genuinely cannot be tested yet, use a `codd: blocked` marker as described in rule 3" in placement
+
+    assert "store the observed result in a variable" in direct
+    assert "independently written expectation" in direct
+    assert "a recognized assertion written directly in the body" in direct
+    assert "they do not replace this direct assertion" in direct
+    # Helpers may live in shared modules (e.g. a tests helpers package); the
+    # contract must not tell authors to define them in the test file.
+    assert "same file" not in quality
+
+    assert "An unresolved external assertion helper supplies no evidence, even through a local wrapper." in external
+    assert "only when the checker recognizes them for the active test profile" in external
+    assert "External helpers can still wait or retry, and library calls can obtain observations." in external
+    assert "Follow them with the direct assertion on the observed result." in external
+    assert "Checking library or built-in behavior alone supplies no evidence." in external
 
 
 def test_render_vb_contract_is_language_free():

@@ -905,23 +905,23 @@ def render_vb_contract(
             "prove the behavior and is rejected. Write the expected value "
             "INDEPENDENTLY of the value you compute from the system under test — "
             "never assert a system-derived value against itself.",
-            "- Place each covers marker inside or immediately above the test that "
-            "proves the behavior. Use an executable test declaration recognized by "
-            "the checker and keep the test enabled.",
-            "- Write a recognized assertion directly in the marked test body or call "
-            "a helper whose definition resolves within this repository. Give helpers "
-            "an assertion-style name (for example, an `assert` or `check` prefix). "
-            "Assert on a helper argument or a value derived from it. If a helper "
-            "delegates further, keep the chain short and pass the argument through "
-            "to the assertion.",
+            "- Place each covers marker immediately above the individual test "
+            "declaration, above any decorators or annotations. Use an executable "
+            "declaration the checker recognizes, and keep marked tests free of skip "
+            "or disable directives, including conditional ones. If the behavior "
+            "genuinely cannot be tested yet, use a `codd: blocked` marker as "
+            "described in rule 3.",
+            "- In each marked test body, store the observed result in a variable and "
+            "compare that variable with an independently written expectation, using "
+            "a recognized assertion written directly in the body. Shared or local "
+            "assertion helpers may also be used, but they do not replace this direct "
+            "assertion.",
             "- An unresolved external assertion helper supplies no evidence, even "
             "through a local wrapper. Use external assertions as evidence only when "
-            "the checker recognizes them for the active test profile. You may still "
-            "call such a helper (for example, to wait for a condition), but follow "
-            "it with a recognized assertion on the observed value. Assert on "
-            "the system under test's behavior, including when using library calls "
-            "to obtain observations. Checking library or built-in behavior alone "
-            "supplies no evidence.",
+            "the checker recognizes them for the active test profile. External helpers "
+            "can still wait or retry, and library calls can obtain observations. "
+            "Follow them with the direct assertion on the observed result. "
+            "Checking library or built-in behavior alone supplies no evidence.",
             "",
             "3. COVERAGE IS THE COMPLETION CONDITION — for EVERY id in the closed "
             "list above, at least one test satisfying rule 2 (or an explicit "
