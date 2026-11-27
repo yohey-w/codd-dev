@@ -28,6 +28,10 @@ from codd.generator import (
     _resolve_generation_capabilities,
 )
 from codd.path_safety import is_glob_decl, resolve_project_path
+from codd.planned_required_artifacts import (
+    load_required_artifact_lineup,
+    structured_ownership_requirements,
+)
 from codd.project_types import ProjectCapabilities
 from codd.requirement_appendix import (
     PROVISIONAL_DECISIONS_PATH,
@@ -440,9 +444,9 @@ def plan_init(
     lineup = None
     draft_lexicon = None
     not_applicable: dict[str, str] = {}
+    ordering_changes: list[str] = []
     if use_required_artifacts:
         from codd.lexicon import ProjectLexicon
-        from codd.planned_required_artifacts import load_required_artifact_lineup, structured_ownership_requirements
         from codd.required_artifacts_deriver import (
             _write_accounted_lexicon,
             accounted_lexicon_path,
@@ -489,9 +493,10 @@ def plan_init(
         )
 
     def validate(waves: dict[str, list[dict[str, Any]]], ownership_reasons: Any) -> None:
-        nonlocal not_applicable
+        nonlocal not_applicable, ordering_changes
         if lineup is not None:
             lineup.validate(waves, not_applicable=ownership_reasons, required_owners=required_owners)
+            ordering_changes = lineup.apply_ordering(waves)
         if lineup is None or waves:
             _validate_behavior_wave_config(waves, requirement_documents, warn_missing_flow_owner=lineup is None)
         not_applicable = ownership_reasons
@@ -536,7 +541,10 @@ def plan_init(
                 "The saved artifact selection changed during planning. "
                 "Retry 'codd plan --init --use-required-artifacts'."
             )
-        required_artifact_report = lineup.annotate_and_report(wave_config, not_applicable=not_applicable)
+        required_artifact_report = "\n".join([
+            lineup.annotate_and_report(wave_config, not_applicable=not_applicable),
+            *ordering_changes,
+        ])
         if wave_config and draft_lexicon is not None:
             _write_accounted_lexicon(
                 lexicon_path, original_lexicon, yaml.safe_dump(draft_lexicon, sort_keys=False, allow_unicode=True),

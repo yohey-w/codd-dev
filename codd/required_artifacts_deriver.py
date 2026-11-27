@@ -18,6 +18,7 @@ import yaml
 from codd.ai_invoke import resolve_ai_command
 from codd.claude_cli import with_default_claude_permission_bypass
 from codd.config import load_project_config
+from codd.design_consistency import _depends_on
 from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
 from codd.knowledge_fetcher import KnowledgeFetcher
 from codd.lexicon import LEXICON_FILENAME, AskItem, ProjectLexicon, validate_lexicon
@@ -245,7 +246,7 @@ class RequiredArtifactsDeriver:
         defaults: list[dict[str, Any]],
     ) -> str:
         """Build the AI prompt used for artifact derivation."""
-        defaults_yaml = yaml.safe_dump(defaults, sort_keys=False, allow_unicode=True)
+        defaults_yaml = _candidate_prompt_yaml(defaults)
         lines = [
             "You are deriving the complete set of design artifacts needed to implement a project.",
             f"Project type: {project_type}",
@@ -340,7 +341,9 @@ class RequiredArtifactsDeriver:
         """Load project-type defaults, allowing codd.yaml overrides."""
         override_artifacts = self.config.get("default_artifacts")
         if isinstance(override_artifacts, list):
-            return _normalize_defaults(override_artifacts, strict=strict)
+            return _normalize_defaults(
+                override_artifacts, strict=strict, source="required_artifacts.default_artifacts",
+            )
         if strict and "default_artifacts" in self.config:
             raise ValueError("required_artifacts.default_artifacts must be a list")
 
@@ -355,7 +358,7 @@ class RequiredArtifactsDeriver:
         artifacts = payload.get("default_artifacts", [])
         if not isinstance(artifacts, list):
             raise ValueError(f"{defaults_path} default_artifacts must be a list")
-        return _normalize_defaults(artifacts, strict=strict)
+        return _normalize_defaults(artifacts, strict=strict, source=str(defaults_path))
 
     def _load_project_config(self) -> dict[str, Any]:
         try:
@@ -488,6 +491,14 @@ class RequiredArtifactsDeriver:
         return "\n".join(lines)
 
 
+def _candidate_prompt_yaml(candidates: list[dict[str, Any]]) -> str:
+    """Keep planner-only ordering rules out of artifact selection prompts."""
+    return yaml.safe_dump(
+        [{key: value for key, value in row.items() if key != "ordered_after"} for row in candidates],
+        sort_keys=False, allow_unicode=True,
+    )
+
+
 def _accounted_prompt(
     project_type: str,
     requirements: str,
@@ -504,7 +515,7 @@ User decisions from requirement completeness audit:
 {decisions or '(none)'}
 
 Default candidate artifacts for this project type:
-{yaml.safe_dump(defaults, sort_keys=False, allow_unicode=True).rstrip()}
+{_candidate_prompt_yaml(defaults).rstrip()}
 
 Rules:
 - List each candidate ID exactly once, in required_artifacts or omitted_artifacts.
@@ -694,14 +705,34 @@ def _decision_ids(
     return ids
 
 
-def _normalize_defaults(artifacts: list, *, strict: bool) -> list[dict[str, Any]]:
+def _normalize_defaults(artifacts: list, *, strict: bool, source: str) -> list[dict[str, Any]]:
     defaults = []
     for index, item in enumerate(artifacts):
         if isinstance(item, dict):
             defaults.append(_normalize_default_artifact(item))
         elif strict:
             raise ValueError(f"default_artifacts[{index}] must be a mapping")
+    validate_catalog_ordering({row["id"].strip(): row for row in defaults}, source=source)
     return defaults
+
+
+def validate_catalog_ordering(candidates: dict[str, dict[str, Any]], *, source: str) -> None:
+    """Reject cycles involving ordered_after, including ones closed by depends_on."""
+    rules = [
+        (row, after) for row, candidate in candidates.items()
+        for after in candidate.get("ordered_after", [])
+    ]
+    if not rules:
+        return
+    dependencies = {
+        row: [dep.strip() for dep in candidate.get("depends_on", [])]
+        for row, candidate in candidates.items()
+    }
+    for row, after in rules:
+        dependencies[row].append(after)
+    for row, after in rules:
+        if after in dependencies and _depends_on(after, row, dependencies):
+            raise ValueError(f"{source}: {row!r} ordered_after {after!r} creates a dependency cycle")
 
 
 def _parse_json_payload(output: str) -> Any:
@@ -747,6 +778,13 @@ def _normalize_default_artifact(raw: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(artifact.get(field_name), str) or not artifact[field_name].strip():
             raise ValueError(f"default artifact missing non-empty {field_name}: {raw}")
     artifact["depends_on"] = _string_list(artifact.get("depends_on", []), "depends_on")
+    if "ordered_after" in artifact:
+        predecessors = artifact["ordered_after"]
+        if not isinstance(predecessors, list) or any(
+            not isinstance(item, str) or not item.strip() for item in predecessors
+        ):
+            raise ValueError(f"default artifact {artifact['id']!r}: ordered_after must be a list of IDs")
+        artifact["ordered_after"] = [item.strip() for item in predecessors]
     if "condition" in artifact:
         artifact["condition"] = str(artifact["condition"])
     artifact["always_required"] = bool(artifact.get("always_required", False))
