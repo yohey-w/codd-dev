@@ -73,10 +73,14 @@ def test_canonical_environment_prompt(author, language):
     assert "```codd-test-environment\nversion: 1\npackages: []\nassets: []\n```" in prompt
     assert "Use `[]` for either list when nothing is needed." in prompt
     if language == "python":
-        assert "list every registry package that tests, or the helper processes and servers" in prompt
-        assert "including packages that are also runtime dependencies" in prompt
+        assert (
+            "- In `packages`, list every registry package that tests, or the helper processes and servers "
+            "they start, import or run, including packages that are also runtime dependencies: the "
+            "implementation may not declare them. Write package names only, without versions, paths, or URLs, "
+            "so the list cannot conflict with the project's own requirements.\n"
+        ) in prompt
         assert "Keep runtime dependencies in the project's dependency manifest." not in prompt
-        assert "Version constraints are optional. Do not use `===`, paths, or URLs." in prompt
+        assert "Version constraints are optional." not in prompt
         assert "`playwright-chromium` — Chromium browser binaries used by Playwright tests." in prompt
     else:
         assert "Keep `packages` empty. Put test dependencies in the development dependencies" in prompt
