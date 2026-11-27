@@ -73,9 +73,14 @@ def test_canonical_environment_prompt(author, language):
     assert "```codd-test-environment\nversion: 1\npackages: []\nassets: []\n```" in prompt
     assert "Use `[]` for either list when nothing is needed." in prompt
     if language == "python":
-        assert "list registry packages imported by tests or helper processes they start" in prompt
-        assert "Keep runtime dependencies in the project's dependency manifest." in prompt
-        assert "Version constraints are optional. Do not use `===`, paths, or URLs." in prompt
+        assert (
+            "- In `packages`, list every registry package that tests, or the helper processes and servers "
+            "they start, import or run, including packages that are also runtime dependencies: the "
+            "implementation may not declare them. Write package names only, without versions, paths, or URLs, "
+            "so the list cannot conflict with the project's own requirements.\n"
+        ) in prompt
+        assert "Keep runtime dependencies in the project's dependency manifest." not in prompt
+        assert "Version constraints are optional." not in prompt
         assert "`playwright-chromium` — Chromium browser binaries used by Playwright tests." in prompt
     else:
         assert "Keep `packages` empty. Put test dependencies in the development dependencies" in prompt
@@ -284,7 +289,7 @@ def test_non_utf8_session_uses_configured_language(author):
 
     assert result.status == "generated"
     [prompt] = prompts
-    assert "list registry packages" in prompt
+    assert "list every registry package" in prompt
 
 
 def test_uninterpretable_session_uses_configured_language(author):
@@ -297,7 +302,7 @@ def test_uninterpretable_session_uses_configured_language(author):
 
     assert result.status == "generated"
     [prompt] = prompts
-    assert "list registry packages" in prompt
+    assert "list every registry package" in prompt
 
 
 def test_javascript_declaration_example_is_ignored(author):
@@ -440,7 +445,7 @@ def test_saved_language_matches_verification(author, monkeypatch, configured, sa
         generator.generate_wave(project, 1)
         pipeline._provision_env(project)
         assert installed == [packages]
-        assert len(prompts) == 1 and "list registry packages" in prompts[0]
+        assert len(prompts) == 1 and "list every registry package" in prompts[0]
 
 
 def test_wave_strategy_wins_over_same_basename_and_pin(author):
