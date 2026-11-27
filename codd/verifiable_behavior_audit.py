@@ -19,7 +19,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 from codd.frontmatter import codd_block, read_frontmatter
 from codd.operational_e2e_audit import (
@@ -126,20 +126,10 @@ def is_canonical_vb_doc(node_id: str | None = None, output_path: str | None = No
     return False
 
 
-def wave_config_plans_canonical_vb_doc(config: dict[str, Any] | None) -> bool:
-    """Whether the project's ``wave_config`` plans the canonical VB registry doc.
-
-    Structural signal that this project INTENDS to declare verifiable behaviors:
-    one of its planned generation artifacts is the canonical VB document
-    (``test:test-strategy`` / ``docs/test/test_strategy.md``). Mirrors the
-    detection in ``codd.planner._set_canonical_vb_doc_config`` (which pins the
-    canonical doc into ``test_coverage.docs`` at plan time). Generic — keys off
-    the standard CoDD canonical naming, never any one project's specifics.
-    """
-
-    wave_config = (config or {}).get("wave_config")
+def canonical_vb_wave_entries(wave_config: object, *, node_only: bool = False) -> Iterator[dict]:
+    """Yield each wave's first strategy entry, optionally requiring the canonical node ID."""
     if not isinstance(wave_config, dict):
-        return False
+        return
     for entries in wave_config.values():
         if not isinstance(entries, list):
             continue
@@ -150,10 +140,15 @@ def wave_config_plans_canonical_vb_doc(config: dict[str, Any] | None) -> bool:
             output = entry.get("output")
             if is_canonical_vb_doc(
                 node_id=node_id if isinstance(node_id, str) else None,
-                output_path=output if isinstance(output, str) else None,
+                output_path=output if not node_only and isinstance(output, str) else None,
             ):
-                return True
-    return False
+                yield entry
+                break
+
+
+def wave_config_plans_canonical_vb_doc(config: dict[str, Any] | None) -> bool:
+    """Whether the project's ``wave_config`` plans the canonical VB registry doc."""
+    return next(canonical_vb_wave_entries((config or {}).get("wave_config")), None) is not None
 
 
 def project_expects_vb_registry(

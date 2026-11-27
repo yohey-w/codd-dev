@@ -7,13 +7,17 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 
 from codd.project_types import EnvProvisionResult, LayoutProfile, _parse_pyproject_toml
+from codd.languages.profile import TestAssetSpec
+from codd.test_environment import TestEnvironmentDeclaration, check_test_asset
 
 
 # Keep the verifier-only toolchain aligned with the profile CI setup.
@@ -29,6 +33,34 @@ _ENV_PROVISION_STATE_RELPATH = ".codd/verify/exec_env.json"
 #: slow but must not hang the gate forever). Mirrors the node install preflight cap.
 _ENV_PROVISION_TIMEOUT_SECONDS = 900.0
 
+# Registry requirements only: distribution names, extras and version clauses
+# (PEP 508 / 440). Direct references, markers, pip flags and local archives
+# are outside the declaration's package-name-and-version syntax.
+_NAME = r"[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?"
+_RELEASE = r"v?(?:[0-9]+!)?[0-9]+(?:\.[0-9]+)*"
+_SUFFIX = (
+    r"(?:[-_.]?(?:a|b|c|rc|alpha|beta|pre|preview)[-_.]?[0-9]*)?"
+    r"(?:-[0-9]+|[-_.]?(?:post|rev|r)[-_.]?[0-9]*)?"
+    r"(?:[-_.]?dev[-_.]?[0-9]*)?"
+)
+_VERSION = _RELEASE + _SUFFIX
+_LOCAL = r"(?:\+[a-z0-9]+(?:[-_.][a-z0-9]+)*)?"
+_SPECIFIER = (
+    rf"(?:(?:==|!=)\s*(?:{_RELEASE}\.\*|{_VERSION}{_LOCAL})"
+    rf"|(?:<=|>=|<|>)\s*{_VERSION}"
+    rf"|~=\s*v?(?:[0-9]+!)?[0-9]+(?:\.[0-9]+)+{_SUFFIX}"
+    r")"
+)
+_SPECIFIERS = rf"{_SPECIFIER}(?:\s*,\s*{_SPECIFIER})*\s*,?"
+_REGISTRY_REQUIREMENT = re.compile(
+    rf"(?P<name>{_NAME})(?:\s*\[\s*(?:{_NAME}(?:\s*,\s*{_NAME})*)?\s*\])?"
+    rf"(?:\s*(?P<versions>{_SPECIFIERS}|\(\s*{_SPECIFIERS}\s*\)))?",
+    re.IGNORECASE | re.ASCII,
+)
+_ARCHIVE_EXTENSION = re.compile(
+    r"\.(?:whl|zip|tar|tgz|tbz2?|txz|tlz)(?![a-z0-9])", re.IGNORECASE | re.ASCII,
+)
+
 
 def _venv_bin_dir(venv_dir: Path) -> Path:
     return venv_dir / ("Scripts" if os.name == "nt" else "bin")
@@ -36,6 +68,10 @@ def _venv_bin_dir(venv_dir: Path) -> Path:
 
 def _venv_interpreter(venv_dir: Path) -> Path:
     return _venv_bin_dir(venv_dir) / ("python.exe" if os.name == "nt" else "python")
+
+
+def _pip_install_argv(interpreter: Path, *args: str) -> list[str]:
+    return [str(interpreter), "-m", "pip", "install", "--disable-pip-version-check", *args]
 
 
 _PYTHON_ENV_PROBE = """
@@ -255,6 +291,131 @@ def _env_build_error(detail: str, next_step: str) -> EnvProvisionResult:
 def provision_python_env(
     project_root: Path, *, profile: LayoutProfile,
     propose_dependencies: Callable[[str], str] | None = None,
+    declaration: TestEnvironmentDeclaration | None = None,
+    asset_specs: Mapping[str, TestAssetSpec] | None = None,
+    config: Mapping | None = None,
+) -> EnvProvisionResult:
+    if declaration is None:
+        return _provision_python_base_env(project_root, profile, propose_dependencies)
+
+    for package in declaration.packages:
+        if "===" in package:
+            return _env_build_error(
+                f"{declaration.location}: invalid test package requirement {package!r}: "
+                "the === version operator is not accepted",
+                "Use a standard registry version constraint, such as == or >=.",
+            )
+        match = _REGISTRY_REQUIREMENT.fullmatch(package.strip())
+        if match is None or _ARCHIVE_EXTENSION.search(match["name"]) or (
+            match["versions"] and _ARCHIVE_EXTENSION.search(match["versions"])
+        ):
+            return _env_build_error(
+                f"{declaration.location}: invalid test package requirement {package!r}",
+                "Use a registry package name with optional extras and version constraints.",
+            )
+
+    state_path = project_root / _ENV_PROVISION_STATE_RELPATH
+    try:
+        previous = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        previous = {}
+    cached = previous.get("test_environment") if isinstance(previous, dict) else None
+    base = _provision_python_base_env(project_root, profile, propose_dependencies)
+    if not base.ok:
+        return base
+    return _prepare_declared_environment(
+        project_root, state_path, declaration, asset_specs or {}, dict(config or {}), base, cached,
+    )
+
+
+def _prepare_declared_environment(
+    project_root: Path, state_path: Path, declaration: TestEnvironmentDeclaration,
+    asset_specs: Mapping[str, TestAssetSpec], config: dict, base: EnvProvisionResult, cached: object,
+) -> EnvProvisionResult:
+    summary = {"packages": list(declaration.packages), "assets": list(declaration.assets)}
+    reusable = (
+        base.action == "up_to_date"
+        and isinstance(cached, dict)
+        and cached.get("declaration") == summary
+        and cached.get("packages_installed") is True
+        and cached.get("test_toolchain") == _PYTHON_TEST_TOOLCHAIN_PIN
+    )
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    checks: dict[str, str] = {}
+    record = {"declaration": summary, "packages_installed": False, "asset_checks": checks}
+    if declaration.packages:
+        record["test_toolchain"] = _PYTHON_TEST_TOOLCHAIN_PIN
+    state["test_environment"] = record
+    notices = []
+    try:
+        if declaration.packages and not reusable:
+            installed = _install_test_packages(project_root, declaration)
+            if not installed.ok:
+                return installed
+            base = replace(base, action="provisioned", detail=f"{base.detail}; {installed.detail}")
+        record["packages_installed"] = True
+        if asset_specs:
+            from codd.repair.verify_runner import VerifyRunner
+
+            try:
+                env = VerifyRunner(project_root, config).test_command_environment(config)
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                return _env_build_error(
+                    f"{declaration.location}: could not prepare the test command environment: {exc}",
+                    "Use fixed-value assignments before the test command for asset location variables, "
+                    "or set those variables in the environment that launches CoDD.",
+                )
+            verify = config.get("verify")
+            acquire = isinstance(verify, Mapping) and verify.get("acquire_test_assets") is True
+            for name, spec in asset_specs.items():
+                check = check_test_asset(
+                    project_root, name, spec, env=env, acquire=acquire,
+                    install_timeout=_ENV_PROVISION_TIMEOUT_SECONDS,
+                )
+                checks[name] = "failed" if check.failure else "passed"
+                if check.failure:
+                    return EnvProvisionResult(
+                        False, "failed", f"{declaration.location}: {check.failure}",
+                        next_step=check.next_step, notices=tuple(notices),
+                    )
+                if check.notice:
+                    notices.append(check.notice)
+        return replace(base, notices=tuple(notices))
+    finally:
+        state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+
+def _install_test_packages(
+    project_root: Path, declaration: TestEnvironmentDeclaration,
+) -> EnvProvisionResult:
+    interpreter = _venv_interpreter(project_root / ".venv")
+    argv = _pip_install_argv(
+        interpreter, _PYTHON_TEST_TOOLCHAIN_PIN, "--", *(package.strip() for package in declaration.packages),
+    )
+    packages = ", ".join(declaration.packages)
+    label = f"{declaration.location}: could not install declared test packages ({packages})"
+    next_step = f"Correct the diagnostic, then retry or run manually: {shlex.join(argv)}."
+    try:
+        installed = subprocess.run(
+            argv, cwd=str(project_root), capture_output=True, text=True,
+            timeout=_ENV_PROVISION_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stderr or exc.stdout or b""
+        if isinstance(output, bytes):
+            output = output.decode(errors="replace")
+        detail = f"{label}: timed out after {_ENV_PROVISION_TIMEOUT_SECONDS:g}s\n{output.strip()[-2000:]}"
+        return _env_build_error(detail.rstrip(), next_step)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return _env_build_error(f"{label}: {exc}", next_step)
+    if installed.returncode:
+        tail = (installed.stderr or installed.stdout or "").strip()[-2000:]
+        return _env_build_error(f"{label}: exited {installed.returncode}\n{tail}".rstrip(), next_step)
+    return EnvProvisionResult(True, "provisioned", f"installed declared test packages: {packages}")
+
+
+def _provision_python_base_env(
+    project_root: Path, profile: LayoutProfile, propose_dependencies: Callable[[str], str] | None,
 ) -> EnvProvisionResult:
     """Build from the manifest and try one scoped declaration repair if needed."""
     from codd.path_safety import resolve_project_path
@@ -368,11 +529,7 @@ def _build_python_env(
     )
     try:
         installed = subprocess.run(  # noqa: S603 — trusted argv, shell=False
-            [
-                str(interpreter), "-m", "pip", "install",
-                "--disable-pip-version-check",
-                _PYTHON_TEST_TOOLCHAIN_PIN, "-e", ".",
-            ],
+            _pip_install_argv(interpreter, _PYTHON_TEST_TOOLCHAIN_PIN, "-e", "."),
             cwd=str(project_root),
             capture_output=True,
             text=True,

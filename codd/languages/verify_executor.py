@@ -58,6 +58,7 @@ defensive not-green so a partial report never sneaks to PASS.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import os
 import shutil
 import subprocess  # noqa: S404 — argv is from the trusted language profile, shell=False
@@ -142,6 +143,17 @@ class VerifyExecutionResult:
         return self.verify_class.is_green
 
 
+def verify_command_env(
+    overrides: Mapping[str, str], path_prepend: tuple[str, ...],
+) -> dict[str, str]:
+    env = os.environ.copy()
+    env.update(overrides)
+    prepend = [d for d in path_prepend if d and os.path.isabs(d) and os.path.isdir(d)]
+    if prepend:
+        env["PATH"] = os.pathsep.join([*prepend, env.get("PATH", "")])
+    return env
+
+
 def execute_verify_plan(
     plan: VerifyRunPlan,
     project_root: Path,
@@ -185,8 +197,7 @@ def execute_verify_plan(
 
     # (a) Resolve cwd + env.
     cwd = (project_root / plan.cwd) if plan.cwd else project_root
-    env = os.environ.copy()
-    env.update(plan.env)
+    env = verify_command_env(plan.env, exec_path_prepend)
 
     # (a2) Unsubstituted-placeholder guard (the v2.75 cwd-bug class, applied to the
     # core verify plan): build_verify_plan() substitutes {module_root}/{repo_root}/
@@ -244,16 +255,6 @@ def execute_verify_plan(
                 execution=None,
                 detail=f"could not remove stale report at {report_path} before run",
             )
-
-    # (a3) Prepend caller-supplied directories to PATH (existence-checked, absolute
-    # only). This is where an unchanged bare ``argv[0]`` gets resolved to a binary
-    # the caller materialized. A non-existent / non-absolute entry (a forged or
-    # stale state artifact) is DROPPED, so a bogus dir can never silently redirect
-    # the spawn — it simply falls through to normal PATH resolution (TOOL_MISSING if
-    # the tool is genuinely absent). No entries ⇒ PATH is untouched (byte-identical).
-    prepend = [d for d in exec_path_prepend if d and os.path.isabs(d) and os.path.isdir(d)]
-    if prepend:
-        env["PATH"] = os.pathsep.join([*prepend, env.get("PATH", "")])
 
     # (c) Run the command.
     try:

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
 import subprocess
+import sys
 import time
 import warnings
 
@@ -268,6 +269,54 @@ def _link_target_note(path: Path) -> str:
         return f"{NODE_MODULES_DIRNAME} -> {os.readlink(path)}"
     except OSError:
         return NODE_MODULES_DIRNAME
+
+
+_SHELL_ASSIGNMENT = re.compile(r"[ \t]*[A-Za-z_][A-Za-z_0-9]*=")
+
+
+def _shell_word_end(command: str, start: int) -> int:
+    """Find a word boundary, respecting quotes and escapes."""
+    quote = None
+    index = start
+    while index < len(command):
+        char = command[index]
+        if char == quote:
+            quote = None
+        elif quote == "'":
+            pass
+        elif char == "\\":
+            index += 1
+        elif quote is None:
+            if char in "'\"":
+                quote = char
+            elif char in " \t\n;&|<>()":
+                return index
+        index += 1
+    if quote or index > len(command):
+        raise ValueError("unterminated shell word at the start of the test command")
+    return len(command)
+
+
+def _shell_assignment_prefix(command: str) -> str:
+    """Accept fixed assignments before a direct command for asset preflight."""
+    end = 0
+    while assignment := _SHELL_ASSIGNMENT.match(command, end):
+        end = _shell_word_end(command, assignment.end())
+    prefix = command[:end]
+    if "$" in prefix or "`" in prefix:
+        raise ValueError("test command environment assignments contain '$' or a backtick")
+    head = command[end:].lstrip(" \t")
+    if head.startswith(("\n", "\r", "#", "\\\n")):
+        raise ValueError("a newline or comment precedes the test command")
+    if not head or head[0] in ";&|<>()":
+        raise ValueError("expected a direct test command after any environment assignments")
+    word = head[:_shell_word_end(head, 0)]
+    if any(char in word for char in "$`\n\r"):
+        raise ValueError("the test command must start with a literal executable name")
+    executable, = shlex.split(word)
+    if executable.rsplit("/", 1)[-1] == "env" or executable in {"command", "exec", "export", "unset"}:
+        raise ValueError(f"the test command starts with an environment or shell wrapper ({executable!r})")
+    return prefix
 
 
 class VerifyRunner:
@@ -888,45 +937,34 @@ class VerifyRunner:
             if self._adapter_registry is not None
             else default_adapter_registry
         )
-        if plan.report_required:
-            from codd.languages.builtin_adapters import (
-                ensure_builtin_adapters_registered,
-            )
-
-            ensure_builtin_adapters_registered(registry)
-            adapter = (
-                registry.get("runner_report", plan.report_adapter)
-                if plan.report_adapter is not None
-                else None
-            )
-            if adapter is None:
-                if contract.profile.strictness == "strict":
-                    self._mark_contract_path()
-                    return (
-                        False,
-                        plan.command_str,
-                        "required runner_report adapter unavailable (strict)",
-                        VerificationFailure(
-                            check_name="test_command",
-                            source="test_command",
-                            message=(
-                                f"strict language {contract.language_id!r} declares a "
-                                f"required runner_report adapter "
-                                f"{plan.report_adapter!r} that is not registered — the "
-                                "executor cannot observe the report, so the run cannot "
-                                "be classified green (fail-closed; RED, no fallback)."
-                            ),
-                            details={
-                                "failure_class": "missing_runner_report_adapter",
-                                "report_adapter": plan.report_adapter,
-                                "language": contract.language_id,
-                            },
+        if not _verify_report_available(plan, registry):
+            if contract.profile.strictness == "strict":
+                self._mark_contract_path()
+                return (
+                    False,
+                    plan.command_str,
+                    "required runner_report adapter unavailable (strict)",
+                    VerificationFailure(
+                        check_name="test_command",
+                        source="test_command",
+                        message=(
+                            f"strict language {contract.language_id!r} declares a "
+                            f"required runner_report adapter "
+                            f"{plan.report_adapter!r} that is not registered — the "
+                            "executor cannot observe the report, so the run cannot "
+                            "be classified green (fail-closed; RED, no fallback)."
                         ),
-                    )
-                # legacy_compatible → pre-execution fallback (NOT a RED).
-                return self._legacy_test_command(
-                    settings, reason="missing_adapter_legacy_compatible", profile=contract.profile
+                        details={
+                            "failure_class": "missing_runner_report_adapter",
+                            "report_adapter": plan.report_adapter,
+                            "language": contract.language_id,
+                        },
+                    ),
                 )
+            # legacy_compatible → pre-execution fallback (NOT a RED).
+            return self._legacy_test_command(
+                settings, reason="missing_adapter_legacy_compatible", profile=contract.profile
+            )
 
         # (6) Run the contract executor. Its verdict is FINAL (no legacy rescue).
         from codd.languages.verify_executor import execute_verify_plan
@@ -997,6 +1035,62 @@ class VerifyRunner:
         env = dict(os.environ)
         env["PATH"] = os.pathsep.join([*prepend, env.get("PATH", "")])
         return env
+
+    def test_command_environment(self, settings: dict[str, Any]) -> dict[str, str]:
+        """Environment for a preflight command that must see the same assets as tests."""
+        from codd.languages.contract import resolve_language_contract
+        from codd.languages.registry import default_adapter_registry
+        from codd.languages.verify_executor import verify_command_env
+        from codd.languages.verify_plan import build_verify_plan
+        from codd.test_detection import _explicit_test_command
+
+        command = _explicit_test_command(settings)
+        if command is not None:
+            prefix = _shell_assignment_prefix(command)
+            if prefix and os.name == "posix":
+                # Run only the assignment prefix, through the same shell and
+                # provisioned PATH as the test. The verifier's command stays untouched.
+                probe = shlex.join((
+                    sys.executable, "-I", "-S", "-c",
+                    "import json, os; print(json.dumps(dict(os.environ)))",
+                ))
+                try:
+                    completed = self._run_evidence_subprocess(
+                        f"{prefix} {probe}", timeout=_test_timeout_seconds(settings),
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise ValueError(
+                        f"evaluating the test command's leading environment assignments exceeded {exc.timeout:g}s"
+                    ) from exc
+                if completed.returncode:
+                    raise ValueError("could not evaluate the test command's leading environment assignments")
+                return json.loads(completed.stdout)
+        if not command and not structural_only_allowed(settings):
+            contract = resolve_language_contract(
+                settings, language_registry=self._language_registry, adapter_registry=self._adapter_registry,
+            )
+            plan = build_verify_plan(contract) if contract is not None else None
+            registry = self._adapter_registry if self._adapter_registry is not None else default_adapter_registry
+            if plan is not None and (
+                contract.profile.strictness == "strict" or _verify_report_available(plan, registry)
+            ):
+                return verify_command_env(plan.env, self._exec_path_prepend())
+        return self._evidence_spawn_env() or dict(os.environ)
+
+    def _evidence_spawn_env(self) -> dict[str, str] | None:
+        env = _go_aware_env(self.project_root)
+        prepend = self._exec_path_prepend()
+        if prepend:
+            env = dict(env if env is not None else os.environ)
+            env["PATH"] = os.pathsep.join([*prepend, env.get("PATH", "")])
+        return env
+
+    def _run_evidence_subprocess(self, command: str, *, timeout: float) -> subprocess.CompletedProcess:
+        # The same provisioned PATH applies to the verifier and its preflight.
+        return subprocess.run(
+            command, shell=True, cwd=self.project_root, capture_output=True,
+            text=True, timeout=timeout, env=self._evidence_spawn_env(),
+        )
 
     def _legacy_test_command(
         self, settings: dict[str, Any], *, reason: str, profile: LanguageProfile | None = None
@@ -1163,28 +1257,11 @@ class VerifyRunner:
         observed failure IS execution evidence; only "never ran" is not).
         """
         timeout = _test_timeout_seconds(settings)
-        # Apply the SAME harness-recorded PATH prepend the contract executor uses, so
-        # the legacy/explicit-command spawn resolves an unchanged bare ``argv[0]`` the
-        # same way (no divergence between the two paths). Empty prepend keeps the env
-        # exactly as before (``_go_aware_env`` → None for non-Go = ambient inherit).
-        env = _go_aware_env(self.project_root)  # None → inherit ambient (non-Go)
-        prepend = self._exec_path_prepend()
-        if prepend:
-            env = dict(env if env is not None else os.environ)
-            env["PATH"] = os.pathsep.join([*prepend, env.get("PATH", "")])
         observation = VerificationObservation(check_name, command, str(self.project_root), False,
                                               started_at=datetime.now(timezone.utc).isoformat())
         self._observations.append(observation)
         try:
-            completed = subprocess.run(
-                command,
-                shell=True,
-                cwd=self.project_root,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=env,
-            )
+            completed = self._run_evidence_subprocess(command, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             observation.executed = True
             observation.timed_out = True
@@ -1438,6 +1515,15 @@ class VerifyRunner:
             code_addressable=code_addressable,
             evidence_nodes=_evidence_nodes(failures),
         )
+
+
+def _verify_report_available(plan: VerifyRunPlan, registry: AdapterRegistry) -> bool:
+    if not plan.report_required:
+        return True
+    from codd.languages.builtin_adapters import ensure_builtin_adapters_registered
+
+    ensure_builtin_adapters_registered(registry)
+    return plan.report_adapter is not None and registry.get("runner_report", plan.report_adapter) is not None
 
 
 def run_standalone_verify(

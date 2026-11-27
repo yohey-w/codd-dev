@@ -617,30 +617,16 @@ def _set_canonical_vb_doc_config(
     canonical naming, not any one project's specifics.
     """
 
-    from codd.verifiable_behavior_audit import is_canonical_vb_doc
+    from codd.verifiable_behavior_audit import canonical_vb_wave_entries
 
     section = config.get("test_coverage")
     if isinstance(section, dict) and section.get("docs"):
         return  # respect an explicit configuration
 
-    canonical_output: str | None = None
-    for entries in wave_config.values():
-        if not isinstance(entries, list):
-            continue
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            node_id = entry.get("node_id") or entry.get("id")
-            output = entry.get("output")
-            if is_canonical_vb_doc(
-                node_id=node_id if isinstance(node_id, str) else None,
-                output_path=output if isinstance(output, str) else None,
-            ):
-                if isinstance(output, str) and output.strip():
-                    canonical_output = output.strip()
-                break
-        if canonical_output:
-            break
+    canonical_output = next((
+        output.strip() for entry in canonical_vb_wave_entries(wave_config)
+        if isinstance(output := entry.get("output"), str) and output.strip()
+    ), None)
 
     if not canonical_output:
         return

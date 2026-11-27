@@ -383,6 +383,18 @@ class TestFrameworkSpec:
 
 
 @dataclass(frozen=True)
+class TestAssetSpec:
+    """Trusted profile commands for an execution-time test asset."""
+
+    __test__: ClassVar[bool] = False
+
+    check: tuple[str, ...]
+    acquire: tuple[str, ...]
+    check_timeout_seconds: int
+    manual_hint: str = ""
+
+
+@dataclass(frozen=True)
 class TestsSpec:
     """Test-semantics config (design §1.7).
 
@@ -415,6 +427,9 @@ class TestsSpec:
     # is the ONLY place per-language assertion idioms belong — the shared
     # contract text stays language-free.
     assertion_guidance: str | None = None
+    environment_assets: Mapping[str, TestAssetSpec] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -216,7 +216,9 @@ def _has_managed_documents(project_root: Path, config: dict[str, Any]) -> bool:
     )
 
 
-def _contract_blocks(text: str) -> list[tuple[int, int]]:
+def _contract_blocks(
+    text: str, *, name: str = "codd-behavior", line_offset: int = 0,
+) -> list[tuple[int, int]]:
     """Find explicit blocks, ignoring sample fences inside other fenced code."""
     blocks: list[tuple[int, int]] = []
     opened: str | None = None
@@ -228,14 +230,20 @@ def _contract_blocks(text: str) -> list[tuple[int, int]]:
         marker, tail = fence.groups()
         if opened is None:
             opened = marker
-            start = i if CONTRACT_FENCE.fullmatch(line) else None
+            if name == "codd-behavior":
+                start = i if CONTRACT_FENCE.fullmatch(line) else None
+            else:
+                info = tail.split(maxsplit=1)
+                start = i if info and info[0] == name else None
+                if start is not None and len(info) > 1:
+                    raise ValueError(f"line {i + line_offset + 1}: invalid {name} fence info")
         elif marker.startswith(opened) and not tail.strip():
             if start is not None:
                 blocks.append((start, i))
             opened = None
             start = None
     if start is not None:
-        raise ValueError(f"line {start + 1}: unclosed codd-behavior block")
+        raise ValueError(f"line {start + line_offset + 1}: unclosed {name} block")
     return blocks
 
 
