@@ -36,6 +36,8 @@ from codd.verifiable_behavior_audit import coverage_gate_enabled
 from codd.vb_marker_authenticity import _scan_cover_markers_with_lines
 
 _MAX_ISOLATED_CASES = 20
+_VERSION_CONTROL_METADATA = frozenset({".git", ".hg", ".svn", ".bzr", "_darcs"})
+_MISSING_SELECTED_CASE = "the runner did not observe the selected case"
 STATE_DIRECTORY = ".codd/implement-test-feedback"
 _ARCHIVE = f"{STATE_DIRECTORY}/rollback.zip"
 _ADVICE = (
@@ -106,7 +108,7 @@ class _Snapshot:
             path = pending.pop()
             rel = path.relative_to(self.root)
             name = rel.as_posix()
-            if rel in excluded or any(
+            if rel.name in _VERSION_CONTROL_METADATA or rel in excluded or any(
                 fnmatchcase(name, pattern)
                 or (pattern.endswith("/**") and fnmatchcase(name, pattern[:-3]))
                 for pattern in self.ignored
@@ -202,6 +204,9 @@ class _Snapshot:
             }
 
     def restore(self, before: dict[str, _Entry]) -> None:
+        # Older rollback archives may still include repository metadata.
+        before = {name: entry for name, entry in before.items()
+                  if not _VERSION_CONTROL_METADATA.intersection(Path(name).parts)}
         current = self.capture()
         removed_directories = set()
         for rel, entry in sorted(current.items()):
@@ -260,6 +265,8 @@ def recover_interrupted_feedback(root, record, echo, checkpoint) -> None:
         if round_record.get("done"):
             continue
         had_baseline = _restore_round_for_provisioning(snapshot, round_record)
+        if had_baseline and snapshot.environment_changed(round_record.get("environment_before")):
+            snapshot.discard_environment()
         round_record["screened"].clear()
         for attempt in round_record["attempts"]:
             if attempt["decision"] != "started":
@@ -282,6 +289,13 @@ class _Suite:
     failures: list[dict] = field(default_factory=list)
     unavailable: str | None = None
     timed_out: bool = False
+    collection_errors: dict[str, str] = field(default_factory=dict)
+    writes: dict[str, _Entry | None] = field(default_factory=dict)
+
+
+def _writes(before, after):
+    return {rel: after.get(rel) for rel in before.keys() | after.keys()
+            if before.get(rel) != after.get(rel)}
 
 
 class _Feedback:
@@ -298,6 +312,9 @@ class _Feedback:
         self.sources = sources
         self.callable_assertions = callable_assertions
         self.snapshot = _Snapshot(root, tuple(state["ignored"]), state["environment_paths"])
+        self.target: dict[str, _Entry] = {}
+        self.isolation_writes: dict[str, dict[str, _Entry | None]] = {}
+        self.environment_dirty = False
         self.outputs = {task.task_id: DeclaredOutputs(root, task.expected_outputs) for task in tasks}
         self.logs = {AUDIT_RELATIVE_PATH}
         try:
@@ -322,14 +339,21 @@ class _Feedback:
         self.command, self.cwd, self.env, self.timeout = invocation
         self.display = self.command if isinstance(self.command, str) else shlex.join(self.command)
         try:
-            self.snapshot.persist(self.snapshot.capture(), _round_archive(self.snapshot, round_record))
-        except OSError as exc:
+            self.target = self.snapshot.capture()
+            round_record["environment_before"] = self.snapshot.environment_fingerprint()
+            self.snapshot.persist(self.target, _round_archive(self.snapshot, round_record))
+        except (OSError, ValueError) as exc:
             return f"cannot snapshot project artifacts: {exc}"
+        self.environment_dirty = False
+        self.isolation_writes.clear()
         round_record["baseline_saved"] = True
         self.pipeline._checkpoint(self.root)
         return None
 
-    def run_tests(self, round_record, purpose, case=None, timeout=None) -> _Suite:
+    def run_tests(self, round_record, purpose, case=None, timeout=None, *, target=None) -> _Suite:
+        # Each command starts with the round baseline and the selected outputs.
+        target = self.target if target is None else target
+        self.snapshot.restore(target)
         shell = isinstance(self.command, str)
         started = time.monotonic()
         self.pipeline.echo(f"[implement test feedback] {purpose}: {self.display}" + (f" [{case}]" if case else ""))
@@ -357,16 +381,21 @@ class _Feedback:
                             process.kill()
                         process.wait()
                         raise
-                cases, failures, unavailable = self.adapter.read(
+                cases, failures, unavailable, collection_errors = self.adapter.read(
                     scratch, process.returncode, _command_output_tail(strip_ansi(out), strip_ansi(err)),
                 )
-                result = _Suite(cases, failures, unavailable)
+                result = _Suite(cases, failures, unavailable, collection_errors=collection_errors)
+                if not result.unavailable:
+                    result.writes = _writes(target, self.snapshot.capture())
         except subprocess.TimeoutExpired:
             result = _Suite(unavailable=f"test command exceeded {timeout:g}s", timed_out=True)
         except (OSError, ValueError) as exc:
             result = _Suite(unavailable=f"test command unavailable: {exc}")
+        if self.snapshot.environment_changed(round_record["environment_before"]):
+            self.environment_dirty = True
+            result.unavailable = "test environment changed during test execution"
         if case and set(result.cases) != {case} and result.unavailable is None:
-            result.unavailable = "the runner did not observe the selected case"
+            result.unavailable = _MISSING_SELECTED_CASE
         if purpose == "isolate":
             round_record["isolated_seconds"] += time.monotonic() - started
         event = {
@@ -377,10 +406,16 @@ class _Feedback:
             event["case"] = case
         if result.unavailable:
             event["unavailable"] = _command_output_tail(result.unavailable, None)
+        if result.collection_errors:
+            event["collection_errors"] = {
+                path: _command_output_tail(detail, None) for path, detail in result.collection_errors.items()
+            }
         round_record["runs"].append(event)
         summary = f"{purpose}: {len(result.failures)} failure(s)/error(s)"
         if result.unavailable:
             summary += f" · {event['unavailable']}"
+        if result.collection_errors:
+            summary += f" · collection failed in {', '.join(result.collection_errors)}"
         self.emit(summary)
         return result
 
@@ -411,13 +446,17 @@ class _Feedback:
                 continue
             round_record["isolated"] += 1
             isolated = self.run_tests(round_record, "isolate", case, remaining)
-            if isolated.unavailable and not isolated.timed_out:
+            collection_failed = (
+                isolated.unavailable == _MISSING_SELECTED_CASE and isolated.collection_errors
+            )
+            if isolated.unavailable and not collection_failed and (not isolated.timed_out or self.environment_dirty):
                 return isolated.unavailable
             reproduced = [] if isolated.unavailable else [
                 {**f, "detail": _command_output_tail(f["detail"], None)}
                 for f in isolated.failures if [f["origin"], f["phase"]] in signature
             ]
             screened[case] = [signature, reproduced]
+            self.isolation_writes[case] = isolated.writes
             passed = round_record.setdefault("passed_cases", [])
             if isolated.cases.get(case) == "passed" and case not in passed:
                 passed.append(case)
@@ -496,15 +535,29 @@ class _Feedback:
         )
 
     def change_problem(self, owner, before, after) -> str | None:
-        changed = [rel for rel in before.keys() | after.keys() if before.get(rel) != after.get(rel)]
-        outside = [rel for rel in changed if not self.allowed_change(
-            Path(rel), self.outputs[owner], before.get(rel), after.get(rel)
+        outside = [rel for rel, new in _writes(before, after).items() if not self.allowed_change(
+            Path(rel), self.outputs[owner], before.get(rel), new
         )]
         if outside:
             return f"write outside declared outputs: {', '.join(sorted(outside))}"
         return self.integrity_problem(before, after)
 
-    def assess(self, round_record, attempt, suite, failures, owner) -> tuple[str | None, _Suite]:
+    def check_writes(self, owner, target, writes, expected_writes) -> str | None:
+        # Repeatable suite side effects are discarded. New writes by the
+        # candidate must still respect the same output boundary as the agent.
+        outputs = self.outputs[owner]
+        if any(outputs.matches(Path(rel)) for rel in writes):
+            return "declared outputs changed during candidate checks"
+        outside = [
+            rel for rel, entry in writes.items()
+            if (rel not in expected_writes or expected_writes[rel] != entry)
+            and not self.allowed_change(Path(rel), outputs, target.get(rel), entry)
+        ]
+        if outside:
+            return f"write outside declared outputs: {', '.join(sorted(outside))}"
+        return None
+
+    def assess(self, round_record, attempt, suite, failures, owner, target) -> tuple[str | None, _Suite]:
         from codd.greenfield.pipeline import _enforce_stage_coverage_gate
 
         case_ids = list(dict.fromkeys(f["case"] for f in failures))
@@ -518,12 +571,21 @@ class _Feedback:
             )
         except StageError as exc:
             return f"implement gate or coverage audit failed: {exc}", suite
+        if reason := self.check_writes(owner, target, _writes(target, self.snapshot.capture()), {}):
+            return reason, suite
+        if self.snapshot.environment_changed(round_record["environment_before"]):
+            self.environment_dirty = True
+            return "test environment changed during candidate checks", suite
 
-        candidate = self.run_tests(round_record, "candidate suite")
+        candidate = self.run_tests(round_record, "candidate suite", target=target)
         attempt["after"] = self.count(candidate, owner, case_ids)
         attempt["suite_after"] = len(candidate.failures)
         if candidate.unavailable:
             return "candidate suite could not complete", suite
+        if candidate.collection_errors.keys() - suite.collection_errors.keys():
+            return "candidate introduced collection errors", suite
+        if reason := self.check_writes(owner, target, candidate.writes, suite.writes):
+            return reason, suite
         if list(candidate.cases.values()).count("skipped") > list(suite.cases.values()).count("skipped"):
             return "runtime skip/xfail increased", suite
         if attempt["after"] >= attempt["before"]:
@@ -537,9 +599,12 @@ class _Feedback:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return "candidate isolation exceeded the test time budget", suite
-            result = self.run_tests(round_record, "candidate isolate", case, remaining)
+            result = self.run_tests(round_record, "candidate isolate", case, remaining, target=target)
             if result.unavailable or result.cases[case] == "skipped":
                 return f"candidate could not verify {case}", suite
+            expected_writes = self.isolation_writes.get(case, suite.writes)
+            if reason := self.check_writes(owner, target, result.writes, expected_writes):
+                return reason, suite
             if case in regressions and result.cases[case] != "passed":
                 return f"previously passing test now fails in isolation: {case}", suite
             isolated_after += len(result.failures)
@@ -559,12 +624,11 @@ class _Feedback:
             and (old is None or (old.mode == new.mode and new.data.startswith(old.data)))
         )
 
-    def keep_outputs(self, round_record, owner, before, after):
-        kept = _round_target(self.snapshot, round_record)
+    def candidate_target(self, owner, after):
+        kept = self.target.copy()
         outputs = self.outputs[owner]
-        for rel in sorted(before.keys() | after.keys()):
-            old, new = before.get(rel), after.get(rel)
-            if old == new or not outputs.matches(Path(rel)):
+        for rel, new in sorted(_writes(self.target, after).items()):
+            if not outputs.matches(Path(rel)):
                 continue
             if new is None:
                 kept.pop(rel, None)
@@ -576,20 +640,21 @@ class _Feedback:
                         parent_entry = kept.setdefault(name, after[name])
                         if not stat.S_ISDIR(parent_entry.mode):
                             raise ValueError(f"declared output has a non-directory parent in the snapshot: {name}")
+        return kept
+
+    def keep_outputs(self, round_record, kept):
         # Commit the new target and the acceptance decision in that order.
         # An interrupted checkpoint can still use the previous target.
         index = len(round_record["attempts"])
         self.snapshot.persist(kept, _round_archive(self.snapshot, round_record, index))
         round_record["kept_attempt"] = index
+        self.target = kept
 
     def attempt(self, round_record, task, failures, suite):
         owner = task.task_id
-        try:
-            before = self.snapshot.capture()
-            environment_before = self.snapshot.environment_fingerprint()
-        except (OSError, ValueError) as exc:
-            suite.unavailable = f"cannot snapshot project artifacts: {exc}"
-            return suite
+        before = self.target
+        self.snapshot.restore(before)
+        environment_before = round_record["environment_before"]
         case_ids = {f["case"] for f in failures}
         attempt = {
             "owner": owner, "decision": "started", "before": self.count(suite, owner, case_ids),
@@ -613,36 +678,37 @@ class _Feedback:
             )
         except Exception as exc:
             reason = f"could not evaluate the candidate: {exc}"
-        environment_changed = self.snapshot.environment_changed(environment_before)
-        if environment_changed:
-            reason = "test environment changed during the task rerun; discarding and reprovisioning it"
-        if reason is None:
+        self.environment_dirty = self.snapshot.environment_changed(environment_before)
+        if not self.environment_dirty and reason is None:
             try:
                 proposed = self.snapshot.capture()
                 reason = self.change_problem(owner, before, proposed)
                 if reason is None:
-                    reason, candidate = self.assess(round_record, attempt, suite, failures, owner)
-                if reason is None:
-                    checked = self.snapshot.capture()
-                    reason = self.change_problem(owner, before, checked)
-                    if reason is None and any(
-                        proposed.get(rel) != checked.get(rel) and self.outputs[owner].matches(Path(rel))
-                        for rel in proposed.keys() | checked.keys()
-                    ):
-                        reason = "declared outputs changed during candidate checks"
-                    if reason is None:
-                        self.keep_outputs(round_record, owner, before, checked)
+                    target = self.candidate_target(owner, proposed)
+                    self.snapshot.restore(target)
+                    reason, candidate = self.assess(round_record, attempt, suite, failures, owner, target)
             except Exception as exc:
                 reason = f"could not evaluate the candidate: {exc}"
-        if environment_changed:
+        dirty = self.environment_dirty or self.snapshot.environment_changed(environment_before)
+        if not dirty and reason is None:
+            try:
+                self.keep_outputs(round_record, target)
+            except (OSError, ValueError) as exc:
+                reason = f"could not keep the candidate: {exc}"
+        if dirty:
+            reason = (
+                "test environment changed during the task rerun or candidate checks; "
+                "discarding and reprovisioning it"
+            )
             _restore_round_for_provisioning(self.snapshot, round_record)
             self.snapshot.discard_environment()
+            round_record["screened"].clear()
             candidate = suite
         elif reason is not None:
             self.snapshot.restore(before)
             candidate = suite
         attempt.update(decision="rejected" if reason else "accepted", reason=reason or "failures decreased")
-        if environment_changed:
+        if dirty:
             self.pipeline._checkpoint(self.root)
             candidate.unavailable = self.prepare(round_record)
         self.emit(
@@ -652,7 +718,7 @@ class _Feedback:
         )
         if reason is None:
             previous_target.unlink(missing_ok=True)
-        return candidate
+        return candidate, dirty
 
     def run(self, rounds: int) -> None:
         tasks = {task.task_id: task for task in self.tasks}
@@ -681,13 +747,18 @@ class _Feedback:
                 if next_group is None:
                     break
                 owner, failures = next_group
-                suite = self.attempt(round_record, tasks[owner], failures, suite)
-                if not suite.unavailable and self.has_helper(failures):
+                suite, reprovisioned = self.attempt(round_record, tasks[owner], failures, suite)
+                if not suite.unavailable and (reprovisioned or self.has_helper(failures)):
                     round_record["screened"].clear()
-                    suite = self.run_tests(round_record, "suite after helper decision")
+                    self.isolation_writes.clear()
+                    purpose = "suite after reprovisioning" if reprovisioned else "suite after helper decision"
+                    suite = self.run_tests(round_record, purpose)
             stop = bool(suite.unavailable) or not suite.failures or not groups
             if round_record.get("baseline_saved"):
-                self.snapshot.restore(_round_target(self.snapshot, round_record))
+                self.snapshot.restore(self.target)
+                if self.environment_dirty:
+                    self.snapshot.discard_environment()
+                    self.emit("test environment changed; discarded before the next run")
             round_record.update(done=True, stop=stop)
             if suite.unavailable:
                 round_record["skipped"] = _command_output_tail(suite.unavailable, None)

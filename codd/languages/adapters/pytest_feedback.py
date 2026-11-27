@@ -52,7 +52,7 @@ class PytestFeedbackAdapter:
 
     def read(
         self, scratch: Path, returncode: int, output: str,
-    ) -> tuple[dict[str, str], list[dict], str | None]:
+    ) -> tuple[dict[str, str], list[dict], str | None, dict[str, str]]:
         try:
             reports = [
                 json.loads(path.read_text(encoding="utf-8"))
@@ -65,36 +65,44 @@ class PytestFeedbackAdapter:
                 126: "permission denied starting the test command",
                 127: "test executable unavailable",
             }.get(returncode, "test command did not produce a case-level report")
-            return {}, [], f"{reason}\n{output}".rstrip()
+            return {}, [], f"{reason}\n{output}".rstrip(), {}
 
         cases = {}
         failures = []
         unavailable = None
+        collection_errors = {}
+        collection_interrupted = False
         precedence = {"passed": 0, "skipped": 1, "failed": 2}
         for report in reports:
             for case, status in report["cases"].items():
                 if case not in cases or precedence[status] > precedence[cases[case]]:
                     cases[case] = status
             failures.extend(report["failures"])
+            collection_errors.update(report["collection_errors"])
             if report["environment"]:
                 unavailable = unavailable or report["environment"][0]
-            if report["exitstatus"] not in (0, 1, 5):
+            if report["exitstatus"] == 2 and report["collection_errors"] and not report["cases"]:
+                collection_interrupted = True
+            elif report["exitstatus"] not in (0, 1, 5):
                 unavailable = unavailable or (
                     f"test command could not complete (exit {report['exitstatus']})\n{output}"
                 )
+        failures = [failure for failure in failures if failure["file"] not in collection_errors]
+        completed = returncode in (0, 1, 5) or returncode == 2 and collection_interrupted
         if unavailable:
-            return cases, failures, unavailable
+            return cases, failures, unavailable, collection_errors
         if f'Error importing plugin "{_PROBE.stem}"' in output:
-            return cases, failures, f"test command could not load the feedback probe\n{output}"
-        if returncode not in (0, 1, 5) or (returncode == 1 and not failures):
-            return cases, failures, f"test command could not complete (exit {returncode})\n{output}"
-        return cases, failures, None
+            unavailable = f"test command could not load the feedback probe\n{output}"
+        elif not completed or (returncode == 1 and not (failures or collection_errors)):
+            unavailable = f"test command could not complete (exit {returncode})\n{output}"
+        return cases, failures, unavailable, collection_errors
 
     def test_metrics(
         self, path: str, content: bytes, *, callable_assertions: Collection[str],
     ) -> tuple[int, int, int] | None:
         from codd.vb_marker_authenticity import (
             PythonTestBlockProfile,
+            _WITH_ASSERT_CONTEXT_CALLEES,
             _is_py_primitive_assert_node,
             _py_callee_name,
             _python_test_function_nodes,
@@ -119,11 +127,20 @@ class PytestFeedbackAdapter:
             elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
                 aliases.update((name.asname or name.name, f"{node.module}.{name.name}") for name in node.names)
 
-        assertions = sum(map(_is_py_primitive_assert_node, nodes))
+        def callee(call):
+            name, dot, member = _py_callee_name(call.func).partition(".")
+            return aliases.get(name, name) + dot + member
+
+        context_calls = {
+            item.context_expr
+            for node in nodes if isinstance(node, (ast.With, ast.AsyncWith))
+            for item in node.items if isinstance(item.context_expr, ast.Call)
+        }
+        assertions = sum(_is_py_primitive_assert_node(node) for node in nodes
+                         if not isinstance(node, (ast.With, ast.AsyncWith)))
+        assertions += sum(callee(call) in _WITH_ASSERT_CONTEXT_CALLEES for call in context_calls)
         for node in nodes:
-            if isinstance(node, ast.Call) and len(node.args) >= 2:
-                name, dot, member = _py_callee_name(node.func).partition(".")
-                callee = aliases.get(name, name) + dot + member
-                if callee in callable_assertions:
-                    assertions += 1
+            if (isinstance(node, ast.Call) and node not in context_calls
+                    and len(node.args) >= 2 and callee(node) in callable_assertions):
+                assertions += 1
         return len(functions), assertions, disabled

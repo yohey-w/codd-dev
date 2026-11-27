@@ -23,7 +23,13 @@ _ENVIRONMENT_DIAGNOSTIC = re.compile(
     r"ERR_NETWORK_ACCESS_DENIED|ERR_CONNECTION_REFUSED)\b"
 )
 _MISSING_IMPORT = re.compile(
-    r"^\s*(?:ModuleNotFoundError|ImportError): No module named ['\"]([\w.]+)['\"]",
+    r"^\s*(?:(?:ModuleNotFoundError|ImportError): No module named |"
+    r"ImportError: cannot import name ['\"][^'\"]+['\"] from (?:partially initialized module )?)"
+    r"['\"]([\w.]+)['\"]",
+    re.MULTILINE,
+)
+_MISSING_EXECUTABLE = re.compile(
+    r"^(?:[^:\n]+/)?(?:ba|da|z|k)?sh: [^\n]+: (?:command )?not found\s*$",
     re.MULTILINE,
 )
 
@@ -38,6 +44,12 @@ def _exception_chain(exc, seen):
     seen.add(id(exc))
     yield from _exception_chain(exc.__cause__, seen)
     yield from _exception_chain(exc.__context__, seen)
+    # Exception groups, including the backport, expose a tuple of exceptions.
+    members = getattr(exc, "exceptions", None)
+    if isinstance(members, tuple):
+        for member in members:
+            if isinstance(member, BaseException):
+                yield from _exception_chain(member, seen)
     yield exc
 
 
@@ -51,6 +63,7 @@ class _Probe:
         self.phases = defaultdict(dict)
         self.failures = []
         self.environment = []
+        self.collection_errors = {}
 
     def pytest_sessionstart(self, session):
         if not self.selected:
@@ -79,10 +92,21 @@ class _Probe:
             return True
         return None
 
-    def pytest_collectreport(self, report):
-        if report.failed:
-            # A failed collection is not a runnable individual case.
-            self.environment.append(f"test collection could not complete\n{report.longrepr}")
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_make_collect_report(self, collector):
+        outcome = yield
+        report = outcome.get_result()
+        if not report.failed:
+            return
+        path = self._project_path(collector.path)
+        detail = f"test collection could not complete\n{report.longrepr}"
+        if path and collector.path.is_file():
+            # This file has no runnable case. Keep the other files' observations.
+            call = getattr(report, "call", None)
+            chain = _exception_chain(call.excinfo.value, set()) if call and call.excinfo else ()
+            self.collection_errors[path] = self._environment_problem(chain, str(report.longrepr)) or detail
+        else:
+            self.environment.append(detail)
 
     @pytest.hookimpl(hookwrapper=True)
     def pytest_runtest_makereport(self, item, call):
@@ -128,7 +152,7 @@ class _Probe:
         ) as stream:
             json.dump({
                 "cases": cases, "failures": self.failures, "environment": self.environment,
-                "exitstatus": exitstatus,
+                "collection_errors": self.collection_errors, "exitstatus": exitstatus,
             }, stream)
 
     def _project_path(self, filename):
@@ -166,6 +190,8 @@ class _Probe:
             if isinstance(exc, ImportError) and exc.path and not self._project_path(exc.path):
                 return f"external import could not be loaded: {exc}"
             if isinstance(exc, subprocess.CalledProcessError):
+                if exc.returncode == 127:
+                    return f"test executable unavailable: {exc}"
                 outputs.extend((exc.stdout, exc.stderr))
             if isinstance(exc, (PermissionError, ConnectionError)):
                 return f"test environment denied access: {exc}"
@@ -187,6 +213,8 @@ class _Probe:
                 for match in _MISSING_IMPORT.finditer(output):
                     if self._external_import(match[1]):
                         return f"external import could not be loaded: {match[0].strip()}"
+                if match := _MISSING_EXECUTABLE.search(output):
+                    return f"test executable unavailable: {match[0].strip()}"
                 if match := _ENVIRONMENT_DIAGNOSTIC.search(output):
                     return f"test environment denied access: {match[0]}"
         return None
