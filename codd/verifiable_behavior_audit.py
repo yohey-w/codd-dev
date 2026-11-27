@@ -853,10 +853,9 @@ def render_vb_contract(
        is the ONLY set a ``codd: covers vb=<id>`` marker may name; anything else
        (an acceptance-criterion id like ``AC-10``, an invented descriptive id)
        is a deterministic orphan and is rejected. Do not invent/rename ids.
-    2. **Assertion quality** — a marked test must EXECUTE the system under test
-       and assert on the OBSERVED result (return value, raised error, output,
-       produced artifact); constant-only, self-comparing, and SUT-disconnected
-       assertions are rejected.
+    2. **Assertion quality** — attach each marker to an executable test.
+       Assert on the OBSERVED result of running the system under test, directly
+       or through a resolvable same-repository helper that asserts on its input.
     3. **Coverage is completion** — every listed id needs at least one such
        test for the test task to be complete.
 
@@ -906,6 +905,25 @@ def render_vb_contract(
             "prove the behavior and is rejected. Write the expected value "
             "INDEPENDENTLY of the value you compute from the system under test — "
             "never assert a system-derived value against itself.",
+            "- Place each covers marker on the line directly above the individual "
+            "test's declaration line, below any decorators or attributes on that "
+            "test. Use an executable declaration the checker recognizes, and keep "
+            "marked tests free of skip or disable directives, including conditional "
+            "ones. If the behavior genuinely cannot be tested yet, use a "
+            "`codd: blocked` marker as described in rule 3.",
+            "- In each marked test body, assert directly on the observed result: "
+            "store a returned value in a variable and compare it with an "
+            "independently written expectation, or wrap the call in the recognized "
+            "expected-error check when the behavior is a raised error. Shared or "
+            "local assertion helpers may also be used, but keep this direct "
+            "assertion so the evidence does not depend on how far the checker can "
+            "follow a helper.",
+            "- An unresolved external assertion helper supplies no evidence, even "
+            "through a local wrapper. Use external assertions as evidence only when "
+            "the checker recognizes them for the active test profile. External helpers "
+            "can still wait or retry, and library calls can obtain observations. "
+            "Follow them with the direct assertion on the observed result. "
+            "Checking library or built-in behavior alone supplies no evidence.",
             "",
             "3. COVERAGE IS THE COMPLETION CONDITION — for EVERY id in the closed "
             "list above, at least one test satisfying rule 2 (or an explicit "

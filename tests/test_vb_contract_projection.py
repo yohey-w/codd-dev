@@ -104,6 +104,32 @@ def test_render_vb_contract_enumerates_closed_list_and_rules(tmp_path):
     assert "COMPLETION CONDITION" in block
 
 
+def test_render_vb_contract_explains_how_to_supply_assertion_evidence(tmp_path):
+    block = render_vb_contract(collect_declared_vb_ids(_make_project(tmp_path)))
+    quality = block.split("2. ASSERTION QUALITY", 1)[1].split("3. COVERAGE", 1)[0]
+    placement, direct, external = quality.split("\n- ")[1:]
+
+    assert "directly above the individual test's declaration line, below any decorators or attributes" in placement
+    assert "executable declaration the checker recognizes" in placement
+    assert "free of skip or disable directives, including conditional ones" in placement
+    assert "genuinely cannot be tested yet, use a `codd: blocked` marker as described in rule 3" in placement
+
+    assert "assert directly on the observed result" in direct
+    assert "store a returned value in a variable" in direct
+    assert "independently written expectation" in direct
+    assert "recognized expected-error check when the behavior is a raised error" in direct
+    assert "keep this direct assertion so the evidence does not depend on how far the checker can follow a helper" in direct
+    # Helpers may live in shared modules (e.g. a tests helpers package); the
+    # contract must not tell authors to define them in the test file.
+    assert "same file" not in quality
+
+    assert "An unresolved external assertion helper supplies no evidence, even through a local wrapper." in external
+    assert "only when the checker recognizes them for the active test profile" in external
+    assert "External helpers can still wait or retry, and library calls can obtain observations." in external
+    assert "Follow them with the direct assertion on the observed result." in external
+    assert "Checking library or built-in behavior alone supplies no evidence." in external
+
+
 def test_render_vb_contract_is_language_free():
     behaviors = load_verifiable_behaviors  # noqa: F841 (referenced for clarity)
     from codd.verifiable_behavior_audit import VerifiableBehavior
