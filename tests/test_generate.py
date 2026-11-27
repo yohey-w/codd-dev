@@ -454,9 +454,18 @@ def test_unmanaged_generation_prompts_match_legacy_bytes(tmp_path, mock_ai_cli):
         generate_wave(project, wave)
 
     prompts = [call["input"] for call in mock_ai_cli]
-    guidance = "- Do not write a `codd-test-environment` block in this document.\n"
-    assert prompts[0].count(guidance) == 1
-    prompts[0] = prompts[0].replace(guidance, "", 1)
+    # Lines added on purpose (the test-environment guidance and the browser runtime rules);
+    # everything else must stay byte-identical.
+    for added in (
+        "- Do not write a `codd-test-environment` block in this document.\n",
+        "- Bind the server under test to a loopback port chosen at runtime (an unused ephemeral port), "
+        "never a fixed port number, so a leftover or concurrent server cannot collide with it.\n",
+        "- The readiness check MUST prove that the server answering is the one this run started "
+        "(for example, a per-run token the server reports, or the address the started process itself reports), "
+        "not merely that some server answers on that address.\n",
+    ):
+        assert prompts[0].count(added) == 1
+        prompts[0] = prompts[0].replace(added, "", 1)
     # Captured from d943740 with the same project and mocked AI responses.
     assert [hashlib.sha256(prompt.encode("utf-8")).hexdigest() for prompt in prompts] == [
         "d21ea2838648c5bf380efa56dd2ec425933fded255899e49b19dc4a24473d973",
