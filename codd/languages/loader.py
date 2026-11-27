@@ -364,6 +364,7 @@ def _parse_tests(doc: Mapping[str, Any]) -> TestsSpec | None:
         environment_assets=_parse_test_assets(m.get("environment_assets")),
         feedback_adapter=str(m["feedback_adapter"]) if m.get("feedback_adapter") is not None else None,
         feedback_runtime_paths=_as_str_tuple(m.get("feedback_runtime_paths")),
+        feedback_environment_paths=_as_str_tuple(m.get("feedback_environment_paths")),
     )
 
 

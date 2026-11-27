@@ -6,34 +6,60 @@ import ast
 import json
 import os
 import shutil
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
+from shlex import quote
+
+
+_PROBE = Path(__file__).with_name("_pytest_feedback_probe.py")
 
 
 @dataclass(frozen=True)
 class PytestFeedbackAdapter:
+    def instrument_command(self, command, scratch: Path):
+        if not isinstance(command, str):
+            return command
+        from codd.repair.verify_runner import _SHELL_ASSIGNMENT, _shell_word_end
+        # Leading shell assignments take precedence over the spawn environment.
+        # Prepend without evaluating or re-quoting the user's original value.
+        pieces = []
+        end = 0
+        while assignment := _SHELL_ASSIGNMENT.match(command, end):
+            value = assignment.end()
+            name = assignment.group().strip()[:-1]
+            next_end = _shell_word_end(command, value)
+            prefix = quote(str(scratch) + os.pathsep) if name == "PYTHONPATH" else ""
+            pieces.extend((command[end:value], prefix, command[value:next_end]))
+            end = next_end
+        return "".join((*pieces, command[end:]))
+
     def environment(
         self, env: dict[str, str], scratch: Path, project_root: Path,
         source_dirs: list[str], case: str | None,
     ) -> dict[str, str]:
         # The project's provisioned interpreter need not have CoDD installed.
-        plugin = Path(__file__).with_name("_pytest_feedback_probe.py")
-        shutil.copyfile(plugin, scratch / plugin.name)
+        shutil.copyfile(_PROBE, scratch / _PROBE.name)
         return {
             **env,
             "PYTHONPATH": os.pathsep.join(filter(None, (str(scratch), env.get("PYTHONPATH")))),
-            "PYTEST_PLUGINS": ",".join(filter(None, (env.get("PYTEST_PLUGINS"), plugin.stem))),
+            "PYTEST_PLUGINS": ",".join(filter(None, (env.get("PYTEST_PLUGINS"), _PROBE.stem))),
             "CODD_TEST_FEEDBACK_ROOT": str(project_root),
             "CODD_TEST_FEEDBACK_SOURCES": json.dumps(source_dirs),
-            "CODD_TEST_FEEDBACK_REPORT": str(scratch / "report.json"),
+            "CODD_TEST_FEEDBACK_REPORT": str(scratch),
             "CODD_TEST_FEEDBACK_CASE": case or "",
         }
 
     def read(
         self, scratch: Path, returncode: int, output: str,
-    ) -> tuple[dict[str, str], list[dict[str, str]], str | None]:
+    ) -> tuple[dict[str, str], list[dict], str | None]:
         try:
-            report = json.loads((scratch / "report.json").read_text(encoding="utf-8"))
+            reports = [
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in sorted(scratch.glob("report-*.json"))
+            ]
+            if not reports:
+                raise ValueError("missing reports")
         except (OSError, ValueError):
             reason = {
                 126: "permission denied starting the test command",
@@ -41,18 +67,36 @@ class PytestFeedbackAdapter:
             }.get(returncode, "test command did not produce a case-level report")
             return {}, [], f"{reason}\n{output}".rstrip()
 
-        cases = report["cases"]
-        failures = report["failures"]
-        if report["environment"]:
-            return cases, failures, report["environment"][0]
+        cases = {}
+        failures = []
+        unavailable = None
+        precedence = {"passed": 0, "skipped": 1, "failed": 2}
+        for report in reports:
+            for case, status in report["cases"].items():
+                if case not in cases or precedence[status] > precedence[cases[case]]:
+                    cases[case] = status
+            failures.extend(report["failures"])
+            if report["environment"]:
+                unavailable = unavailable or report["environment"][0]
+            if report["exitstatus"] not in (0, 1, 5):
+                unavailable = unavailable or (
+                    f"test command could not complete (exit {report['exitstatus']})\n{output}"
+                )
+        if unavailable:
+            return cases, failures, unavailable
+        if f'Error importing plugin "{_PROBE.stem}"' in output:
+            return cases, failures, f"test command could not load the feedback probe\n{output}"
         if returncode not in (0, 1, 5) or (returncode == 1 and not failures):
             return cases, failures, f"test command could not complete (exit {returncode})\n{output}"
         return cases, failures, None
 
-    def test_metrics(self, path: str, content: bytes) -> tuple[int, int, int] | None:
+    def test_metrics(
+        self, path: str, content: bytes, *, callable_assertions: Collection[str],
+    ) -> tuple[int, int, int] | None:
         from codd.vb_marker_authenticity import (
             PythonTestBlockProfile,
             _is_py_primitive_assert_node,
+            _py_callee_name,
             _python_test_function_nodes,
         )
 
@@ -68,4 +112,18 @@ class PytestFeedbackAdapter:
             for node in nodes
         )
         functions = _python_test_function_nodes(ast.unparse(tree))
-        return len(functions), sum(map(_is_py_primitive_assert_node, nodes)), disabled
+        aliases = {}
+        for node in nodes:
+            if isinstance(node, ast.Import):
+                aliases.update((name.asname, name.name) for name in node.names if name.asname)
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                aliases.update((name.asname or name.name, f"{node.module}.{name.name}") for name in node.names)
+
+        assertions = sum(map(_is_py_primitive_assert_node, nodes))
+        for node in nodes:
+            if isinstance(node, ast.Call) and len(node.args) >= 2:
+                name, dot, member = _py_callee_name(node.func).partition(".")
+                callee = aliases.get(name, name) + dot + member
+                if callee in callable_assertions:
+                    assertions += 1
+        return len(functions), assertions, disabled

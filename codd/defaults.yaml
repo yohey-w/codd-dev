@@ -614,6 +614,7 @@ greenfield:
   elicit: true              # run the advisory elicit+apply stage (never blocking)
   max_repair_attempts: 10   # automatic repair attempts during the verify stage
   coverage_gate: true       # enforce the verifiable-behavior gate per implement task
+  # greenfield.implement_test_feedback_rounds: omit it or use null for one feedback round.
   ntfy_topic: ""            # ntfy topic/URL for progress pings (empty = off; notify-only)
   propagate_commit: true    # run propagate --verify/--commit (advisory on a fresh build)
   chunk_size: null          # run implement steps in chunks of N (null = single run)

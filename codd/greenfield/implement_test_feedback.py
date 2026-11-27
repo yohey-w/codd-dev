@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shlex
+import shutil
 import signal
 import stat
 import subprocess
@@ -22,7 +25,6 @@ from codd.greenfield.pipeline import (
     StageError,
     _declared_output_is_file_path,
     _is_glob_decl,
-    session_path,
 )
 from codd.languages.builtin_adapters import ensure_builtin_adapters_registered
 from codd.languages.contract import resolve_language_profile
@@ -90,36 +92,92 @@ class _Entry:
 class _Snapshot:
     """Capture project artifacts plus enough metadata to undo direct writes."""
 
-    def __init__(self, root: Path, ignored: tuple[str, ...]):
+    def __init__(self, root: Path, ignored: tuple[str, ...], environment_paths=()):
         self.root = root
         self.ignored = ignored
+        self.environment_paths = tuple(Path(name) for name in environment_paths)
+        for path in self.environment_paths:
+            if not path.parts or path.is_absolute() or ".." in path.parts:
+                raise ValueError(f"invalid feedback environment path: {path}")
         self.archive = root / _ARCHIVE
+
+    def _walk(self, pending, excluded=()):
+        while pending:
+            path = pending.pop()
+            rel = path.relative_to(self.root)
+            name = rel.as_posix()
+            if rel in excluded or any(
+                fnmatchcase(name, pattern)
+                or (pattern.endswith("/**") and fnmatchcase(name, pattern[:-3]))
+                for pattern in self.ignored
+            ):
+                continue
+            try:
+                mode = path.lstat().st_mode
+            except FileNotFoundError:
+                continue
+            yield name, path, mode
+            if stat.S_ISDIR(mode):
+                pending.extend(sorted(path.iterdir(), reverse=True))
 
     def capture(self) -> dict[str, _Entry]:
         entries: dict[str, _Entry] = {}
-        pending = [self.root]
-        while pending:
-            for path in pending.pop().iterdir():
-                rel = path.relative_to(self.root).as_posix()
-                if path.name in {".git", ".hg", ".svn"} or any(
-                    fnmatchcase(rel, pattern)
-                    or (pattern.endswith("/**") and fnmatchcase(rel, pattern[:-3]))
-                    for pattern in self.ignored
-                ):
-                    continue
-                mode = path.lstat().st_mode
-                if stat.S_ISLNK(mode):
-                    entries[rel] = _Entry(mode, os.fsencode(os.readlink(path)))
-                elif stat.S_ISDIR(mode):
-                    entries[rel] = _Entry(mode)
-                    pending.append(path)
-                elif stat.S_ISREG(mode):
-                    entries[rel] = _Entry(mode, path.read_bytes())
+        for rel, path, mode in self._walk(list(self.root.iterdir()), self.environment_paths):
+            if stat.S_ISLNK(mode):
+                entries[rel] = _Entry(mode, os.fsencode(os.readlink(path)))
+            elif stat.S_ISREG(mode):
+                entries[rel] = _Entry(mode, path.read_bytes())
+            else:
+                entries[rel] = _Entry(mode)
         return entries
 
-    def persist(self, before: dict[str, _Entry]) -> None:
-        self.archive.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=self.archive.parent, delete=False) as stream:
+    def _environment_locations(self):
+        for relative in self.environment_paths:
+            path = self.root / relative
+            if path.parent.resolve() != path.parent:
+                raise ValueError(f"unsafe feedback environment parent: {relative}")
+            yield path
+
+    def environment_fingerprint(self) -> str | None:
+        if not self.environment_paths:
+            return None
+        digest = hashlib.sha256()
+        for rel, path, mode in self._walk(list(self._environment_locations())):
+            digest.update(json.dumps((rel, mode)).encode())
+            if stat.S_ISLNK(mode):
+                digest.update(json.dumps(os.readlink(path)).encode())
+            elif stat.S_ISREG(mode):
+                file_digest = hashlib.sha256()
+                with path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        file_digest.update(chunk)
+                digest.update(file_digest.digest())
+        return digest.hexdigest()
+
+    def environment_changed(self, before: str | None) -> bool:
+        try:
+            return before is not None and self.environment_fingerprint() != before
+        except (OSError, ValueError):
+            return True
+
+    @staticmethod
+    def _remove(path: Path) -> None:
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            return
+        if stat.S_ISDIR(mode):
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+
+    def discard_environment(self) -> None:
+        for path in self._environment_locations():
+            self._remove(path)
+
+    def persist(self, before: dict[str, _Entry], destination: Path) -> None:
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
             temporary = Path(stream.name)
         try:
             with ZipFile(temporary, "w", compression=ZIP_DEFLATED) as archive:
@@ -127,39 +185,39 @@ class _Snapshot:
                     info = ZipInfo(path)
                     info.external_attr = entry.mode << 16
                     archive.writestr(info, entry.data, compress_type=ZIP_DEFLATED)
-            temporary.replace(self.archive)
+            temporary.replace(destination)
         finally:
             temporary.unlink(missing_ok=True)
 
-    def recover(self) -> None:
-        with ZipFile(self.archive) as archive:
+    @staticmethod
+    def read(source: Path) -> dict[str, _Entry]:
+        with ZipFile(source) as archive:
             for name in archive.namelist():
                 path = Path(name)
                 if not path.parts or path.is_absolute() or ".." in path.parts:
                     raise ValueError(f"invalid path in the feedback rollback archive: {name!r}")
-            self.restore({
+            return {
                 info.filename: _Entry(info.external_attr >> 16, archive.read(info))
                 for info in archive.infolist()
-            })
+            }
 
     def restore(self, before: dict[str, _Entry]) -> None:
         current = self.capture()
-        for rel, entry in sorted(current.items(), reverse=True):
+        removed_directories = set()
+        for rel, entry in sorted(current.items()):
             original = before.get(rel)
             if original is not None and (
-                entry == original or stat.S_ISDIR(entry.mode) and stat.S_ISDIR(original.mode)
+                entry == original or (stat.S_ISDIR(entry.mode) and stat.S_ISDIR(original.mode))
             ):
                 continue
             path = self.root / rel
+            if removed_directories.intersection(path.parents):
+                continue
+            # Runtime artifacts are absent from the inventory. They cannot
+            # keep a newly created directory or one replacing a file alive.
+            self._remove(path)
             if stat.S_ISDIR(entry.mode):
-                try:
-                    path.rmdir()
-                except OSError:
-                    # A new directory can contain ignored execution artifacts.
-                    if original is not None:
-                        raise
-            else:
-                path.unlink()
+                removed_directories.add(path)
         for rel, entry in sorted(before.items()):
             if current.get(rel) == entry:
                 continue
@@ -168,20 +226,38 @@ class _Snapshot:
                 path.mkdir(exist_ok=True)
             elif stat.S_ISLNK(entry.mode):
                 path.symlink_to(os.fsdecode(entry.data))
-            else:
+            elif stat.S_ISREG(entry.mode):
                 path.write_bytes(entry.data)
+            elif stat.S_ISFIFO(entry.mode):
+                os.mkfifo(path)
             if not stat.S_ISLNK(entry.mode):
                 path.chmod(stat.S_IMODE(entry.mode))
 
 
+def _round_archive(snapshot, round_record, attempt=0) -> Path:
+    return snapshot.archive.with_name(f"round-{round_record['number']}-{attempt}.zip")
+
+
+def _round_target(snapshot, round_record) -> dict[str, _Entry]:
+    return snapshot.read(_round_archive(snapshot, round_record, round_record.get("kept_attempt", 0)))
+
+
 def recover_interrupted_feedback(root, record, echo, checkpoint) -> None:
     state = record["test_feedback"]
+    snapshot = _Snapshot(root, tuple(state["ignored"]), state.get("environment_paths", ()))
     for round_record in state["rounds"]:
+        if round_record.get("done"):
+            continue
+        if round_record.get("baseline_saved"):
+            snapshot.restore(_round_target(snapshot, round_record))
+        round_record["screened"].clear()
         for attempt in round_record["attempts"]:
             if attempt["decision"] != "started":
                 continue
-            snapshot = _Snapshot(root, tuple(state["ignored"]))
-            snapshot.recover()
+            if not round_record.get("baseline_saved"):
+                snapshot.restore(snapshot.read(snapshot.archive))
+            if snapshot.environment_changed(attempt.get("environment_before")):
+                snapshot.discard_environment()
             attempt.update(decision="rejected", reason="interrupted; restored before resuming", interrupted=True)
             checkpoint(root)
             snapshot.archive.unlink(missing_ok=True)
@@ -191,13 +267,14 @@ def recover_interrupted_feedback(root, record, echo, checkpoint) -> None:
 @dataclass
 class _Suite:
     cases: dict[str, str] = field(default_factory=dict)
-    failures: list[dict[str, str]] = field(default_factory=list)
+    failures: list[dict] = field(default_factory=list)
     unavailable: str | None = None
     timed_out: bool = False
 
 
 class _Feedback:
-    def __init__(self, pipeline, root, tasks, state, options, config, adapter, test_roots, sources):
+    def __init__(self, pipeline, root, tasks, state, options, config, adapter, test_roots, sources,
+                 callable_assertions):
         self.pipeline = pipeline
         self.root = root
         self.tasks = tasks
@@ -207,8 +284,9 @@ class _Feedback:
         self.adapter = adapter
         self.test_roots = test_roots
         self.sources = sources
+        self.callable_assertions = callable_assertions
         self.timeout = _test_timeout_seconds(config)
-        self.snapshot = _Snapshot(root, tuple(state["ignored"]))
+        self.snapshot = _Snapshot(root, tuple(state["ignored"]), state["environment_paths"])
         self.outputs = {task.task_id: DeclaredOutputs(root, task.expected_outputs) for task in tasks}
         self.logs = {AUDIT_RELATIVE_PATH}
         try:
@@ -244,7 +322,8 @@ class _Feedback:
                 scratch = Path(directory)
                 env = self.adapter.environment(self.env, scratch, self.root, self.sources, case)
                 with subprocess.Popen(
-                    self.command, cwd=self.cwd, env=env, shell=shell, text=True,
+                    self.adapter.instrument_command(self.command, scratch),
+                    cwd=self.cwd, env=env, shell=shell, text=True,
                     errors="replace", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     start_new_session=os.name == "posix",
                 ) as process:
@@ -293,7 +372,9 @@ class _Feedback:
 
     def owner(self, failure) -> str | None:
         path = Path(failure["origin"])
-        if not self.in_test_tree(failure["origin"]):
+        if not self.in_test_tree(failure["origin"]) or any(
+            not self.in_test_tree(frame) for frame in failure.get("paths", ())
+        ):
             return None
         owners = [owner for owner, outputs in self.outputs.items() if outputs.allows(path)]
         return owners[0] if len(owners) == 1 else None
@@ -320,7 +401,9 @@ class _Feedback:
                 for f in isolated.failures if [f["origin"], f["phase"]] in signature
             ]
             screened[case] = [signature, reproduced]
-            if isolated.cases.get(case) == "passed":
+            passed = round_record.setdefault("passed_cases", [])
+            if isolated.cases.get(case) == "passed" and case not in passed:
+                passed.append(case)
                 round_record["passed_in_isolation"] += 1
                 self.emit(f"{case} passed in isolation ({round_record['passed_in_isolation']} so far)")
         return None
@@ -329,6 +412,7 @@ class _Feedback:
         screened = round_record["screened"]
         grouped = defaultdict(list)
         limited = set()
+        seen = set()
         interrupted = {
             attempt["owner"] for recorded in self.state["rounds"]
             for attempt in recorded["attempts"] if attempt.get("interrupted")
@@ -345,8 +429,15 @@ class _Feedback:
             owner = self.owner(failure)
             if owner is None or owner in interrupted:
                 continue
+            key = (case, owner, failure["origin"], failure["phase"])
+            if key in seen:
+                continue
+            seen.add(key)
             for item in reproduced:
-                if item["origin"] == failure["origin"] and item["phase"] == failure["phase"]:
+                if (
+                    item["origin"] == failure["origin"] and item["phase"] == failure["phase"]
+                    and self.owner(item) == owner
+                ):
                     grouped[owner].append(item)
         round_record["over_isolation_budget"] = len(limited)
         if limited:
@@ -365,7 +456,8 @@ class _Feedback:
             old_bytes = old.data if old and stat.S_ISREG(old.mode) else b""
             new_bytes = new.data if new and stat.S_ISREG(new.mode) else b""
             old_metrics, new_metrics = (
-                self.adapter.test_metrics(rel, content) for content in (old_bytes, new_bytes)
+                self.adapter.test_metrics(rel, content, callable_assertions=self.callable_assertions)
+                for content in (old_bytes, new_bytes)
             )
             if old_metrics is None:
                 continue
@@ -386,20 +478,19 @@ class _Feedback:
             for f in suite.failures
         )
 
-    def assess(self, round_record, attempt, before, suite, failures, owner) -> tuple[str | None, _Suite]:
-        from codd.greenfield.pipeline import _enforce_stage_coverage_gate
-
-        case_ids = list(dict.fromkeys(f["case"] for f in failures))
-        after = self.snapshot.capture()
+    def change_problem(self, owner, before, after) -> str | None:
         changed = [rel for rel in before.keys() | after.keys() if before.get(rel) != after.get(rel)]
         outside = [rel for rel in changed if not self.allowed_change(
             Path(rel), self.outputs[owner], before.get(rel), after.get(rel)
         )]
         if outside:
-            return f"write outside declared outputs: {', '.join(sorted(outside))}", suite
-        problem = self.integrity_problem(before, after)
-        if problem:
-            return problem, suite
+            return f"write outside declared outputs: {', '.join(sorted(outside))}"
+        return self.integrity_problem(before, after)
+
+    def assess(self, round_record, attempt, suite, failures, owner) -> tuple[str | None, _Suite]:
+        from codd.greenfield.pipeline import _enforce_stage_coverage_gate
+
+        case_ids = list(dict.fromkeys(f["case"] for f in failures))
         try:
             self.pipeline._enforce_implement_oracle_gate(
                 self.root, self.tasks, self.options, verdict_only=True,
@@ -451,12 +542,35 @@ class _Feedback:
             and (old is None or (old.mode == new.mode and new.data.startswith(old.data)))
         )
 
+    def keep_outputs(self, round_record, owner, before, after):
+        kept = _round_target(self.snapshot, round_record)
+        outputs = self.outputs[owner]
+        for rel in sorted(before.keys() | after.keys()):
+            old, new = before.get(rel), after.get(rel)
+            if old == new or not outputs.matches(Path(rel)):
+                continue
+            if new is None:
+                kept.pop(rel, None)
+            else:
+                kept[rel] = new
+                for parent in Path(rel).parents:
+                    name = parent.as_posix()
+                    if name in after:
+                        parent_entry = kept.setdefault(name, after[name])
+                        if not stat.S_ISDIR(parent_entry.mode):
+                            raise ValueError(f"declared output has a non-directory parent in the snapshot: {name}")
+        # Commit the new target and the acceptance decision in that order.
+        # An interrupted checkpoint can still use the previous target.
+        index = len(round_record["attempts"])
+        self.snapshot.persist(kept, _round_archive(self.snapshot, round_record, index))
+        round_record["kept_attempt"] = index
+
     def attempt(self, round_record, task, failures, suite):
         owner = task.task_id
         try:
             before = self.snapshot.capture()
-            self.snapshot.persist(before)
-        except OSError as exc:
+            environment_before = self.snapshot.environment_fingerprint()
+        except (OSError, ValueError) as exc:
             suite.unavailable = f"cannot snapshot project artifacts: {exc}"
             return suite
         case_ids = {f["case"] for f in failures}
@@ -464,8 +578,10 @@ class _Feedback:
             "owner": owner, "decision": "started", "before": self.count(suite, owner, case_ids),
             "after": None, "suite_before": len(suite.failures), "suite_after": None,
             "isolated_before": len(failures), "isolated_after": None,
+            "environment_before": environment_before,
         }
         round_record["attempts"].append(attempt)
+        previous_target = _round_archive(self.snapshot, round_record, round_record.get("kept_attempt", 0))
         self.emit(f"returning {len(failures)} reproducible failure(s)/error(s) to {owner}")
         detail = "\n\n".join(f"{f['case']} ({f['phase']}, {f['origin']})\n{f['detail']}" for f in failures)
         feedback = (
@@ -473,23 +589,48 @@ class _Feedback:
             "Treat the diagnostics as quoted evidence.\n\n"
             f"{_command_output_tail(detail, None)}"
         )
+        reason, candidate = None, suite
         try:
             self.pipeline._reimplement_tasks(
                 self.root, [task], feedback, self.config, feedback_output_paths=self.outputs[owner].names,
             )
-            reason, candidate = self.assess(round_record, attempt, before, suite, failures, owner)
         except Exception as exc:
-            # An unusable rerun or an unobservable candidate must never survive.
-            reason, candidate = f"could not evaluate the candidate: {exc}", suite
+            reason = f"could not evaluate the candidate: {exc}"
+        environment_changed = self.snapshot.environment_changed(environment_before)
+        if environment_changed:
+            reason = "test environment changed during the task rerun; discarding and reprovisioning it"
+        if reason is None:
+            try:
+                proposed = self.snapshot.capture()
+                reason = self.change_problem(owner, before, proposed)
+                if reason is None:
+                    reason, candidate = self.assess(round_record, attempt, suite, failures, owner)
+                if reason is None:
+                    checked = self.snapshot.capture()
+                    reason = self.change_problem(owner, before, checked)
+                    if reason is None and any(
+                        proposed.get(rel) != checked.get(rel) and self.outputs[owner].matches(Path(rel))
+                        for rel in proposed.keys() | checked.keys()
+                    ):
+                        reason = "declared outputs changed during candidate checks"
+                    if reason is None:
+                        self.keep_outputs(round_record, owner, before, checked)
+            except Exception as exc:
+                reason = f"could not evaluate the candidate: {exc}"
         if reason is not None:
             self.snapshot.restore(before)
+            candidate = suite
+        if environment_changed:
+            self.snapshot.discard_environment()
+            candidate.unavailable = self.prepare()
         attempt.update(decision="rejected" if reason else "accepted", reason=reason or "failures decreased")
         self.emit(
             f"{owner}: {attempt['decision']} · {attempt['reason']} · "
             f"owner {attempt['before']} → {attempt['after'] if attempt['after'] is not None else '—'} · "
             f"suite {attempt['suite_before']} → {attempt['suite_after'] if attempt['suite_after'] is not None else '—'}"
         )
-        self.snapshot.archive.unlink(missing_ok=True)
+        if reason is None:
+            previous_target.unlink(missing_ok=True)
         return candidate
 
     def run(self, rounds: int) -> None:
@@ -506,7 +647,14 @@ class _Feedback:
                 if round_record["stop"]:
                     break
                 continue
-            problem = self.prepare()
+            try:
+                if not round_record.get("baseline_saved"):
+                    self.snapshot.persist(self.snapshot.capture(), _round_archive(self.snapshot, round_record))
+                    round_record["baseline_saved"] = True
+                    self.pipeline._checkpoint(self.root)
+                problem = self.prepare()
+            except OSError as exc:
+                problem = f"cannot snapshot project artifacts: {exc}"
             suite = _Suite(unavailable=problem) if problem else self.run_tests(round_record, f"round {index + 1} suite")
             groups = []
             while not suite.unavailable and suite.failures:
@@ -521,8 +669,11 @@ class _Feedback:
                 owner, failures = next_group
                 suite = self.attempt(round_record, tasks[owner], failures, suite)
                 if not suite.unavailable and self.has_helper(failures):
+                    round_record["screened"].clear()
                     suite = self.run_tests(round_record, "suite after helper decision")
             stop = bool(suite.unavailable) or not suite.failures or not groups
+            if round_record.get("baseline_saved"):
+                self.snapshot.restore(_round_target(self.snapshot, round_record))
             round_record.update(done=True, stop=stop)
             if suite.unavailable:
                 round_record["skipped"] = _command_output_tail(suite.unavailable, None)
@@ -531,6 +682,9 @@ class _Feedback:
                 f"round {index + 1}: {len(suite.failures)} failure(s)/error(s) remain · "
                 f"{round_record['passed_in_isolation']} passed in isolation"
             )
+            if round_record.get("baseline_saved"):
+                for attempt_index in range(len(round_record["attempts"]) + 1):
+                    _round_archive(self.snapshot, round_record, attempt_index).unlink(missing_ok=True)
             if stop:
                 break
 
@@ -578,11 +732,8 @@ def run_implement_test_feedback(pipeline, root, tasks, record, options) -> None:
     test_roots = tuple(Path(path) for path in (
         test_dirs or [test_set.root for test_set in profile.layout.test_sets]
     ))
-    artifacts = profile.artifacts.ignored if profile.artifacts else ()
-    state["ignored"] = [
-        f"{STATE_DIRECTORY}/**",
-        session_path(root).relative_to(root).as_posix(),
-        *artifacts, *profile.tests.feedback_runtime_paths,
-    ]
+    state["ignored"] = [".codd/**", *profile.tests.feedback_runtime_paths]
+    state["environment_paths"] = list(profile.tests.feedback_environment_paths)
     _Feedback(pipeline, root, tasks, state, options, config, adapter,
-              test_roots, source_dirs or []).run(rounds)
+              test_roots, source_dirs or [],
+              profile.tests.assertion_hints.get("feedback_callable_assertions", ())).run(rounds)

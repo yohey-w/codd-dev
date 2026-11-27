@@ -1,0 +1,307 @@
+"""Regression cases from the independent feedback review."""
+
+import shlex
+import sys
+import textwrap
+
+import pytest
+
+from .test_implement_test_feedback import APP, FIXED, HELPER, TEST_FILE, TESTS, feedback, project_factory
+
+
+def _trace(path):
+    return path.read_text(encoding="utf-8").splitlines()
+
+
+def _round(root):
+    return feedback(root)["rounds"][0]
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_restore_file_replaced_by_runtime_directory(project_factory, monkeypatch, interrupt):
+    pipeline, root, trace, _ = project_factory(
+        fixes={"case": {"files": {TEST_FILE: FIXED}, "direct": {
+            "settings": None, "settings/generated.pyc": "candidate",
+        }}},
+    )
+    settings = root / "settings"
+    settings.write_bytes(b"original\r\n")
+    if interrupt:
+        rerun = pipeline._reimplement_tasks
+
+        def stop_after_write(*args, **kwargs):
+            rerun(*args, **kwargs)
+            raise KeyboardInterrupt
+
+        with monkeypatch.context() as patch:
+            patch.setattr(pipeline, "_reimplement_tasks", stop_after_write)
+            with pytest.raises(KeyboardInterrupt):
+                pipeline.run(root)
+        assert (settings / "generated.pyc").is_file()
+        assert _round(root)["attempts"][0]["decision"] == "started"
+
+    result = pipeline.run(root, resume=interrupt)
+    assert result.status == "success", result.error
+    assert settings.read_bytes() == b"original\r\n"
+    [attempt] = _round(root)["attempts"]
+    assert attempt["decision"] == "rejected"
+    assert ("interrupted" if interrupt else "write outside declared outputs") in attempt["reason"]
+    assert _trace(trace).count("feedback case") == 1
+
+
+@pytest.mark.parametrize("audit_failure", [None, "coverage"])
+def test_environment_write_discards_and_reprovisions(project_factory, audit_failure):
+    asset = ".venv/runtime-asset.txt"
+    pipeline, root, trace, _ = project_factory(
+        fixes={"case": {"files": {TEST_FILE: FIXED}, "direct": {asset: "candidate"}}},
+        verdict_failure=audit_failure,
+    )
+    runtime = root / asset
+    runtime.parent.mkdir()
+    runtime.write_bytes(b"original\r\n")
+    provision = pipeline._provision_env
+    seen = []
+
+    def provision_clean_environment(project_root):
+        seen.append(runtime.read_bytes() if runtime.exists() else None)
+        if not runtime.exists():
+            runtime.parent.mkdir()
+            runtime.write_bytes(b"reprovisioned")
+        provision(project_root)
+
+    pipeline._provision_env = provision_clean_environment
+    result = pipeline.run(root)
+    assert result.status == "success", result.error
+    [attempt] = _round(root)["attempts"]
+    assert attempt["decision"] == "rejected"
+    assert "test environment changed" in attempt["reason"]
+    assert seen == [b"original\r\n", None, b"reprovisioned"]
+    assert runtime.read_bytes() == b"reprovisioned"
+    assert "[7][1]" in (root / TEST_FILE).read_text()
+    assert _trace(trace)[-3:] == ["provision", "verify", "suite"]
+
+
+def test_candidate_test_cannot_leave_an_undeclared_write(project_factory):
+    candidate = "from pathlib import Path\n\n" + FIXED.replace(
+        "    actual = [7][0]", "    Path('settings.txt').write_text('candidate')\n    actual = [7][0]",
+    )
+    pipeline, root, _, _ = project_factory(fixes={"case": {"files": {TEST_FILE: candidate}}})
+    settings = root / "settings.txt"
+    settings.write_bytes(b"original\r\n")
+    verify = pipeline.verify_runner
+
+    def observe(project_root, **kwargs):
+        assert settings.read_bytes() == b"original\r\n"
+        return verify(project_root, **kwargs)
+
+    pipeline.verify_runner = observe
+    result = pipeline.run(root)
+    assert result.status == "success", result.error
+    [attempt] = _round(root)["attempts"]
+    assert attempt["decision"] == "rejected"
+    assert "write outside declared outputs: settings.txt" in attempt["reason"]
+    assert "[7][1]" in (root / TEST_FILE).read_text()
+
+
+def test_round_cleanup_keeps_accepted_output_and_restores_suite_side_effects(project_factory):
+    side_effect = (
+        "\ndef test_settings():\n"
+        "    Path('settings.txt').write_bytes(b'test side effect')\n"
+        "    Path('generated').mkdir(exist_ok=True)\n"
+        "    Path('generated/transient.pyc').touch()\n"
+        "    assert Path('settings.txt').read_bytes() == b'test side effect'\n\n"
+    )
+    imports = "from pathlib import Path\n\n"
+    pipeline, root, _, _ = project_factory(
+        initial={"case": {TEST_FILE: imports + TESTS + side_effect}},
+        fixes={"case": {"files": {TEST_FILE: imports + FIXED + side_effect}}},
+    )
+    settings = root / "settings.txt"
+    settings.write_bytes(b"original\r\n")
+
+    def observe(project_root, **kwargs):
+        assert settings.read_bytes() == b"original\r\n"
+        assert not (root / "generated").exists()
+        return "verified"
+
+    pipeline.verify_runner = observe
+    result = pipeline.run(root)
+    assert result.status == "success", result.error
+    [attempt] = _round(root)["attempts"]
+    assert attempt["decision"] == "accepted"
+    assert "[7][0]" in (root / TEST_FILE).read_text()
+
+
+def test_removing_callable_assertion_rejects_candidate(project_factory):
+    original = "import pytest\n\n" + TESTS.replace(
+        "    actual = [7][1]", '    pytest.raises(ValueError, int, "not an integer")\n    actual = [7][1]',
+    )
+    pipeline, root, _, _ = project_factory(initial={"case": {TEST_FILE: original}})
+    result = pipeline.run(root)
+    assert result.status == "success", result.error
+    [attempt] = _round(root)["attempts"]
+    assert attempt["decision"] == "rejected"
+    assert "assertions" in attempt["reason"]
+    assert "pytest.raises" in (root / TEST_FILE).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("uses_source", [False, True])
+def test_probe_preserves_explicit_pythonpath(project_factory, uses_source):
+    command = "PYTHONPATH=src python -m pytest checks -q"
+    initial = {TEST_FILE: TESTS}
+    fixed = FIXED
+    if uses_source:
+        imports = "from stub_app import subject\n\n"
+        initial = {TEST_FILE: imports + TESTS, APP: "value = 7\n"}
+        fixed = imports + FIXED
+    pipeline, root, trace, _ = project_factory(
+        command=command, initial={"case": initial},
+        fixes={"case": {"files": {TEST_FILE: fixed}}},
+    )
+    result = pipeline.run(root)
+    assert result.status == "success", result.error
+    record = _round(root)
+    assert "skipped" not in record
+    assert record["runs"][0]["command"] == command
+    assert record["runs"][0]["executed_cases"] == 2
+    assert record["attempts"][0]["decision"] == "accepted"
+    assert "verify" in _trace(trace)
+
+
+@pytest.mark.parametrize("both_fail", [False, True])
+def test_sequential_runner_launches_contribute_all_failures(project_factory, both_fail):
+    command = shlex.join((sys.executable, "-m", "pytest", "-q"))
+    second = "checks/test_second.py"
+    pipeline, root, _, _ = project_factory(
+        command=f"{command} {TEST_FILE}; {command} {second}",
+        initial={"case": {TEST_FILE: TESTS if both_fail else FIXED, second: TESTS}},
+        fixes={"case": {"files": {TEST_FILE: FIXED, second: FIXED}}},
+        owned={"case": (TEST_FILE, second)},
+    )
+    result = pipeline.run(root)
+    assert result.status == "success", result.error
+    record = _round(root)
+    assert "skipped" not in record
+    assert record["runs"][0]["executed_cases"] == 4
+    failure_count = 2 if both_fail else 1
+    assert record["runs"][0]["failures_and_errors"] == failure_count
+    [attempt] = record["attempts"]
+    assert (attempt["decision"], attempt["isolated_before"], attempt["isolated_after"]) == (
+        "accepted", failure_count, 0,
+    )
+
+
+def test_external_import_failure_in_child_skips_feedback(project_factory):
+    tests = textwrap.dedent("""\
+        import subprocess
+        import sys
+
+        def test_subject():
+            result = subprocess.run(
+                [sys.executable, "-c", "import unavailable_example_dependency"],
+                check=True, capture_output=True, text=True,
+            )
+            assert result.returncode == 0
+        """)
+    pipeline, root, trace, _ = project_factory(initial={"case": {TEST_FILE: tests}}, fixes={})
+    result = pipeline.run(root)
+    assert result.status == "success", result.error
+    assert _round(root)["attempts"] == []
+    assert "external import could not be loaded" in _round(root)["skipped"]
+    assert "unavailable_example_dependency" in _round(root)["skipped"]
+    assert "feedback case" not in _trace(trace)
+
+
+def test_wrapped_application_exception_has_no_test_owner(project_factory):
+    tests = textwrap.dedent("""\
+        from stub_app import subject
+
+        def test_subject():
+            try:
+                result = subject.value()
+            except ValueError as error:
+                raise RuntimeError("could not read value") from error
+            assert result == 7
+        """)
+    pipeline, root, trace, _ = project_factory(
+        initial={"case": {TEST_FILE: tests}, "application": {APP: "def value():\n    raise ValueError('app fault')\n"}},
+        owned={"case": (TEST_FILE,), "application": (APP,)},
+        fixes={},
+    )
+    result = pipeline.run(root)
+    assert result.status == "success", result.error
+    assert _round(root)["runs"][0]["failures_and_errors"] == 1
+    assert _round(root)["attempts"] == []
+    assert "feedback case" not in _trace(trace)
+
+
+def test_isolation_does_not_import_other_test_modules(project_factory):
+    other_file = "checks/test_other.py"
+    primary = (
+        "import os\n\n"
+        "def test_subject():\n"
+        "    actual = 2 if 'ITFR_OTHER_TEST_COLLECTED' in os.environ else 1\n"
+        "    assert actual == 1\n"
+    )
+    other = (
+        "import os\n\n"
+        "os.environ['ITFR_OTHER_TEST_COLLECTED'] = 'yes'\n\n"
+        "def test_other():\n"
+        "    assert 1 == 1\n"
+    )
+    pipeline, root, trace, _ = project_factory(
+        initial={"case": {TEST_FILE: primary, other_file: other}},
+        owned={"case": (TEST_FILE, other_file)}, fixes={},
+    )
+    result = pipeline.run(root)
+    assert result.status == "success", result.error
+    record = _round(root)
+    assert record["runs"][0]["failures_and_errors"] == 1
+    assert record["passed_in_isolation"] == 1
+    assert record["attempts"] == []
+    assert f"isolate {TEST_FILE}::test_subject" in _trace(trace)
+
+
+def test_remaining_failure_is_reisolated_after_helper(project_factory):
+    tests = textwrap.dedent("""\
+        from checks.support import helpers
+
+        def test_helper():
+            actual = helpers.value()
+            assert actual == 7
+
+        def test_case_depends_on_collection(request):
+            actual = len(request.session.items) if helpers.FIXED else 2
+            assert actual == 1
+        """)
+    pipeline, root, trace, _ = project_factory(
+        initial={
+            "case": {TEST_FILE: tests},
+            "helper": {HELPER: "FIXED = False\ndef value():\n    return [7][1]\n"},
+        },
+        fixes={"helper": {"files": {HELPER: "FIXED = True\ndef value():\n    return 7\n"}}},
+        owned={"case": (TEST_FILE,), "helper": (HELPER,)},
+    )
+    result = pipeline.run(root)
+    assert result.status == "success", result.error
+    record = _round(root)
+    [helper] = record["attempts"]
+    assert (helper["owner"], helper["decision"]) == ("helper", "accepted")
+    events = _trace(trace)
+    isolate = f"isolate {TEST_FILE}::test_case_depends_on_collection"
+    assert events.count(isolate) == 2
+    first, second = [index for index, event in enumerate(events) if event == isolate]
+    assert first < events.index("feedback helper") < second
+    assert record["passed_in_isolation"] == 1
+
+
+def test_explicit_null_uses_one_feedback_round(project_factory):
+    pipeline, root, trace, _ = project_factory()
+    config = root / "codd/codd.yaml"
+    config.write_text(config.read_text(encoding="utf-8").replace(
+        "implement_test_feedback: true", "implement_test_feedback: true\n  implement_test_feedback_rounds: null",
+    ), encoding="utf-8")
+    result = pipeline.run(root)
+    assert result.status == "success", result.error
+    assert len(feedback(root)["rounds"]) == 1
+    assert _trace(trace).count("feedback case") == 1
