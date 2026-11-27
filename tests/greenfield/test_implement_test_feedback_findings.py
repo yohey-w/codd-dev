@@ -1,5 +1,6 @@
 """Regression cases from the independent feedback review."""
 
+import os
 import shlex
 import subprocess
 import sys
@@ -15,6 +16,13 @@ from codd.languages.adapters.runner_report import CTestJunitReportAdapter
 from codd.languages.registry import default_adapter_registry
 
 from .test_implement_test_feedback import APP, FIXED, HELPER, TEST_FILE, TESTS, feedback, project_factory
+
+
+@pytest.fixture(autouse=True)
+def _running_python_first_on_path(monkeypatch):
+    # Commands here spell the interpreter as `python`; resolve it to the running one,
+    # so the tests do not depend on what the host puts on PATH.
+    monkeypatch.setenv("PATH", os.path.dirname(sys.executable) + os.pathsep + os.environ.get("PATH", ""))
 
 
 _MANIFEST = (
