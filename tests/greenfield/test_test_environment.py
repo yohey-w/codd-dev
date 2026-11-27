@@ -21,6 +21,7 @@ from codd.greenfield.pipeline import (
     save_session,
 )
 from codd.languages.registry import default_registry
+from codd.test_environment import read_test_environment
 from tests.greenfield.conftest import make_stub_project
 
 
@@ -452,6 +453,79 @@ def test_alternate_strategy_is_selected_by_wave_then_pin(scenario, selector):
     assert commands.calls[-2][1][-1] == "fake-test-dependency"
 
 
+def test_environment_probe_opens_only_test_documents(tmp_path, monkeypatch):
+    strategy = _strategy(tmp_path, "")
+    named = tmp_path / ".github" / "verification-policy.md"
+    named.parent.mkdir()
+    named.write_text("# Verification policy\n")
+    notes = tmp_path / "notes.md"
+    try:
+        os.mkfifo(notes)
+    except (AttributeError, OSError):
+        notes.write_text(_block(packages=["unrelated-package"]))
+
+    opened = []
+    original_open = Path.open
+
+    def record_open(path, *args, **kwargs):
+        opened.append(path)
+        # Record unexpected opens without letting a regression block on the pipe.
+        assert path in {strategy, named}, path
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", record_open)
+    settings = {"wave_config": {1: [{"node_id": "test:policy", "output": ".github/verification-policy.md"}]}}
+    assert read_test_environment(tmp_path, settings) is None
+    assert set(opened) == {strategy, named}
+
+
+@pytest.mark.parametrize(("path", "selector"), [
+    ("docs/qa/Verification.MD", "coverage"),
+    (".github/verification-policy.md", "wave"),
+])
+def test_environment_in_exact_named_strategy_is_applied(scenario, path, selector):
+    project, commands, _, _, resume = scenario
+    strategy = project / path
+    strategy.parent.mkdir(parents=True, exist_ok=True)
+    strategy.write_text(_block(packages=["declared-fixture-package"]))
+    config = project / "codd/codd.yaml"
+    settings = yaml.safe_load(config.read_text())
+    if selector == "coverage":
+        settings["test_coverage"] = {"gate": False, "docs": [path]}
+    else:
+        settings["wave_config"] = {1: [{"node_id": "test:test-strategy", "output": path}]}
+    config.write_text(yaml.safe_dump(settings))
+    assert resume().status == "success"
+    assert commands.calls[-2][0] == "package-install"
+    assert commands.calls[-2][1][-1] == "declared-fixture-package"
+
+
+@pytest.mark.parametrize(("waves", "diagnostic"), [
+    ("not a mapping", "wave_config must be a mapping"),
+    ({1: "not a list of entries"}, "wave_config[1] must be a list of entries"),
+    ({1: ["not a mapping"]}, "wave_config[1] entries must be mappings"),
+])
+def test_malformed_wave_shape_is_only_checked_after_opt_in(scenario, waves, diagnostic):
+    project, commands, calls, _, resume = scenario
+    config = project / "codd/codd.yaml"
+    settings = yaml.safe_load(config.read_text())
+    settings["wave_config"] = waves
+    config.write_text(yaml.safe_dump(settings))
+    _strategy(project, "")
+    assert resume().status == "success"
+    commands.calls.clear()
+    calls.clear()
+    _checkpoint(project)
+
+    _strategy(project, _block(packages=["declared-fixture-package"]))
+    result = resume()
+    assert result.status == "failed" and result.failed_stage == "verify"
+    report = format_greenfield_result(result, "text")
+    assert diagnostic in report
+    assert "codd greenfield --resume" in report
+    assert not commands.calls and not calls
+
+
 @pytest.mark.parametrize("fence", ["````", "~~~", "~~~~"])
 def test_long_and_tilde_fences_provision_packages(scenario, fence):
     project, commands, _, _, resume = scenario
@@ -500,7 +574,6 @@ def test_asset_commands_share_inline_environment_with_the_test(scenario, monkeyp
     _configure(project, "python", acquire=True)
     _strategy(project, _block(assets=[commands.asset]))
     monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "/ambient/cache")
-    monkeypatch.setenv("SYNTHETIC_CACHE_ROOT", "/synthetic")
     observed = project / "test-env.json"
     probe = shlex.join([sys.executable, "-I", "-S", "-c",
         "import json, os; from pathlib import Path; "
@@ -509,8 +582,8 @@ def test_asset_commands_share_inline_environment_with_the_test(scenario, monkeyp
     config = project / "codd/codd.yaml"
     settings = yaml.safe_load(config.read_text())
     settings["verify"]["test_command"] = (
-        'PLAYWRIGHT_BROWSERS_PATH="${SYNTHETIC_CACHE_ROOT}/test cache" '
-        'ASSET_MODE=$(printf "%s %s" provisioned mode) ' + probe
+        'PLAYWRIGHT_BROWSERS_PATH="/synthetic/test cache" '
+        'ASSET_MODE="provisioned mode" ' + probe
     )
     config.write_text(yaml.safe_dump(settings))
 
@@ -532,6 +605,48 @@ def test_asset_commands_share_inline_environment_with_the_test(scenario, monkeyp
     asset_calls = [(kind, kwargs["env"]) for kind, _, kwargs in commands.calls if kind.startswith("asset-")]
     assert [kind for kind, _ in asset_calls] == ["asset-check", "asset-acquire", "asset-check"]
     assert all(env == test_env for _, env in asset_calls)
+
+
+@pytest.mark.parametrize(("prefix", "diagnostic"), [
+    ('PLAYWRIGHT_BROWSERS_PATH="/synthetic/cache-$$" ', "contain '$' or a backtick"),
+    ('PLAYWRIGHT_BROWSERS_PATH="`touch unexpected-expansion`" ', "contain '$' or a backtick"),
+    ("env PLAYWRIGHT_BROWSERS_PATH=/synthetic/test-cache ", "starts with an environment or shell wrapper"),
+    ('"/usr/bin/env" PLAYWRIGHT_BROWSERS_PATH=/synthetic/test-cache ', "starts with an environment or shell wrapper"),
+    ("# cache is relative to the project\nPLAYWRIGHT_BROWSERS_PATH=/synthetic/test-cache ",
+     "a newline or comment precedes the test command"),
+    (" \t\nPLAYWRIGHT_BROWSERS_PATH=/synthetic/test-cache ", "a newline or comment precedes the test command"),
+])
+def test_assets_reject_unreproducible_test_command_environment(scenario, prefix, diagnostic):
+    project, commands, calls, _, resume = scenario
+    _configure(project, "python", acquire=True)
+    _strategy(project, _block(assets=[commands.asset]))
+    config = project / "codd/codd.yaml"
+    settings = yaml.safe_load(config.read_text())
+    settings["verify"]["test_command"] = prefix + "python -m pytest --tb=short -q"
+    config.write_text(yaml.safe_dump(settings))
+
+    report = _assert_stopped(resume(), calls, diagnostic)
+    assert "fixed-value assignments" in report
+    assert "environment that launches CoDD" in report
+    assert not any(kind.startswith("asset-") for kind in commands.kinds)
+    assert not (project / "unexpected-expansion").exists()
+
+
+@pytest.mark.parametrize(
+    "body", ["", _block(), _block(packages=["declared-fixture-package"])],
+    ids=["absent", "empty", "packages-only"],
+)
+def test_test_command_environment_is_unrestricted_without_assets(scenario, body):
+    project, _, calls, _, resume = scenario
+    _strategy(project, body)
+    config = project / "codd/codd.yaml"
+    settings = yaml.safe_load(config.read_text())
+    settings.setdefault("verify", {})["test_command"] = (
+        '# verify using the process id\nASSET_MODE="$$" printf "1 passed\\n"'
+    )
+    config.write_text(yaml.safe_dump(settings))
+    assert resume().status == "success"
+    assert calls == [project]
 
 
 @pytest.mark.parametrize("cached_legacy", [False, True])

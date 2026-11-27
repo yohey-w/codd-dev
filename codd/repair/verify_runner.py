@@ -271,48 +271,52 @@ def _link_target_note(path: Path) -> str:
         return NODE_MODULES_DIRNAME
 
 
-_SHELL_SPACE = re.compile(r"(?:[ \t]|\\\n)*")
-_SHELL_ASSIGNMENT = re.compile(_SHELL_SPACE.pattern + r"[A-Za-z_][A-Za-z_0-9]*=")
+_SHELL_ASSIGNMENT = re.compile(r"[ \t]*[A-Za-z_][A-Za-z_0-9]*=")
 
 
 def _shell_word_end(command: str, start: int) -> int:
-    """Find the end of an assignment word without evaluating its expansions."""
-    closers: list[str] = []
+    """Find a word boundary, respecting quotes and escapes."""
+    quote = None
     index = start
     while index < len(command):
         char = command[index]
-        closer = closers[-1] if closers else None
-        following = command[index + 1:index + 2]
-        if char == closer:
-            closers.pop()
-        elif closer == "'":
+        if char == quote:
+            quote = None
+        elif quote == "'":
             pass
         elif char == "\\":
             index += 1
-        elif char == "$" and following in ("(", "{"):
-            closers.append(")" if following == "(" else "}")
-            index += 1
-        elif char == "`" or (char in "'\"" and closer != '"'):
-            closers.append(char)
-        elif char == "(" and closer == ")":
-            closers.append(")")
-        elif not closers and char in " \t\n;&|<>()":
-            return index
+        elif quote is None:
+            if char in "'\"":
+                quote = char
+            elif char in " \t\n;&|<>()":
+                return index
         index += 1
-    if closers or index > len(command):
-        raise ValueError("unterminated shell word in the test command's leading environment assignments")
+    if quote or index > len(command):
+        raise ValueError("unterminated shell word at the start of the test command")
     return len(command)
 
 
 def _shell_assignment_prefix(command: str) -> str:
-    """Return just the assignments preceding the first simple shell command."""
+    """Accept fixed assignments before a direct command for asset preflight."""
     end = 0
     while assignment := _SHELL_ASSIGNMENT.match(command, end):
         end = _shell_word_end(command, assignment.end())
-    tail = command[_SHELL_SPACE.match(command, end).end():]
-    if tail and tail[0] not in "\n;&|()#":
-        return command[:end]
-    return ""
+    prefix = command[:end]
+    if "$" in prefix or "`" in prefix:
+        raise ValueError("test command environment assignments contain '$' or a backtick")
+    head = command[end:].lstrip(" \t")
+    if head.startswith(("\n", "\r", "#", "\\\n")):
+        raise ValueError("a newline or comment precedes the test command")
+    if not head or head[0] in ";&|<>()":
+        raise ValueError("expected a direct test command after any environment assignments")
+    word = head[:_shell_word_end(head, 0)]
+    if any(char in word for char in "$`\n\r"):
+        raise ValueError("the test command must start with a literal executable name")
+    executable, = shlex.split(word)
+    if executable.rsplit("/", 1)[-1] == "env" or executable in {"command", "exec", "export", "unset"}:
+        raise ValueError(f"the test command starts with an environment or shell wrapper ({executable!r})")
+    return prefix
 
 
 class VerifyRunner:
@@ -1041,9 +1045,9 @@ class VerifyRunner:
         from codd.test_detection import _explicit_test_command
 
         command = _explicit_test_command(settings)
-        if command is not None and os.name == "posix":
+        if command is not None:
             prefix = _shell_assignment_prefix(command)
-            if prefix:
+            if prefix and os.name == "posix":
                 # Run only the assignment prefix, through the same shell and
                 # provisioned PATH as the test. The verifier's command stays untouched.
                 probe = shlex.join((

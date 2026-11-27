@@ -10,10 +10,9 @@ from pathlib import Path
 import yaml
 
 from codd.design_consistency import StrictDesignLoader, _contract_blocks, _planned_entries
-from codd.discovery import iter_source_files
 from codd.frontmatter import parse_frontmatter
 from codd.languages.profile import TestAssetSpec
-from codd.path_safety import PathEscapeError, require_project_path, resolve_project_path
+from codd.path_safety import PathEscapeError, resolve_project_path
 from codd.verifiable_behavior_audit import (
     _CANONICAL_VB_OUTPUT_PATH,
     canonical_vb_wave_entries,
@@ -38,72 +37,67 @@ def read_test_environment(project_root: Path, config: dict) -> TestEnvironmentDe
     """Detect opt-in before interpreting the settings that locate the strategy."""
     project_root = project_root.resolve()
     documents = set(discover_vb_documents(project_root))
-    marked = {doc: block for doc in sorted(documents) if (block := _probe_block(project_root, doc))}
-    # A pin or plan can name a Markdown document outside the default test tree.
-    # Keep the opt-in probe independent of those settings, including invalid pins.
-    if not marked and not any(
-        _probe_block(project_root, doc) for doc in iter_source_files(project_root, extensions=(".md",))
-        if doc not in documents
-    ):
-        return None
-
     waves = config.get("wave_config")
-    strategy_output = next((
-        output for entry in canonical_vb_wave_entries(waves, node_only=True)
-        if (output := entry.get("output")) is not None
-        and (not isinstance(output, str) or output.strip())
-    ), None)
     coverage = config.get("test_coverage")
     pins = coverage.get("docs") if isinstance(coverage, dict) else None
-    pin_paths: list[Path] = []
+    pin_paths: dict[int, Path] = {}
+    if isinstance(pins, list):
+        for index, pin in enumerate(pins):
+            if path := _document_path(project_root, pin):
+                pin_paths[index] = path
+                try:
+                    documents.update(discover_vb_documents(project_root, docs=[path]))
+                except (OSError, PathEscapeError, RuntimeError):
+                    continue
+
+    for entry in _planned_entries(config):
+        node_id = entry.get("node_id") or entry.get("id")
+        if isinstance(node_id, str) and node_id.strip().casefold().startswith("test:"):
+            if path := _document_path(project_root, entry.get("output"), strip=True):
+                documents.add(path)
+
+    default_doc = _document_path(project_root, _CANONICAL_VB_OUTPUT_PATH)
+    if default_doc is not None:
+        documents.add(default_doc)
+    marked = {doc: block for doc in sorted(documents) if (block := _probe_block(project_root, doc))}
+    if not marked:
+        return None
+
     errors: list[str] = []
     if coverage is not None and not isinstance(coverage, dict):
         errors.append("test_coverage must be a mapping")
     if pins is not None and not isinstance(pins, list):
         errors.append("test_coverage.docs must be a list of paths")
     if isinstance(pins, list):
-        for pin in pins:
+        for index, pin in enumerate(pins):
             if not isinstance(pin, str) or not pin.strip():
                 errors.append(f"test_coverage.docs entry must be a nonempty path string: {pin!r}")
-                continue
-            try:
-                pin_paths.append(require_project_path(project_root, pin, context="test_coverage.docs entry"))
-            except PathEscapeError as exc:
-                errors.append(str(exc))
-    if pin_paths:
-        documents.update(discover_vb_documents(project_root, docs=pin_paths))
+            elif index not in pin_paths:
+                errors.append(f"test_coverage.docs entry must be a path inside the project: {pin!r}")
+    if "wave_config" in config:
+        if not isinstance(waves, dict):
+            errors.append("wave_config must be a mapping")
+        else:
+            for wave, entries in waves.items():
+                if not isinstance(entries, list):
+                    errors.append(f"wave_config[{wave!r}] must be a list of entries")
+                elif any(not isinstance(entry, dict) for entry in entries):
+                    errors.append(f"wave_config[{wave!r}] entries must be mappings")
 
-    for entry in _planned_entries(config):
-        node_id = entry.get("node_id") or entry.get("id")
-        output = entry.get("output")
-        if (
-            isinstance(node_id, str) and node_id.strip().casefold().startswith("test:")
-            and isinstance(output, str)
-        ):
-            if path := resolve_project_path(project_root, output.strip()):
-                documents.add(path)
-
-    if waves is not None and not isinstance(waves, dict):
-        errors.append("wave_config must be a mapping")
+    strategy_output = next((
+        output for entry in canonical_vb_wave_entries(waves, node_only=True)
+        if (output := entry.get("output")) is not None
+        and (not isinstance(output, str) or output.strip())
+    ), None)
+    canonical = default_doc
     if strategy_output is not None:
-        canonical = (
-            resolve_project_path(project_root, strategy_output.strip())
-            if isinstance(strategy_output, str) else None
-        )
+        canonical = _document_path(project_root, strategy_output, strip=True)
         if canonical is None:
             errors.append("wave_config test:test-strategy output must be a path inside the project")
-    elif len(pin_paths) == 1 and not pin_paths[0].is_dir():
-        canonical = pin_paths[0]
-    else:
-        canonical = resolve_project_path(project_root, _CANONICAL_VB_OUTPUT_PATH)
-    if canonical is not None:
-        documents.add(canonical)
-
-    for doc in sorted(documents - marked.keys()):
-        if block := _probe_block(project_root, doc):
-            marked[doc] = block
-    if not marked:
-        return None
+    elif len(pin_paths) == 1:
+        pin_path = next(iter(pin_paths.values()))
+        if not pin_path.is_dir():
+            canonical = pin_path
     if errors:
         raise ValueError(f"invalid test strategy configuration: {', '.join(errors)}")
     for doc, block in marked.items():
@@ -116,9 +110,21 @@ def read_test_environment(project_root: Path, config: dict) -> TestEnvironmentDe
     return _parse_declaration(canonical.relative_to(project_root).as_posix(), *block)
 
 
+def _document_path(project_root: Path, value: object, *, strip: bool = False) -> Path | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return resolve_project_path(project_root, value.strip() if strip else value)
+    except RuntimeError:
+        # Python versions before 3.13 can raise on a symlink loop.
+        return None
+
+
 def _probe_block(project_root: Path, doc: Path) -> tuple[int, str] | ValueError | None:
     """Find the declaration and retain malformed declarations as opt-in evidence."""
     try:
+        if not doc.is_file():
+            return None
         raw = doc.read_bytes()
     except OSError:
         return None

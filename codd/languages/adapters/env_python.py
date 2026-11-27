@@ -362,7 +362,8 @@ def _prepare_declared_environment(
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 return _env_build_error(
                     f"{declaration.location}: could not prepare the test command environment: {exc}",
-                    "Correct the leading environment assignments in the configured test command.",
+                    "Use fixed-value assignments before the test command for asset location variables, "
+                    "or set those variables in the environment that launches CoDD.",
                 )
             verify = config.get("verify")
             acquire = isinstance(verify, Mapping) and verify.get("acquire_test_assets") is True
