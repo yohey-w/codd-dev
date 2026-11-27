@@ -287,6 +287,19 @@ def test_non_utf8_session_uses_configured_language(author):
     assert "list registry packages" in prompt
 
 
+def test_uninterpretable_session_uses_configured_language(author):
+    project, _, prompts = author(BODY + environment(packages=["demo-helper>=1"]))
+    path = session_path(project)
+    path.parent.mkdir()
+    path.write_bytes(b"stages: {generate: {status: done}}\ncreated_at: 2026-02-31\noptions: {language: go}\n")
+
+    [result] = generator.generate_wave(project, 1)
+
+    assert result.status == "generated"
+    [prompt] = prompts
+    assert "list registry packages" in prompt
+
+
 def test_javascript_declaration_example_is_ignored(author):
     output = "tests/e2e/fixture.spec.js"
     code = '''const assert = require("node:assert/strict");
@@ -313,13 +326,49 @@ version: 2
 
 
 @pytest.mark.parametrize("suffix", [".MD", ".markdown", ".MARKDOWN"])
-def test_markdown_declarations_are_discovered_in_test_directory(author, suffix):
+def test_directory_scan_keeps_the_md_pattern(author, suffix):
+    # Directory discovery reads what E1 read on main (``*.md``); it is never widened.
     project, config, _ = author()
     path = project / "docs/test" / f"appendix{suffix}"
     path.parent.mkdir(parents=True)
     path.write_text(BODY + environment(packages=["demo-helper>=1"]), encoding="utf-8")
+    assert read_test_environment(project, config) is None
+
+
+@pytest.mark.parametrize("suffix", [".MD", ".markdown", ".MARKDOWN"])
+def test_named_markdown_documents_are_read_in_any_case(author, suffix):
+    output = f"docs/test/appendix{suffix}"
+    project, config, _ = author(entries=[artifact(), artifact(output, "test:appendix")])
+    path = project / output
+    path.parent.mkdir(parents=True)
+    path.write_text(BODY + environment(packages=["demo-helper>=1"]), encoding="utf-8")
     with pytest.raises(ValueError, match="noncanonical test document"):
         read_test_environment(project, config)
+
+
+def test_markdown_name_linked_to_extensionless_file_is_read(author):
+    # Markdown is judged by the name the project uses, not by a symlink's target.
+    project, config, _ = author()
+    target = project / "shared/strategy"
+    target.parent.mkdir(parents=True)
+    target.write_text(BODY + environment(version=2), encoding="utf-8")
+    link = project / STRATEGY
+    link.parent.mkdir(parents=True)
+    link.symlink_to("../../shared/strategy")
+    with pytest.raises(ValueError, match="version"):
+        read_test_environment(project, config)
+
+
+def test_code_name_linked_to_markdown_is_not_read(author):
+    output = "tests/e2e/fixture.spec.js"
+    project, config, _ = author(entries=[artifact(), artifact(output, "test:fixture")])
+    target = project / "shared/fixture.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(BODY + environment(packages=["demo-helper>=1"]), encoding="utf-8")
+    link = project / output
+    link.parent.mkdir(parents=True)
+    link.symlink_to("../../shared/fixture.md")
+    assert read_test_environment(project, config) is None
 
 
 def test_environment_module_collects_no_tests(tmp_path):

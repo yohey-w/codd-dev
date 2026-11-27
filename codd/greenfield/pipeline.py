@@ -307,7 +307,8 @@ def resolve_verify_language(
                 path = resolve_project_path(project_root, session_path(project_root.resolve()))
                 if path is not None and path.is_file():
                     session = load_session(project_root)
-            except (OSError, UnicodeDecodeError, RuntimeError):
+            except (OSError, ValueError, RuntimeError):
+                # An unreadable or uninterpretable session saves no language (G16).
                 session = None
         options = (session or {}).get("options")
         if isinstance(options, dict) and options.get("language"):

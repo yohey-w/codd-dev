@@ -7,7 +7,7 @@ import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum, auto
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -78,19 +78,37 @@ def _wave_test_document_output(entry: dict) -> str | None:
     return None
 
 
+_MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
+
+
+def _markdown_name(value: object) -> bool:
+    """Judge a named document as Markdown by the name the project uses, never by a symlink's target."""
+    return isinstance(value, str) and PurePosixPath(value).suffix.casefold() in _MARKDOWN_SUFFIXES
+
+
+def _scanned_name(value: str) -> bool:
+    """Match the names directory discovery finds (``*.md``), so pending files classify like existing ones."""
+    return PurePosixPath(value).name.endswith(".md")
+
+
 def resolve_test_environment_documents(
     project_root: Path, config: dict, *, pending_outputs: Iterable[str] = (),
 ) -> tuple[dict[Path, EnvironmentDocumentRole], str | None]:
     """Classify the paths E1 probes, including documents E2 is about to write."""
     project_root = project_root.resolve()
-    pending = {
-        path for output in pending_outputs if (path := _document_path(project_root, output)) is not None
-    }
-    documents = set(discover_vb_documents(project_root, pattern="*"))
+    pending: dict[Path, str] = {}
+    for output in pending_outputs:
+        if _markdown_name(output) and (path := _document_path(project_root, output)) is not None:
+            pending.setdefault(path, output)
+    # Directory discovery keeps E1's ``*.md`` scan; named documents below are
+    # narrowed to Markdown names (G18) but never widened beyond what E1 read.
+    documents = set(discover_vb_documents(project_root))
     pin_paths = _coverage_pin_paths(project_root, config)
-    for path in pin_paths.values():
+    pin_names = _coverage_pin_names(config)
+    for index, path in pin_paths.items():
         try:
-            documents.update(discover_vb_documents(project_root, docs=[path], pattern="*"))
+            if path.is_dir() or _markdown_name(pin_names.get(index)):
+                documents.update(discover_vb_documents(project_root, docs=[path]))
         except (OSError, PathEscapeError, RuntimeError):
             continue
 
@@ -98,7 +116,8 @@ def resolve_test_environment_documents(
     if default_doc is not None:
         documents.add(default_doc)
     for entry in _planned_entries(config):
-        if path := _document_path(project_root, _wave_test_document_output(entry)):
+        output = _wave_test_document_output(entry)
+        if _markdown_name(output) and (path := _document_path(project_root, output)):
             documents.add(path)
 
     # A pinned directory can be created by generating a document under it.
@@ -111,13 +130,20 @@ def resolve_test_environment_documents(
     if default_dir := _document_path(project_root, _DEFAULT_VB_DOC_DIR):
         directories.add(default_dir)
     documents.update(
-        path for path in pending
-        if path == canonical or path in pin_paths.values() or any(directory in path.parents for directory in directories)
+        path for path, output in pending.items()
+        if path == canonical or path in pin_paths.values()
+        or (_scanned_name(output) and any(directory in path.parents for directory in directories))
     )
     return {
         path: EnvironmentDocumentRole.CANONICAL if path == canonical else EnvironmentDocumentRole.NONCANONICAL
-        for path in documents if path.suffix.casefold() in {".md", ".markdown"}
+        for path in documents
     }, error
+
+
+def _coverage_pin_names(config: dict) -> dict[int, object]:
+    coverage = config.get("test_coverage")
+    pins = coverage.get("docs") if isinstance(coverage, dict) else None
+    return dict(enumerate(pins)) if isinstance(pins, list) else {}
 
 
 def _coverage_pin_paths(project_root: Path, config: dict) -> dict[int, Path]:
