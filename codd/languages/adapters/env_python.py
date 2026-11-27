@@ -288,16 +288,7 @@ def _env_build_error(detail: str, next_step: str) -> EnvProvisionResult:
     return EnvProvisionResult(ok=False, action="failed", detail=detail, next_step=next_step)
 
 
-def provision_python_env(
-    project_root: Path, *, profile: LayoutProfile,
-    propose_dependencies: Callable[[str], str] | None = None,
-    declaration: TestEnvironmentDeclaration | None = None,
-    asset_specs: Mapping[str, TestAssetSpec] | None = None,
-    config: Mapping | None = None,
-) -> EnvProvisionResult:
-    if declaration is None:
-        return _provision_python_base_env(project_root, profile, propose_dependencies)
-
+def validate_test_packages(declaration: TestEnvironmentDeclaration) -> EnvProvisionResult | None:
     for package in declaration.packages:
         if "===" in package:
             return _env_build_error(
@@ -313,6 +304,20 @@ def provision_python_env(
                 f"{declaration.location}: invalid test package requirement {package!r}",
                 "Use a registry package name with optional extras and version constraints.",
             )
+    return None
+
+
+def provision_python_env(
+    project_root: Path, *, profile: LayoutProfile,
+    propose_dependencies: Callable[[str], str] | None = None,
+    declaration: TestEnvironmentDeclaration | None = None,
+    asset_specs: Mapping[str, TestAssetSpec] | None = None,
+    config: Mapping | None = None,
+) -> EnvProvisionResult:
+    if declaration is None:
+        return _provision_python_base_env(project_root, profile, propose_dependencies)
+    if failure := validate_test_packages(declaration):
+        return failure
 
     state_path = project_root / _ENV_PROVISION_STATE_RELPATH
     try:

@@ -1878,16 +1878,76 @@ def _provision_python_env(
     )
 
 
+def _validate_python_test_packages(declaration: TestEnvironmentDeclaration) -> EnvProvisionResult | None:
+    from codd.languages.adapters.env_python import validate_test_packages
+
+    return validate_test_packages(declaration)
+
+
 # Realizer capability id → env provisioner (Contract Kernel v2.71 seam). The dispatch
 # key is the profile's ``legacy_project_types.env_provisioner`` realizer id — a
 # harness-policy capability name, NOT a language name. A stack with no such key (every
 # other language + Go) resolves to no provisioner = a strict NO-OP.
-_EnvProvisioner = Callable[..., EnvProvisionResult]
+@dataclass(frozen=True)
+class _EnvProvisioner:
+    provision: Callable[..., EnvProvisionResult]
+    validate_packages: Callable[[TestEnvironmentDeclaration], EnvProvisionResult | None]
+
+
 #: Realizer capability id (must match the profile YAML ``legacy_project_types``).
 _ENV_PROVISIONER_PY_VENV = "venv-editable-pip-provisioner-v1"
 _ENV_PROVISIONERS_BY_REALIZER: dict[str, _EnvProvisioner] = {
-    _ENV_PROVISIONER_PY_VENV: _provision_python_env,
+    _ENV_PROVISIONER_PY_VENV: _EnvProvisioner(_provision_python_env, _validate_python_test_packages),
 }
+
+
+def _env_provisioner(language: str | None) -> _EnvProvisioner | None:
+    realizer_id = _legacy_realizer_id(language, "env_provisioner")
+    return _ENV_PROVISIONERS_BY_REALIZER.get(realizer_id) if realizer_id else None
+
+
+def can_provision_test_packages(language: str | None) -> bool:
+    return _env_provisioner(language) is not None
+
+
+def available_test_assets(language: str | None) -> Mapping[str, TestAssetSpec]:
+    from codd.languages.registry import UnknownLanguageError, default_registry
+
+    try:
+        tests = default_registry.resolve(language).tests if language else None
+    except UnknownLanguageError:
+        tests = None
+    return tests.environment_assets if tests else {}
+
+
+def _declared_test_assets(
+    declaration: TestEnvironmentDeclaration, language: str | None,
+) -> dict[str, TestAssetSpec] | EnvProvisionResult:
+    available = available_test_assets(language)
+    assets: dict[str, TestAssetSpec] = {}
+    for name in declaration.assets:
+        if name not in available:
+            return EnvProvisionResult(
+                False, "failed",
+                f"{declaration.location}: unknown test asset {name!r} for language {language!r}",
+                next_step="Use an asset listed in the language profile or remove it from the declaration.",
+            )
+        assets[name] = available[name]
+    return assets
+
+
+def validate_declared_test_environment(
+    declaration: TestEnvironmentDeclaration, language: str | None,
+) -> None:
+    """Run the declaration checks used by provisioning without realizing the environment."""
+    provisioner = _env_provisioner(language)
+    assets = _declared_test_assets(declaration, language)
+    if isinstance(assets, EnvProvisionResult):
+        raise ValueError(assets.detail)
+    if provisioner is None:
+        raise ValueError(_unsupported_test_environment(declaration, language).detail)
+    if failure := provisioner.validate_packages(declaration):
+        raise ValueError(failure.detail)
 
 
 def provision_project_env(
@@ -1913,25 +1973,13 @@ def provision_project_env(
     + roots); nothing is hardcoded.
     """
     root = Path(project_root)
-    realizer_id = _legacy_realizer_id(language, "env_provisioner")
-    provisioner = _ENV_PROVISIONERS_BY_REALIZER.get(realizer_id) if realizer_id else None
+    provisioner = _env_provisioner(language)
     assets: dict[str, TestAssetSpec] = {}
     if test_environment is not None:
-        from codd.languages.registry import UnknownLanguageError, default_registry
-
-        try:
-            tests = default_registry.resolve(language).tests if language else None
-        except UnknownLanguageError:
-            tests = None
-        available = tests.environment_assets if tests else {}
-        for name in test_environment.assets:
-            if name not in available:
-                return EnvProvisionResult(
-                    False, "failed",
-                    f"{test_environment.location}: unknown test asset {name!r} for language {language!r}",
-                    next_step="Use an asset listed in the language profile or remove it from the declaration.",
-                )
-            assets[name] = available[name]
+        declared = _declared_test_assets(test_environment, language)
+        if isinstance(declared, EnvProvisionResult):
+            return declared
+        assets = declared
     if provisioner is None:
         if test_environment is not None:
             return _unsupported_test_environment(test_environment, language)
@@ -1957,8 +2005,8 @@ def provision_project_env(
             detail=f"no layout profile resolved for language {language!r}",
         )
     if test_environment is None:
-        return provisioner(root, profile=profile, propose_dependencies=propose_dependencies)
-    return provisioner(
+        return provisioner.provision(root, profile=profile, propose_dependencies=propose_dependencies)
+    return provisioner.provision(
         root, profile=profile, propose_dependencies=propose_dependencies,
         declaration=test_environment, asset_specs=assets, config=config,
     )

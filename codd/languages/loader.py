@@ -333,7 +333,11 @@ def _parse_test_assets(raw: Any) -> Mapping[str, TestAssetSpec]:
                 raise LanguageProfileError(f"{where}.{key} must be a nonempty list of argv strings")
         if type(timeout) is not int or not 30 <= timeout <= 120:
             raise LanguageProfileError(f"{where}.check_timeout_seconds must be an integer from 30 to 120")
-        assets[name] = TestAssetSpec(tuple(check), tuple(acquire), timeout, str(spec.get("manual_hint", "")))
+        assets[name] = TestAssetSpec(
+            tuple(check), tuple(acquire), timeout,
+            manual_hint=str(spec.get("manual_hint", "")),
+            description=str(spec.get("description") or ""),
+        )
     return MappingProxyType(assets)
 
 

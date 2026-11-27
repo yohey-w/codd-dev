@@ -96,6 +96,7 @@ from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import partial
 import json
 from pathlib import Path, PurePosixPath
 import shlex
@@ -104,7 +105,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 # Leaf module (stdlib-only imports): safe to import at module load, no cycle.
-from codd.path_safety import has_plausible_file_extension, is_glob_decl
+from codd.path_safety import has_plausible_file_extension, is_glob_decl, resolve_project_path
 from codd.requirement_appendix import UnreadableRequirementAppendix
 
 if TYPE_CHECKING:
@@ -293,6 +294,27 @@ def load_session(project_root: Path) -> dict[str, Any] | None:
     except (OSError, yaml.YAMLError):
         return None
     return payload if isinstance(payload, dict) and payload.get("stages") else None
+
+
+def resolve_verify_language(
+    config: dict[str, Any], *, language: str | None = None, session: dict[str, Any] | None = None,
+    project_root: Path | None = None,
+) -> str | None:
+    """Apply verify's precedence: invocation, saved option, then project config."""
+    if language is None:
+        if session is None and project_root is not None:
+            try:
+                path = resolve_project_path(project_root, session_path(project_root.resolve()))
+                if path is not None and path.is_file():
+                    session = load_session(project_root)
+            except (OSError, ValueError, RuntimeError):
+                # An unreadable or uninterpretable session saves no language (G16).
+                session = None
+        options = (session or {}).get("options")
+        if isinstance(options, dict) and options.get("language"):
+            language = str(options["language"])
+    project = config.get("project")
+    return language or (project.get("language") if isinstance(project, dict) else None)
 
 
 def save_session(project_root: Path, session: dict[str, Any]) -> Path:
@@ -486,8 +508,8 @@ class GreenfieldPipeline:
             self.ai_command = str(stored["ai_command"])
         if self.project_name is None and stored.get("project_name"):
             self.project_name = str(stored["project_name"])
-        if self.language is None and stored.get("language"):
-            self.language = str(stored["language"])
+        if self.language is None:
+            self.language = resolve_verify_language({}, session=session)
         if self.requirements is None and stored.get("requirements"):
             self.requirements = str(stored["requirements"])
         if self.project_type is None and stored.get("project_type"):
@@ -1368,7 +1390,8 @@ class GreenfieldPipeline:
         record["units"] = {str(wave): units.get(str(wave), STATUS_PENDING) for wave in waves}
         all_waves_checkpointed = all(status == STATUS_DONE for status in record["units"].values())
 
-        runner = self.generate_wave_runner or _default_generate_wave_runner
+        language_option = {"environment_language": self.language} if self.language is not None else {}
+        runner = self.generate_wave_runner or partial(_default_generate_wave_runner, **language_option)
         for wave in waves:
             key = str(wave)
             if record["units"][key] == STATUS_DONE:
@@ -1387,7 +1410,7 @@ class GreenfieldPipeline:
         # A resumed run can skip the waves that wrote these reporters. Resolve
         # them before validating the VB registry against the resulting documents.
         try:
-            reconcile_generated_design(project_root, ai_command=self.ai_command)
+            reconcile_generated_design(project_root, ai_command=self.ai_command, **language_option)
         except DesignConsistencyError as exc:
             raise _DesignConsistencyStageError(str(exc)) from exc
 
@@ -1413,7 +1436,10 @@ class GreenfieldPipeline:
             for output, feedback in exc.dependency_repairs.items():
                 self.echo(f"[greenfield] repairing design dependencies in {output}")
                 try:
-                    regenerate_artifact(project_root, output_path=output, feedback=feedback, ai_command=self.ai_command)
+                    regenerate_artifact(
+                        project_root, output_path=output, feedback=feedback, ai_command=self.ai_command,
+                        **language_option,
+                    )
                 except (OSError, ValueError) as repair_error:
                     raise _DesignConsistencyStageError(
                         f"{exc}\nCould not repair {output}: {repair_error}"
@@ -1510,6 +1536,7 @@ class GreenfieldPipeline:
                     output_path=_CANONICAL_VB_OUTPUT_PATH,
                     feedback=feedback,
                     ai_command=self.ai_command,
+                    **({"environment_language": self.language} if self.language is not None else {}),
                 )
             except (FileNotFoundError, ValueError) as exc:
                 # The canonical doc is not a planned artifact, or regeneration
@@ -3427,10 +3454,7 @@ class GreenfieldPipeline:
             config = load_project_config(project_root)
         except (FileNotFoundError, ValueError):
             config = {}
-        project_section = config.get("project") if isinstance(config.get("project"), dict) else {}
-        language = self.language or (
-            project_section.get("language") if isinstance(project_section, dict) else None
-        )
+        language = resolve_verify_language(config, language=self.language)
         scan = config.get("scan") if isinstance(config.get("scan"), dict) else {}
         source_dirs = scan.get("source_dirs") if isinstance(scan, dict) else None
         test_dirs = scan.get("test_dirs") if isinstance(scan, dict) else None
@@ -3766,10 +3790,15 @@ def _default_wave_lister(project_root: Path) -> list[int]:
     return sorted(set(waves))
 
 
-def _default_generate_wave_runner(project_root: Path, wave: int, *, ai_command: str | None) -> str:
+def _default_generate_wave_runner(
+    project_root: Path, wave: int, *, ai_command: str | None, environment_language: str | None = None,
+) -> str:
     from codd.generator import generate_wave
 
-    results = generate_wave(project_root, wave, force=False, ai_command=ai_command)
+    results = generate_wave(
+        project_root, wave, force=False, ai_command=ai_command,
+        environment_language=environment_language,
+    )
     generated = sum(1 for result in results if result.status == "generated")
     return f"{generated} generated, {len(results) - generated} skipped"
 
