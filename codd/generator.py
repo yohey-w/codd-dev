@@ -10,6 +10,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import subprocess  # noqa: F401 — kept: tests monkeypatch ``generator.subprocess.run``
+import sys
 from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -48,13 +49,21 @@ from codd.languages import resolve_test_framework_guidance
 from codd.path_safety import resolve_project_path
 from codd.project_types import (
     ProjectCapabilities,
+    available_test_assets,
+    can_provision_test_packages,
     effective_e2e_modality,
     load_capabilities,
     resolve_layout_profile,
     resolve_project_type,
+    validate_declared_test_environment,
 )
 from codd.requirement_appendix import protect_requirement_appendix, with_requirement_appendix
 from codd.requirements_meta import normalize_operation_flow, ui_pattern_choices
+from codd.test_environment import (
+    MissingTestEnvironment,
+    parse_generated_test_environment,
+    resolve_test_strategy_path,
+)
 from codd.verifiable_behavior_audit import VB_BLOCKER_SCOPE_GUIDANCE
 
 if TYPE_CHECKING:
@@ -435,6 +444,44 @@ def _python_http_e2e_doc_lines() -> list[str]:
     ]
 
 
+def _test_environment_guidance(canonical: bool, language: str | None) -> tuple[str, ...]:
+    if not canonical:
+        return ("- Do not write a `codd-test-environment` block in this document.",)
+    lines = [
+        "- Write exactly one `codd-test-environment` fenced YAML block in this document:",
+        "```codd-test-environment",
+        "version: 1",
+        "packages: []",
+        "assets: []",
+        "```",
+        "- Use `[]` for either list when nothing is needed.",
+    ]
+    if can_provision_test_packages(language):
+        lines.append(
+            "- In `packages`, list registry packages imported by tests or helper processes they start "
+            "that are absent from runtime dependencies. Keep runtime dependencies in the project's dependency "
+            "manifest. Version constraints are optional. Do not use `===`, paths, or URLs."
+        )
+    else:
+        lines.append(
+            "- Keep `packages` empty. Put test dependencies in the development dependencies "
+            "of the project's dependency manifest."
+        )
+    assets = available_test_assets(language)
+    if assets:
+        lines.append("- Select `assets` only from this list:")
+        for name, spec in assets.items():
+            description = " ".join(spec.description.split())
+            lines.append(f"  - `{name}` — {description}" if description else f"  - `{name}`")
+    else:
+        lines.append("- Keep `assets` empty. This language profile lists no assets.")
+    return tuple(lines)
+
+
+def _warn_missing_test_environment(exc: MissingTestEnvironment) -> None:
+    print(f"Warning: {exc}", file=sys.stderr)
+
+
 def _build_test_doc_block(
     capabilities: ProjectCapabilities,
     *,
@@ -788,7 +835,8 @@ class _DesignRewrite:
 
     def draft(
         self, artifact: WaveArtifact, dependencies: list[DependencyDocument],
-        ai_command: str, feedback: str | None, project_root: Path,
+        ai_command: str, feedback: str | None, project_root: Path, *,
+        test_environment_guidance: tuple[str, ...] = (),
     ) -> str:
         original = parse_frontmatter(self.before, yaml_loader=StrictDesignLoader)
         body = original.body
@@ -819,6 +867,9 @@ class _DesignRewrite:
         ownership_scope = "\n".join(_required_artifact_scope_guidance(artifact))
         if ownership_scope:
             ownership_scope += "\n\n"
+        environment_rules = "\n".join(test_environment_guidance)
+        if environment_rules:
+            environment_rules += "\n"
         prompt = _inject_lexicon(
             f"Reconcile the Markdown document at {artifact.output}.\nNode ID: {artifact.node_id}\n"
             f"Reported disagreements:\n{self.reasons}\n\nFixed dependency documents:\n{context}\n\n"
@@ -830,6 +881,7 @@ class _DesignRewrite:
             f"Lines allowed to be replaced or removed: {sorted(replace_lines)}\n"
             f"New lines may be inserted after these lines only (0 means before line 1): {sorted(insert_after)}\n\n"
             f"{ownership_scope}"
+            f"{environment_rules}"
             f"Original body (numbered for reference):\n{numbered}",
             project_root,
         )
@@ -1129,10 +1181,45 @@ def _generate_one_artifact(
         project_root, artifact.depends_on + [{"id": peer.node_id} for peer in context],
         document_node_paths | {peer.node_id: Path(peer.output) for peer in context}, drafts=drafts,
     )
+    environment_guidance: tuple[str, ...] = ()
+    environment_path = None
+    canonical_environment = False
+    strategy_error = None
+    if not _is_test_code_output(artifact.output):
+        root = project_root.resolve()
+        target = resolve_project_path(root, artifact.output)
+        strategy, strategy_error = resolve_test_strategy_path(root, config)
+        canonical_environment = target is not None and target == strategy
+        if canonical_environment or _infer_doc_type(artifact.output) == "test" or (
+            output_path.suffix.casefold() in {".md", ".markdown"}
+            and artifact.node_id.strip().casefold().startswith("test:")
+        ):
+            environment_path = target.relative_to(root) if target is not None else Path(artifact.output)
+    project = config.get("project")
+    language = project.get("language") if isinstance(project, dict) else None
+    environment_language = language if isinstance(language, str) else None
+    if environment_path is not None:
+        environment_guidance = _test_environment_guidance(canonical_environment, environment_language)
+
+    def check_environment(text: str) -> None:
+        if environment_path is not None:
+            declaration = parse_generated_test_environment(
+                environment_path, text, canonical=canonical_environment, strategy_error=strategy_error,
+            )
+            if declaration is not None:
+                validate_declared_test_environment(declaration, environment_language)
+
     if rewrite is not None:
         assert drafts is not None
-        text = rewrite.draft(artifact, dependency_documents, resolved_ai_command, feedback, project_root)
+        text = rewrite.draft(
+            artifact, dependency_documents, resolved_ai_command, feedback, project_root,
+            test_environment_guidance=environment_guidance,
+        )
         enforce_design_consistency(project_root, config, candidate=(artifact.output, text), drafts=drafts)
+        try:
+            check_environment(text)
+        except MissingTestEnvironment as exc:
+            _warn_missing_test_environment(exc)
         drafts[artifact.output] = text
         return GenerationResult(node_id=artifact.node_id, path=output_path, status="generated")
     if not managed and drafts is None:
@@ -1151,9 +1238,12 @@ def _generate_one_artifact(
 
     def check_candidate(body: str) -> None:
         nonlocal validate_contract
-        validate_contract = validate_contract or has_behavior_contract(body)
+        if managed or check_emitted_contract:
+            validate_contract = validate_contract or has_behavior_contract(body)
+        if not validate_contract and environment_path is None:
+            return
+        text = render(body)
         if validate_contract:
-            text = render(body)
             try:
                 enforce_design_consistency(project_root, config, candidate=(artifact.output, text), drafts=drafts)
             except DesignConsistencyError as exc:
@@ -1162,6 +1252,7 @@ def _generate_one_artifact(
                 ):
                     rejected[artifact.output] = text
                 raise
+        check_environment(text)
 
     body = _generate_document_body(
         artifact=artifact,
@@ -1175,8 +1266,9 @@ def _generate_one_artifact(
         project_language=project_language,
         layout_placement=layout_placement,
         behavior_contract=managed, contract_is_required=lambda: validate_contract,
-        validate_body=check_candidate if managed or check_emitted_contract else None,
+        validate_body=check_candidate if managed or check_emitted_contract or environment_path is not None else None,
         operation_flow_owner_elsewhere=operation_flow_owner_elsewhere,
+        test_environment_guidance=environment_guidance,
     )
     if drafts is not None:
         drafts[artifact.output] = render(body)
@@ -2172,6 +2264,7 @@ def _generate_document_body(
     validate_body: Callable[[str], None] | None = None,
     operation_flow_owner_elsewhere: bool = False,
     contract_is_required: Callable[[], bool] | None = None,
+    test_environment_guidance: tuple[str, ...] = (),
 ) -> str:
     """Generate one document body with a bounded validation-feedback retry loop.
 
@@ -2184,7 +2277,8 @@ def _generate_document_body(
 
     current_feedback = feedback
     last_error: ValueError | None = None
-    for attempt in range(max(0, max_retries) + 1):
+    retry_limit = max(0, max_retries)
+    for attempt in range(retry_limit + 1):
         prompt = _build_generation_prompt(
             artifact, dependency_documents, conventions,
             feedback=current_feedback, capabilities=capabilities,
@@ -2194,6 +2288,7 @@ def _generate_document_body(
             operation_flow_owner_elsewhere=operation_flow_owner_elsewhere,
             # A declaration in a generated body can make subsequent attempts strict.
             strict_operation_flow=contract_is_required() if contract_is_required else False,
+            test_environment_guidance=test_environment_guidance,
         )
         prompt = _inject_project_context(prompt, project_root)
         try:
@@ -2203,7 +2298,12 @@ def _generate_document_body(
                 output_path=artifact.output,
             )
             if validate_body:
-                validate_body(body)
+                try:
+                    validate_body(body)
+                except MissingTestEnvironment as exc:
+                    if attempt < retry_limit:
+                        raise
+                    _warn_missing_test_environment(exc)
             return body
         except ValueError as exc:
             if str(exc).startswith("AI command failed"):
@@ -2271,6 +2371,7 @@ def _build_generation_prompt(
     behavior_contract: bool = False,
     operation_flow_owner_elsewhere: bool = False,
     strict_operation_flow: bool | None = None,
+    test_environment_guidance: tuple[str, ...] = (),
 ) -> str:
     if capabilities is None:
         capabilities = WEB_FALLBACK_CAPABILITIES
@@ -2435,6 +2536,7 @@ def _build_generation_prompt(
                 project_language=project_language,
             )
         )
+    lines.extend(test_environment_guidance)
 
     if doc_type == "operations":
         lines.extend(_build_operations_doc_block(capabilities))
