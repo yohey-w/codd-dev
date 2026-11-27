@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import pytest
 import re
 import subprocess
 
@@ -444,6 +445,47 @@ def test_implementation_prompt_states_test_framework_for_python():
 
     assert "pytest" in prompt
     assert "import pytest" in prompt
+
+
+MEASUREMENT_RULE = "- When a test measures elapsed time, define for each measured target where it starts, completes and fails"
+CERTIFICATE_RULE = "- A test-only TLS certificate (for a local HTTPS or mail server the tests start) MUST become valid well before it is issued"
+
+
+@pytest.mark.parametrize("language", ["python", "typescript", None])
+def test_test_writing_prompt_states_measurement_and_certificate_rules(language):
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": language}} if language else {},
+        design_context=DesignContext(
+            node_id="test:test-strategy",
+            path=Path("docs/test/test_strategy.md"),
+            content="# Test Strategy\n",
+        ),
+        spec=ImplementSpec("test:test-strategy", ["tests"]),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+
+    assert prompt.count(MEASUREMENT_RULE) == 1
+    assert prompt.count(CERTIFICATE_RULE) == 1
+
+
+def test_source_prompt_omits_measurement_and_certificate_rules():
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "python"}},
+        design_context=DesignContext(
+            node_id="design:system",
+            path=Path("docs/design/system_design.md"),
+            content="# System Design\n",
+        ),
+        spec=ImplementSpec("design:system", ["src"]),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+
+    assert MEASUREMENT_RULE not in prompt
+    assert CERTIFICATE_RULE not in prompt
 
 
 def test_implementation_prompt_omits_test_framework_when_spec_is_not_test_related():

@@ -463,6 +463,10 @@ def test_unmanaged_generation_prompts_match_legacy_bytes(tmp_path, mock_ai_cli):
         "- The readiness check MUST prove that the server answering is the one this run started "
         "(for example, a per-run token the server reports, or the address the started process itself reports), "
         "not merely that some server answers on that address.\n",
+        "- A test-only TLS certificate (for a local HTTPS or mail server the tests start) MUST become valid well before it is issued "
+        "(for example, a day earlier) and stay valid beyond the run, so a system clock adjusted during the run cannot make it not yet valid. "
+        "The readiness check connects with the same trust and name verification the consumer uses and reports the verification reason, "
+        "time and validity window when it fails.\n",
     ):
         assert prompts[0].count(added) == 1
         prompts[0] = prompts[0].replace(added, "", 1)
@@ -1262,3 +1266,12 @@ operation_flow:
     assert operation["id"] == "assign_item"
     assert operation["actor"] == "operator"
     assert operation["expected_outcomes"] == ["assignment persists"]
+
+
+def test_python_http_strategy_rules_ask_for_a_backdated_test_certificate():
+    from codd.generator import _python_http_e2e_doc_lines
+
+    lines = _python_http_e2e_doc_lines()
+    rule = [line for line in lines if line.startswith("- A test-only TLS certificate")]
+    assert len(rule) == 1
+    assert "well before it is issued" in rule[0] and "reports the verification reason" in rule[0]
