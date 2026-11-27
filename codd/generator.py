@@ -517,6 +517,8 @@ def _build_test_doc_block(
                 "- E2E tests for web applications require a running server. The meta-prompt MUST specify how to start the application under test before running E2E tests.",
                 "- Detect the project type from package.json scripts, framework config, or entry points. Include the appropriate startup sequence (e.g., build → start → wait-for-ready) in the E2E instructions.",
                 "- For CI environments, specify that the server must run in the background with a health-check wait before test execution begins.",
+                "- Bind the server under test to a loopback port chosen at runtime (an unused ephemeral port), never a fixed port number, so a leftover or concurrent server cannot collide with it.",
+                "- The readiness check MUST prove that the server answering is the one this run started (for example, a per-run token the server reports, or the address the started process itself reports), not merely that some server answers on that address.",
                 "- Browser tests require a headed or headless browser. Specify the browser launch configuration (e.g. `use: { headless: true }`) in the test config.",
             ]
         )
