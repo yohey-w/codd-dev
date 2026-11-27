@@ -555,7 +555,8 @@ def test_saved_lineup_stateless_library_does_not_need_roles(tmp_path, monkeypatc
     prompts = _replies(
         monkeypatch, {"wave_config": {"1": [_entry()]}, "ownership_not_applicable": reasons},
         "## Overview\n\nNormalize records.\n\n```codd-behavior\nowns: {}\ncases: []\n```",
-        "## Overview\n\nVerify normalization.\n\n```codd-behavior\nowns: {}\ncases: []\n```",
+        "## Overview\n\nVerify normalization.\n\n```codd-behavior\nowns: {}\ncases: []\n```"
+        "\n\n```codd-test-environment\nversion: 1\npackages: []\nassets: []\n```",
     )
 
     result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")

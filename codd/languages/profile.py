@@ -392,6 +392,7 @@ class TestAssetSpec:
     acquire: tuple[str, ...]
     check_timeout_seconds: int
     manual_hint: str = ""
+    description: str = ""
 
 
 @dataclass(frozen=True)

@@ -454,8 +454,10 @@ def test_unmanaged_generation_prompts_match_legacy_bytes(tmp_path, mock_ai_cli):
         generate_wave(project, wave)
 
     prompts = [call["input"] for call in mock_ai_cli]
-    # The browser runtime rules gained two lines on purpose; everything else must stay byte-identical.
+    # Lines added on purpose (the test-environment guidance and the browser runtime rules);
+    # everything else must stay byte-identical.
     for added in (
+        "- Do not write a `codd-test-environment` block in this document.\n",
         "- Bind the server under test to a loopback port chosen at runtime (an unused ephemeral port), "
         "never a fixed port number, so a leftover or concurrent server cannot collide with it.\n",
         "- The readiness check MUST prove that the server answering is the one this run started "
