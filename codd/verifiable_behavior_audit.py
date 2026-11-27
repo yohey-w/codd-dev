@@ -905,17 +905,19 @@ def render_vb_contract(
             "prove the behavior and is rejected. Write the expected value "
             "INDEPENDENTLY of the value you compute from the system under test — "
             "never assert a system-derived value against itself.",
-            "- Place each covers marker immediately above the individual test "
-            "declaration, above any decorators or annotations. Use an executable "
-            "declaration the checker recognizes, and keep marked tests free of skip "
-            "or disable directives, including conditional ones. If the behavior "
-            "genuinely cannot be tested yet, use a `codd: blocked` marker as "
-            "described in rule 3.",
-            "- In each marked test body, store the observed result in a variable and "
-            "compare that variable with an independently written expectation, using "
-            "a recognized assertion written directly in the body. Shared or local "
-            "assertion helpers may also be used, but they do not replace this direct "
-            "assertion.",
+            "- Place each covers marker on the line directly above the individual "
+            "test's declaration line, below any decorators or attributes on that "
+            "test. Use an executable declaration the checker recognizes, and keep "
+            "marked tests free of skip or disable directives, including conditional "
+            "ones. If the behavior genuinely cannot be tested yet, use a "
+            "`codd: blocked` marker as described in rule 3.",
+            "- In each marked test body, assert directly on the observed result: "
+            "store a returned value in a variable and compare it with an "
+            "independently written expectation, or wrap the call in the recognized "
+            "expected-error check when the behavior is a raised error. Shared or "
+            "local assertion helpers may also be used, but keep this direct "
+            "assertion so the evidence does not depend on how far the checker can "
+            "follow a helper.",
             "- An unresolved external assertion helper supplies no evidence, even "
             "through a local wrapper. Use external assertions as evidence only when "
             "the checker recognizes them for the active test profile. External helpers "
