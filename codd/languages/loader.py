@@ -15,6 +15,7 @@ Phase 1, additive only. Parsing rules:
 from __future__ import annotations
 
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping
 
 import yaml
@@ -38,6 +39,7 @@ from .profile import (
     ScaffoldSpec,
     ScopeSpec,
     SourceSet,
+    TestAssetSpec,
     TestFrameworkSpec,
     TestSet,
     TestsSpec,
@@ -316,6 +318,25 @@ def _parse_test_framework(raw: Any, *, where: str = "tests.framework") -> TestFr
     return TestFrameworkSpec(name=str(name), example=str(example))
 
 
+def _parse_test_assets(raw: Any) -> Mapping[str, TestAssetSpec]:
+    assets = {}
+    for name, value in _as_mapping(raw, where="tests.environment_assets").items():
+        where = f"tests.environment_assets.{name}"
+        spec = _as_mapping(value, where=where)
+        check = spec.get("check")
+        acquire = spec.get("acquire")
+        timeout = spec.get("check_timeout_seconds")
+        for key, argv in (("check", check), ("acquire", acquire)):
+            if not isinstance(argv, list) or not argv or not all(
+                isinstance(arg, str) and arg.strip() for arg in argv
+            ):
+                raise LanguageProfileError(f"{where}.{key} must be a nonempty list of argv strings")
+        if type(timeout) is not int or not 30 <= timeout <= 120:
+            raise LanguageProfileError(f"{where}.check_timeout_seconds must be an integer from 30 to 120")
+        assets[name] = TestAssetSpec(tuple(check), tuple(acquire), timeout, str(spec.get("manual_hint", "")))
+    return MappingProxyType(assets)
+
+
 def _parse_tests(doc: Mapping[str, Any]) -> TestsSpec | None:
     raw = doc.get("tests")
     if raw is None:
@@ -340,6 +361,7 @@ def _parse_tests(doc: Mapping[str, Any]) -> TestsSpec | None:
         assertion_guidance=(
             str(m["assertion_guidance"]) if m.get("assertion_guidance") is not None else None
         ),
+        environment_assets=_parse_test_assets(m.get("environment_assets")),
     )
 
 

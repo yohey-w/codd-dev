@@ -2469,9 +2469,17 @@ class GreenfieldPipeline:
     def _provision_env(self, project_root: Path) -> None:
         """Provision and, where supported, repair the stack's test environment."""
         from codd.project_types import provision_project_env
+        from codd.test_environment import read_test_environment
 
         config, language, source_dirs, test_dirs = self._layout_inputs(project_root)
         project_name = self._layout_project_name(project_root, config)
+        try:
+            declaration = read_test_environment(project_root, config)
+        except ValueError as exc:
+            raise EnvironmentProvisionError(
+                f"test-execution environment provisioning failed before verify: {exc}",
+                "Correct the test environment declaration in the test strategy.",
+            ) from exc
 
         def propose_dependencies(prompt: str) -> str:
             from codd.ai_invoke import invoke_read_only, resolve_ai_command
@@ -2496,12 +2504,15 @@ class GreenfieldPipeline:
                 test_dirs=test_dirs,
                 config=config,
                 propose_dependencies=propose_dependencies,
+                **({"test_environment": declaration} if declaration is not None else {}),
             )
         except OSError as exc:
             raise EnvironmentProvisionError(
                 f"test-execution environment provisioning failed before verify: {exc}",
                 "Check read and write access to the project and its test-environment state.",
             ) from exc
+        for notice in result.notices:
+            self.echo(f"[greenfield] verify: {notice}")
         if not result.ok:
             raise EnvironmentProvisionError(
                 "test-execution environment provisioning failed before verify: "

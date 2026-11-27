@@ -105,6 +105,23 @@ tests:
   semantics_adapter: python-test-semantics
   runner_report_adapter: pytest-junit-xml
 
+  environment_assets:
+    playwright-chromium:
+      check:
+        - python
+        - -c
+        - |
+          from playwright.sync_api import sync_playwright
+          with sync_playwright() as driver:
+              browser = driver.chromium.launch(headless=True)
+              browser.close()
+              print(driver.chromium.executable_path)
+      acquire: [python, -m, playwright, install, chromium]
+      check_timeout_seconds: 60
+      manual_hint: >-
+        If the launch diagnostic reports missing OS dependencies, prepare them
+        manually for your system (Playwright command: python -m playwright install-deps chromium).
+
   test_file_globs:
     - "tests/**/*.py"
 

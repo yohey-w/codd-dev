@@ -31,11 +31,15 @@ import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from codd.config import load_project_config
+
+if TYPE_CHECKING:
+    from codd.languages.profile import TestAssetSpec
+    from codd.test_environment import TestEnvironmentDeclaration
 
 
 GENERIC_PROJECT_TYPE = "generic"
@@ -1856,6 +1860,7 @@ class EnvProvisionResult:
     state_path: str | None = None
     next_step: str | None = None
     undeclared_imports: tuple[str, ...] = ()
+    notices: tuple[str, ...] = ()
 
 
 def _provision_python_env(
@@ -1863,11 +1868,13 @@ def _provision_python_env(
     *,
     profile: LayoutProfile,
     propose_dependencies: Callable[[str], str] | None = None,
+    **declaration_options: Any,
 ) -> EnvProvisionResult:
     from codd.languages.adapters.env_python import provision_python_env
 
     return provision_python_env(
         project_root, profile=profile, propose_dependencies=propose_dependencies,
+        **declaration_options,
     )
 
 
@@ -1892,6 +1899,7 @@ def provision_project_env(
     test_dirs: Any = None,
     config: Any = None,
     propose_dependencies: Callable[[str], str] | None = None,
+    test_environment: TestEnvironmentDeclaration | None = None,
 ) -> EnvProvisionResult:
     """Realize the stack's test-execution environment, or a NO-OP if unsupported.
 
@@ -1900,14 +1908,33 @@ def provision_project_env(
     selected by the bridge's ``env_provisioner`` realizer id — never a ``language ==``
     literal. A stack that declares no ``env_provisioner`` (every other language + Go),
     an unknown/unaccepted language, or a stack with no resolvable layout profile is a
-    strict NO-OP (``ok=True, action="unsupported"`` — never a failure, never a venv).
+    strict NO-OP unless a test environment is explicitly declared.
     All paths derive from the resolved :class:`LayoutProfile` (canonical package name
     + roots); nothing is hardcoded.
     """
     root = Path(project_root)
     realizer_id = _legacy_realizer_id(language, "env_provisioner")
     provisioner = _ENV_PROVISIONERS_BY_REALIZER.get(realizer_id) if realizer_id else None
+    assets: dict[str, TestAssetSpec] = {}
+    if test_environment is not None:
+        from codd.languages.registry import UnknownLanguageError, default_registry
+
+        try:
+            tests = default_registry.resolve(language).tests if language else None
+        except UnknownLanguageError:
+            tests = None
+        available = tests.environment_assets if tests else {}
+        for name in test_environment.assets:
+            if name not in available:
+                return EnvProvisionResult(
+                    False, "failed",
+                    f"{test_environment.location}: unknown test asset {name!r} for language {language!r}",
+                    next_step="Use an asset listed in the language profile or remove it from the declaration.",
+                )
+            assets[name] = available[name]
     if provisioner is None:
+        if test_environment is not None:
+            return _unsupported_test_environment(test_environment, language)
         return EnvProvisionResult(
             ok=True,
             action="unsupported",
@@ -1922,12 +1949,36 @@ def provision_project_env(
         project_root=root,
     )
     if profile is None:
+        if test_environment is not None:
+            return _unsupported_test_environment(test_environment, language)
         return EnvProvisionResult(
             ok=True,
             action="unsupported",
             detail=f"no layout profile resolved for language {language!r}",
         )
-    return provisioner(root, profile=profile, propose_dependencies=propose_dependencies)
+    if test_environment is None:
+        return provisioner(root, profile=profile, propose_dependencies=propose_dependencies)
+    return provisioner(
+        root, profile=profile, propose_dependencies=propose_dependencies,
+        declaration=test_environment, asset_specs=assets, config=config,
+    )
+
+
+def _unsupported_test_environment(
+    declaration: TestEnvironmentDeclaration, language: str | None,
+) -> EnvProvisionResult:
+    if declaration.packages:
+        return EnvProvisionResult(
+            False, "failed",
+            f"{declaration.location}: CoDD does not install declared test packages "
+            f"for language {language!r}: {', '.join(declaration.packages)}",
+            next_step="Move the packages to the development dependencies in the project's dependency manifest.",
+        )
+    return EnvProvisionResult(
+        False, "failed",
+        f"{declaration.location}: no environment provisioner for declared test assets in language {language!r}",
+        next_step="Remove those assets from the declaration and prepare them manually.",
+    )
 
 
 def _typescript_layout_profile(

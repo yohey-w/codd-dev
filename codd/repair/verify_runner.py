@@ -888,45 +888,34 @@ class VerifyRunner:
             if self._adapter_registry is not None
             else default_adapter_registry
         )
-        if plan.report_required:
-            from codd.languages.builtin_adapters import (
-                ensure_builtin_adapters_registered,
-            )
-
-            ensure_builtin_adapters_registered(registry)
-            adapter = (
-                registry.get("runner_report", plan.report_adapter)
-                if plan.report_adapter is not None
-                else None
-            )
-            if adapter is None:
-                if contract.profile.strictness == "strict":
-                    self._mark_contract_path()
-                    return (
-                        False,
-                        plan.command_str,
-                        "required runner_report adapter unavailable (strict)",
-                        VerificationFailure(
-                            check_name="test_command",
-                            source="test_command",
-                            message=(
-                                f"strict language {contract.language_id!r} declares a "
-                                f"required runner_report adapter "
-                                f"{plan.report_adapter!r} that is not registered — the "
-                                "executor cannot observe the report, so the run cannot "
-                                "be classified green (fail-closed; RED, no fallback)."
-                            ),
-                            details={
-                                "failure_class": "missing_runner_report_adapter",
-                                "report_adapter": plan.report_adapter,
-                                "language": contract.language_id,
-                            },
+        if not _verify_report_available(plan, registry):
+            if contract.profile.strictness == "strict":
+                self._mark_contract_path()
+                return (
+                    False,
+                    plan.command_str,
+                    "required runner_report adapter unavailable (strict)",
+                    VerificationFailure(
+                        check_name="test_command",
+                        source="test_command",
+                        message=(
+                            f"strict language {contract.language_id!r} declares a "
+                            f"required runner_report adapter "
+                            f"{plan.report_adapter!r} that is not registered — the "
+                            "executor cannot observe the report, so the run cannot "
+                            "be classified green (fail-closed; RED, no fallback)."
                         ),
-                    )
-                # legacy_compatible → pre-execution fallback (NOT a RED).
-                return self._legacy_test_command(
-                    settings, reason="missing_adapter_legacy_compatible", profile=contract.profile
+                        details={
+                            "failure_class": "missing_runner_report_adapter",
+                            "report_adapter": plan.report_adapter,
+                            "language": contract.language_id,
+                        },
+                    ),
                 )
+            # legacy_compatible → pre-execution fallback (NOT a RED).
+            return self._legacy_test_command(
+                settings, reason="missing_adapter_legacy_compatible", profile=contract.profile
+            )
 
         # (6) Run the contract executor. Its verdict is FINAL (no legacy rescue).
         from codd.languages.verify_executor import execute_verify_plan
@@ -996,6 +985,34 @@ class VerifyRunner:
             return None
         env = dict(os.environ)
         env["PATH"] = os.pathsep.join([*prepend, env.get("PATH", "")])
+        return env
+
+    def test_command_environment(self, settings: dict[str, Any]) -> dict[str, str]:
+        """Environment for a preflight command that must see the same assets as tests."""
+        from codd.languages.contract import resolve_language_contract
+        from codd.languages.registry import default_adapter_registry
+        from codd.languages.verify_executor import verify_command_env
+        from codd.languages.verify_plan import build_verify_plan
+        from codd.test_detection import _explicit_test_command
+
+        if not _explicit_test_command(settings) and not structural_only_allowed(settings):
+            contract = resolve_language_contract(
+                settings, language_registry=self._language_registry, adapter_registry=self._adapter_registry,
+            )
+            plan = build_verify_plan(contract) if contract is not None else None
+            registry = self._adapter_registry if self._adapter_registry is not None else default_adapter_registry
+            if plan is not None and (
+                contract.profile.strictness == "strict" or _verify_report_available(plan, registry)
+            ):
+                return verify_command_env(plan.env, self._exec_path_prepend())
+        return self._evidence_spawn_env() or dict(os.environ)
+
+    def _evidence_spawn_env(self) -> dict[str, str] | None:
+        env = _go_aware_env(self.project_root)
+        prepend = self._exec_path_prepend()
+        if prepend:
+            env = dict(env if env is not None else os.environ)
+            env["PATH"] = os.pathsep.join([*prepend, env.get("PATH", "")])
         return env
 
     def _legacy_test_command(
@@ -1167,11 +1184,7 @@ class VerifyRunner:
         # the legacy/explicit-command spawn resolves an unchanged bare ``argv[0]`` the
         # same way (no divergence between the two paths). Empty prepend keeps the env
         # exactly as before (``_go_aware_env`` → None for non-Go = ambient inherit).
-        env = _go_aware_env(self.project_root)  # None → inherit ambient (non-Go)
-        prepend = self._exec_path_prepend()
-        if prepend:
-            env = dict(env if env is not None else os.environ)
-            env["PATH"] = os.pathsep.join([*prepend, env.get("PATH", "")])
+        env = self._evidence_spawn_env()
         observation = VerificationObservation(check_name, command, str(self.project_root), False,
                                               started_at=datetime.now(timezone.utc).isoformat())
         self._observations.append(observation)
@@ -1438,6 +1451,15 @@ class VerifyRunner:
             code_addressable=code_addressable,
             evidence_nodes=_evidence_nodes(failures),
         )
+
+
+def _verify_report_available(plan: VerifyRunPlan, registry: AdapterRegistry) -> bool:
+    if not plan.report_required:
+        return True
+    from codd.languages.builtin_adapters import ensure_builtin_adapters_registered
+
+    ensure_builtin_adapters_registered(registry)
+    return plan.report_adapter is not None and registry.get("runner_report", plan.report_adapter) is not None
 
 
 def run_standalone_verify(
