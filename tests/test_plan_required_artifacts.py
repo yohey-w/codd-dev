@@ -814,47 +814,190 @@ def test_ordering_of_already_separated_waves(tmp_path, monkeypatch, has_dependen
     assert [dep["id"] for dep in entry["depends_on"]].count(base) == 1
 
 
-def test_ordering_keeps_a_pair_already_ordered_the_other_way(tmp_path, monkeypatch):
-    # The rule only exists to order the pair; a plan that orders it the other way
-    # is already ordered and must not become a new planning failure.
-    base, middle, final = "design:base", "design:middle", "design:final"
+@pytest.mark.parametrize("same_wave", [False, True], ids=["separated", "same-wave"])
+def test_ordering_keeps_a_pair_already_ordered_the_other_way(tmp_path, monkeypatch, same_wave):
+    base, middle, final, consumer = "design:base", "design:middle", "design:final", "design:consumer"
     catalog = [
         _catalog_row(base, "Base design"),
         _catalog_row(middle, "Intermediate design"),
         _catalog_row(final, "Final design") | {"ordered_after": [base]},
+        _catalog_row(consumer, "Consumer design"),
     ]
     config_path = _project(tmp_path, catalog)
-    _ordering_selection(tmp_path, monkeypatch, catalog, {base, middle, final})
+    _ordering_selection(tmp_path, monkeypatch, catalog, {base, middle, final, consumer})
+    entries = [
+        _ordering_entry(final), _ordering_entry(middle, final),
+        _ordering_entry(base, middle), _ordering_entry(consumer, base),
+    ]
+    if same_wave:
+        waves = {"1": entries[:3], "2": entries[3:]}
+    else:
+        waves = {str(index): [entry] for index, entry in enumerate(entries, start=1)}
+    prompts = _replies(monkeypatch, _saved_plan(waves))
+
+    result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
+
+    assert result.exit_code == 0, result.output
+    assert len(prompts) == 1
+    reports = [line for line in result.output.splitlines() if "ordered_after" in line]
+    assert len(reports) == int(same_wave)
+    waves = yaml.safe_load(config_path.read_bytes())["wave_config"]
+    assert [entry["node_id"] for entry in waves["1"]] == ([final, middle] if same_wave else [final])
+    assert waves["2" if same_wave else "3"][0]["node_id"] == base
+    assert waves["3" if same_wave else "4"][0]["node_id"] == consumer
+    assert [dep["id"] for dep in waves["2" if same_wave else "3"][0]["depends_on"]] == [middle]
+    assert base not in [dep["id"] for dep in waves["1"][0]["depends_on"]]
+
+
+def test_web_ordering_moves_reverse_same_wave_pair_and_consumers(tmp_path, monkeypatch):
+    # reverse_same_wave: the flow already depends on the API, and both start in wave 4.
+    config_path, catalog = _ordering_project(tmp_path, web=True)
+    transitions, auth, infra = (
+        "design:screen_transitions", "design:auth_authorization_design", "design:infrastructure_design",
+    )
+    selected, _, _ = _ordering_selection(tmp_path, monkeypatch, catalog, {API_ROW, FLOW_ROW, transitions, auth, infra})
+    unaffected = sorted(selected - {"design:requirements", API_ROW, FLOW_ROW, transitions, auth, infra})
     prompts = _replies(monkeypatch, _saved_plan({
-        "1": [_ordering_entry(final)], "2": [_ordering_entry(middle, final)], "3": [_ordering_entry(base, middle)],
+        "4": [_ordering_entry(API_ROW), _ordering_entry(FLOW_ROW, API_NODE), *map(_ordering_entry, unaffected)],
+        "5": [_ordering_entry(transitions, API_NODE, FLOW_NODE)],
+        "6": [_ordering_entry(auth, transitions)],
+        "9": [_ordering_entry(infra, auth)],
     }))
 
     result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
 
     assert result.exit_code == 0, result.output
     assert len(prompts) == 1
-    assert not [line for line in result.output.splitlines() if "ordered_after" in line]
     waves = yaml.safe_load(config_path.read_bytes())["wave_config"]
-    assert [entry["node_id"] for entry in waves["1"]] == [final]
-    assert [entry["node_id"] for entry in waves["3"]] == [base]
-    assert base not in [dep["id"] for dep in waves["1"][0].get("depends_on", [])]
+    assert [entry["node_id"] for entry in waves["4"]] == [API_NODE, *unaffected]
+    assert [dep["id"] for dep in waves["4"][0]["depends_on"]] == [REQ_NODE]
+    assert [entry["node_id"] for entry in waves["5"]] == [FLOW_NODE]
+    assert [dep["id"] for dep in waves["5"][0]["depends_on"]] == [API_NODE]
+    assert [waves[wave][0]["node_id"] for wave in ("6", "7", "9")] == [transitions, auth, infra]
+    report, = [line for line in result.output.splitlines() if "ordered_after" in line]
+    assert f"{FLOW_NODE}, wave 5 after {API_NODE}, wave 4" in report
+
+
+@pytest.mark.parametrize("old_snapshot", [True, False], ids=["missing-field", "explicit-empty"])
+def test_web_ordering_loads_default_rule_for_saved_legacy_selection(tmp_path, monkeypatch, old_snapshot):
+    # old_selection: candidates saved before ordered_after had the same IDs and scopes.
+    config_path, catalog = _ordering_project(tmp_path, web=True)
+    selected, _, _ = _ordering_selection(tmp_path, monkeypatch, catalog, {API_ROW, FLOW_ROW})
+    lexicon_path = tmp_path / "project_lexicon.yaml"
+    lexicon = yaml.safe_load(lexicon_path.read_bytes())
+    snapshot = lexicon["required_artifact_snapshot"]
+    saved_api = snapshot["candidates"][API_ROW]
+    del saved_api["ordered_after"]
+    if not old_snapshot:
+        saved_api["ordered_after"] = []
+    lexicon_path.write_text(yaml.safe_dump(lexicon), encoding="utf-8")
+    prompts = _replies(monkeypatch, _saved_plan({
+        "4": [_ordering_entry(row) for row in sorted(selected - {"design:requirements"})],
+    }))
+
+    result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
+
+    assert result.exit_code == 0, result.output
+    assert len(prompts) == 1 and "ordered_after" not in prompts[0]
+    waves = yaml.safe_load(config_path.read_bytes())["wave_config"]
+    assert FLOW_NODE in [entry["node_id"] for entry in waves["4"]]
+    api = next(entry for entry in waves["5" if old_snapshot else "4"] if entry["node_id"] == API_NODE)
+    assert (FLOW_NODE in [dep["id"] for dep in api["depends_on"]]) == old_snapshot
+    assert api["required_artifact_scope"]["catalog_scope"] == saved_api["scope"]
+    assert yaml.safe_load(lexicon_path.read_bytes())["required_artifact_snapshot"] == snapshot
+
+
+def test_ordering_leaves_an_existing_unrelated_plan_cycle_to_downstream_checks(tmp_path, monkeypatch):
+    # unrelated_ai_cycle: the catalog orders A and B, while the plan cycles C and D.
+    a, b, c, d = "design:a", "design:b", "design:c", "design:d"
+    catalog = [
+        _catalog_row(a, "Design A") | {"ordered_after": [b]},
+        _catalog_row(b, "Design B"), _catalog_row(c, "Design C"), _catalog_row(d, "Design D"),
+    ]
+    config_path = _project(tmp_path, catalog)
+    _ordering_selection(tmp_path, monkeypatch, catalog, {a, b, c, d})
+    entries = [_ordering_entry(a), _ordering_entry(b), _ordering_entry(c, d), _ordering_entry(d, c)]
+    prompts = _replies(monkeypatch, _saved_plan({"4": entries}))
+
+    result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
+
+    assert result.exit_code == 0, result.output
+    assert len(prompts) == 1
+    assert "ordered_after" not in result.output
+    waves = yaml.safe_load(config_path.read_bytes())["wave_config"]
+    actual = {entry["node_id"]: [dep["id"] for dep in entry["depends_on"]] for entry in waves["4"]}
+    assert actual == {a: [REQ_NODE], b: [REQ_NODE], c: [d], d: [c]}
+
+
+def test_ordering_respects_an_indirect_order_created_by_another_rule(tmp_path, monkeypatch):
+    # combined_cycle: two compatible catalog rules encounter cross-dependencies in the plan.
+    a, b, c, d = "design:a", "design:b", "design:c", "design:d"
+    catalog = [
+        _catalog_row(a, "Design A") | {"ordered_after": [b]},
+        _catalog_row(b, "Design B"),
+        _catalog_row(c, "Design C") | {"ordered_after": [d]},
+        _catalog_row(d, "Design D"),
+    ]
+    config_path = _project(tmp_path, catalog)
+    _ordering_selection(tmp_path, monkeypatch, catalog, {a, b, c, d})
+    prompts = _replies(monkeypatch, _saved_plan({
+        "4": [_ordering_entry(a), _ordering_entry(b, c), _ordering_entry(c), _ordering_entry(d, a)],
+    }))
+
+    result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
+
+    assert result.exit_code == 0, result.output
+    assert len(prompts) == 1
+    waves = yaml.safe_load(config_path.read_bytes())["wave_config"]
+    assert [[entry["node_id"] for entry in waves[wave]] for wave in ("4", "5", "6")] == [[b, c], [a], [d]]
+    assert [dep["id"] for dep in waves["6"][0]["depends_on"]] == [a]
+    assert [dep["id"] for dep in waves["4"][1]["depends_on"]] == [REQ_NODE]
 
 
 def test_conflicting_ordering_rules_name_the_rule_and_preserve_saved_files(tmp_path, monkeypatch):
     base, final = "design:base", "design:final"
-    catalog = [
-        _catalog_row(base, "Base design") | {"ordered_after": [final]},
-        _catalog_row(final, "Final design") | {"ordered_after": [base]},
-    ]
+    catalog = [_catalog_row(base, "Base design"), _catalog_row(final, "Final design")]
     config_path = _project(tmp_path, catalog)
     _ordering_selection(tmp_path, monkeypatch, catalog, {base, final})
+    config = yaml.safe_load(config_path.read_bytes())
+    config["required_artifacts"]["default_artifacts"][0]["ordered_after"] = [final]
+    config["required_artifacts"]["default_artifacts"][1]["ordered_after"] = [base]
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
     lexicon_path = tmp_path / "project_lexicon.yaml"
     original_config, original_lexicon = config_path.read_bytes(), lexicon_path.read_bytes()
-    prompts = _replies(monkeypatch, _saved_plan({"2": [_ordering_entry(base), _ordering_entry(final)]}))
+    prompts = _replies(monkeypatch)
 
     result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
 
     assert result.exit_code == 1, result.output
-    assert "ordered_after" in result.output and "dependency cycle" in result.output
-    assert len(prompts) == 1
+    assert f"{base!r} ordered_after {final!r} creates a dependency cycle" in result.output
+    assert prompts == []
     assert config_path.read_bytes() == original_config and lexicon_path.read_bytes() == original_lexicon
+
+
+@pytest.mark.parametrize(("target", "other_field"), [
+    ("design:a", None), ("design:b", "ordered_after"), ("design:b", "depends_on"),
+], ids=["self", "mutual-ordering", "mixed-dependencies"])
+def test_derivation_rejects_catalog_ordering_cycles_before_using_a_response(tmp_path, monkeypatch, target, other_field):
+    # catalog_self_cycle and catalog_cycle_with_prior_edge: a reply cannot excuse a bad catalog.
+    a, b = "design:a", "design:b"
+    catalog = [_catalog_row(a, "Design A") | {"ordered_after": [target]}, _catalog_row(b, "Design B")]
+    if other_field:
+        catalog[1][other_field] = [a]
+    config_path = _project(tmp_path, catalog)
+    original_config = config_path.read_bytes()
+    calls = []
+
+    def invoke(self, prompt, **kwargs):
+        calls.append(prompt)
+        pytest.fail("The catalog must be validated before asking for a selection")
+
+    monkeypatch.setattr(RequiredArtifactsDeriver, "_call_ai", invoke)
+
+    result = _cli(tmp_path, "--derive", "--account-decisions")
+
+    assert result.exit_code == 1, result.output
+    assert f"{a!r} ordered_after {target!r} creates a dependency cycle" in result.output
+    assert calls == []
+    assert config_path.read_bytes() == original_config
+    assert not (tmp_path / "project_lexicon.yaml").exists()

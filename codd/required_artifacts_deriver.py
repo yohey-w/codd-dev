@@ -18,6 +18,7 @@ import yaml
 from codd.ai_invoke import resolve_ai_command
 from codd.claude_cli import with_default_claude_permission_bypass
 from codd.config import load_project_config
+from codd.design_consistency import _depends_on
 from codd.defaults import AI_TIMEOUT_SECONDS as _DEFAULT_AI_TIMEOUT_SECONDS
 from codd.knowledge_fetcher import KnowledgeFetcher
 from codd.lexicon import LEXICON_FILENAME, AskItem, ProjectLexicon, validate_lexicon
@@ -340,7 +341,9 @@ class RequiredArtifactsDeriver:
         """Load project-type defaults, allowing codd.yaml overrides."""
         override_artifacts = self.config.get("default_artifacts")
         if isinstance(override_artifacts, list):
-            return _normalize_defaults(override_artifacts, strict=strict)
+            return _normalize_defaults(
+                override_artifacts, strict=strict, source="required_artifacts.default_artifacts",
+            )
         if strict and "default_artifacts" in self.config:
             raise ValueError("required_artifacts.default_artifacts must be a list")
 
@@ -355,7 +358,7 @@ class RequiredArtifactsDeriver:
         artifacts = payload.get("default_artifacts", [])
         if not isinstance(artifacts, list):
             raise ValueError(f"{defaults_path} default_artifacts must be a list")
-        return _normalize_defaults(artifacts, strict=strict)
+        return _normalize_defaults(artifacts, strict=strict, source=str(defaults_path))
 
     def _load_project_config(self) -> dict[str, Any]:
         try:
@@ -702,14 +705,34 @@ def _decision_ids(
     return ids
 
 
-def _normalize_defaults(artifacts: list, *, strict: bool) -> list[dict[str, Any]]:
+def _normalize_defaults(artifacts: list, *, strict: bool, source: str) -> list[dict[str, Any]]:
     defaults = []
     for index, item in enumerate(artifacts):
         if isinstance(item, dict):
             defaults.append(_normalize_default_artifact(item))
         elif strict:
             raise ValueError(f"default_artifacts[{index}] must be a mapping")
+    validate_catalog_ordering({row["id"].strip(): row for row in defaults}, source=source)
     return defaults
+
+
+def validate_catalog_ordering(candidates: dict[str, dict[str, Any]], *, source: str) -> None:
+    """Reject cycles involving ordered_after, including ones closed by depends_on."""
+    rules = [
+        (row, after) for row, candidate in candidates.items()
+        for after in candidate.get("ordered_after", [])
+    ]
+    if not rules:
+        return
+    dependencies = {
+        row: [dep.strip() for dep in candidate.get("depends_on", [])]
+        for row, candidate in candidates.items()
+    }
+    for row, after in rules:
+        dependencies[row].append(after)
+    for row, after in rules:
+        if after in dependencies and _depends_on(after, row, dependencies):
+            raise ValueError(f"{source}: {row!r} ordered_after {after!r} creates a dependency cycle")
 
 
 def _parse_json_payload(output: str) -> Any:

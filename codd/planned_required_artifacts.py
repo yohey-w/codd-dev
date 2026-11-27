@@ -10,16 +10,18 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from codd.artifact_ids import catalog_id_for
-from codd.design_consistency import is_behavior_document, is_behavior_owner_document
+from codd.design_consistency import _depends_on, is_behavior_document, is_behavior_owner_document
 from codd.frontmatter import codd_block, parse_frontmatter
 from codd.generator import _normalize_dependencies
 from codd.lexicon import validate_lexicon
 from codd.path_safety import resolve_project_path
 from codd.requirements_meta import operation_flow_operations
 from codd.required_artifacts_deriver import (
+    RequiredArtifactsDeriver,
     accounted_lexicon_path,
     artifact_fingerprint,
     lexicon_data_from_yaml,
+    validate_catalog_ordering,
 )
 from codd.verifiable_behavior_audit import (
     _CANONICAL_VB_NODE_ID,
@@ -37,10 +39,6 @@ _DESIGN_ROLES = {
     "owns_operation_flow": "Operational model",
     "owns_actor_facing": "Actor-facing surfaces and copy",
 }
-
-
-class OrderedAfterCycleError(ValueError):
-    """The catalog ordering cannot be applied to a cyclic plan."""
 
 
 def structured_ownership_requirements(
@@ -77,6 +75,7 @@ class RequiredArtifactLineup:
     requirements: dict[str, str]
     existing_rows: set[str]
     registry_rows: set[str]
+    ordering: dict[str, list[str]]
 
     @property
     def planned_ids(self) -> set[str]:
@@ -231,8 +230,8 @@ class RequiredArtifactLineup:
         }
         rules = {
             (nodes_by_row[row], nodes_by_row[after]): f"ordered_after: {row} after {after}"
-            for row, candidate in self.candidates.items() if row in nodes_by_row
-            for after in candidate.get("ordered_after", []) if after in nodes_by_row
+            for row, predecessors in self.ordering.items() if row in nodes_by_row
+            for after in predecessors if after in nodes_by_row
         }
         if not rules:
             return []
@@ -247,46 +246,37 @@ class RequiredArtifactLineup:
             for node, (_, entry) in indexed.items()
         }
 
-        def depends(node: str, target: str) -> bool:
-            stack, seen = [node], set()
-            while stack:
-                current = stack.pop()
-                if current == target:
-                    return True
-                if current not in seen:
-                    seen.add(current)
-                    stack.extend(dependencies.get(current, []))
-            return False
+        try:
+            TopologicalSorter(dependencies).prepare()
+        except CycleError:
+            # Leave cycles in the input plan to the existing downstream checks.
+            return []
 
-        # A plan that already orders the pair the other way is ordered, which is all
-        # the rule exists for; never turn it into a new planning failure.
-        rules = {edge: label for edge, label in rules.items() if not depends(edge[1], edge[0])}
-        if not rules:
-            return []
-        added = {(node, after) for node, after in rules if after not in dependencies[node]}
-        if not added and all(original_waves[node] > original_waves[after] for node, after in rules):
-            return []
-        for node, after in rules:
-            if (node, after) in added:
+        constraints = {}
+        added = set()
+        for (node, after), label in rules.items():
+            # Earlier rules can also give the pair an order through the plan graph.
+            reverse = _depends_on(after, node, dependencies)
+            if reverse:
+                node, after = after, node
+                label += " (using dependency direction)"
+            edge = (node, after)
+            constraints[edge] = label
+            if after not in dependencies[node]:
+                # For an indirect reverse dependency this is only a wave constraint.
                 dependencies[node].append(after)
+                if not reverse:
+                    added.add(edge)
 
         new_waves = original_waves.copy()
-        try:
-            for node in TopologicalSorter(dependencies).static_order():
-                # Only enforce catalog edges and propagate delays from nodes that moved.
-                for after in dependencies[node]:
-                    if (node, after) in rules or new_waves[after] > original_waves[after]:
-                        new_waves[node] = max(new_waves[node], new_waves[after] + 1)
-        except CycleError as exc:
-            cycle = exc.args[1]
-            cycle_rules = [rules[edge] for edge in zip(cycle[1:], cycle) if edge in rules]
-            message = "wave_config contains a dependency cycle: " + " -> ".join(cycle)
-            if cycle_rules:
-                message += " (" + ", ".join(cycle_rules) + ")"
-            raise OrderedAfterCycleError(message) from exc
+        for node in TopologicalSorter(dependencies).static_order():
+            # Only enforce ordering constraints and propagate delays from nodes that moved.
+            for after in dependencies[node]:
+                if (node, after) in constraints or new_waves[after] > original_waves[after]:
+                    new_waves[node] = max(new_waves[node], new_waves[after] + 1)
 
         changes = []
-        for (node, after), label in rules.items():
+        for (node, after), label in constraints.items():
             if (node, after) in added:
                 indexed[node][1].setdefault("depends_on", []).extend(_normalize_dependencies([after]))
             if (node, after) in added or original_waves[node] <= new_waves[after]:
@@ -400,7 +390,19 @@ def load_required_artifact_lineup(
     }
     if len(registry_rows) > 1:
         raise ValueError(f"Several selected rows denote the same canonical registry. {_REDERIVE}")
+    deriver = RequiredArtifactsDeriver(project_root, warn=lambda _message: None)
+    defaults = {row["id"].strip(): row for row in deriver._load_defaults(deriver.project_type)}
+    # Use current rules for old snapshots while preserving the saved selection and scopes.
+    selected_candidates = {
+        artifact_id: {**defaults.get(artifact_id, {}), **(candidates.get(artifact_id) or {})}
+        for artifact_id in rows
+    }
+    validate_catalog_ordering(selected_candidates, source="required_artifact_snapshot.candidates")
+    ordering = {
+        artifact_id: candidate["ordered_after"]
+        for artifact_id, candidate in selected_candidates.items() if candidate.get("ordered_after")
+    }
     return RequiredArtifactLineup(
         project_root, rows, candidates, omissions,
-        requirement_paths, existing_rows, registry_rows,
+        requirement_paths, existing_rows, registry_rows, ordering,
     )

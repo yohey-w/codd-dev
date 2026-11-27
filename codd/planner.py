@@ -29,7 +29,6 @@ from codd.generator import (
 )
 from codd.path_safety import is_glob_decl, resolve_project_path
 from codd.planned_required_artifacts import (
-    OrderedAfterCycleError,
     load_required_artifact_lineup,
     structured_ownership_requirements,
 )
@@ -1723,8 +1722,6 @@ def _invoke_and_parse_wave_config(
             if appendix_root is not None:
                 _reject_appendix_graph_references(wave_config, appendix_root)
             return wave_config
-        except OrderedAfterCycleError:
-            raise
         except ValueError as exc:
             if str(exc).startswith("AI command failed"):
                 raise  # infra failure: retrying the same broken command cannot help
