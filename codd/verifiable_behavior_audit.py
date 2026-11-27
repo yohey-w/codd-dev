@@ -853,10 +853,9 @@ def render_vb_contract(
        is the ONLY set a ``codd: covers vb=<id>`` marker may name; anything else
        (an acceptance-criterion id like ``AC-10``, an invented descriptive id)
        is a deterministic orphan and is rejected. Do not invent/rename ids.
-    2. **Assertion quality** — a marked test must EXECUTE the system under test
-       and assert on the OBSERVED result (return value, raised error, output,
-       produced artifact); constant-only, self-comparing, and SUT-disconnected
-       assertions are rejected.
+    2. **Assertion quality** — attach each marker to an executable test.
+       Assert on the OBSERVED result of running the system under test, directly
+       or through a resolvable same-repository helper that asserts on its input.
     3. **Coverage is completion** — every listed id needs at least one such
        test for the test task to be complete.
 
@@ -906,6 +905,23 @@ def render_vb_contract(
             "prove the behavior and is rejected. Write the expected value "
             "INDEPENDENTLY of the value you compute from the system under test — "
             "never assert a system-derived value against itself.",
+            "- Place each covers marker inside or immediately above the test that "
+            "proves the behavior. Use an executable test declaration recognized by "
+            "the checker and keep the test enabled.",
+            "- Write a recognized assertion directly in the marked test body or call "
+            "a helper whose definition resolves within this repository. Give helpers "
+            "an assertion-style name (for example, an `assert` or `check` prefix). "
+            "Assert on a helper argument or a value derived from it. If a helper "
+            "delegates further, keep the chain short and pass the argument through "
+            "to the assertion.",
+            "- An unresolved external assertion helper supplies no evidence, even "
+            "through a local wrapper. Use external assertions as evidence only when "
+            "the checker recognizes them for the active test profile. You may still "
+            "call such a helper (for example, to wait for a condition), but follow "
+            "it with a recognized assertion on the observed value. Assert on "
+            "the system under test's behavior, including when using library calls "
+            "to obtain observations. Checking library or built-in behavior alone "
+            "supplies no evidence.",
             "",
             "3. COVERAGE IS THE COMPLETION CONDITION — for EVERY id in the closed "
             "list above, at least one test satisfying rule 2 (or an explicit "

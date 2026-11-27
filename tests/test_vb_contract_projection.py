@@ -104,6 +104,24 @@ def test_render_vb_contract_enumerates_closed_list_and_rules(tmp_path):
     assert "COMPLETION CONDITION" in block
 
 
+def test_render_vb_contract_explains_how_to_supply_assertion_evidence(tmp_path):
+    block = render_vb_contract(collect_declared_vb_ids(_make_project(tmp_path)))
+    quality = block.split("2. ASSERTION QUALITY", 1)[1].split("3. COVERAGE", 1)[0]
+
+    assert "inside or immediately above the test" in quality
+    assert "executable test declaration recognized by the checker" in quality
+    assert "keep the test enabled" in quality
+    assert "assertion directly in the marked test body" in quality
+    assert "helper whose definition resolves within this repository" in quality
+    assert "an `assert` or `check` prefix" in quality
+    assert "Assert on a helper argument or a value derived from it." in quality
+    assert "pass the argument through to the assertion" in quality
+    assert "An unresolved external assertion helper supplies no evidence, even through a local wrapper." in quality
+    assert "only when the checker recognizes them for the active test profile" in quality
+    assert "follow it with a recognized assertion on the observed value" in quality
+    assert "Checking library or built-in behavior alone supplies no evidence." in quality
+
+
 def test_render_vb_contract_is_language_free():
     behaviors = load_verifiable_behaviors  # noqa: F841 (referenced for clarity)
     from codd.verifiable_behavior_audit import VerifiableBehavior
