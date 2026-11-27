@@ -19,6 +19,7 @@ default_artifacts:
   - id: "design:api_design"
     title: "API Design"
     depends_on: ["design:system_design"]
+    ordered_after: ["design:screen_flow_design"]
     scope: "REST/GraphQL/RPC endpoints, payload contracts, errors, and versioning"
     condition: "requirements mention API, backend, integration, webhook, or external clients"
   - id: "design:database_design"

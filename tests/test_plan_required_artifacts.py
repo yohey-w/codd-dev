@@ -653,3 +653,208 @@ def test_saved_lineup_retries_invalid_ownership_decisions(tmp_path, monkeypatch,
     assert result.exit_code == 0, result.output
     assert len(prompts) == 2
     assert evidence in prompts[1].split("PREVIOUS RESPONSE WAS REJECTED", 1)[1]
+
+
+API_ROW = "design:api_design"
+FLOW_ROW = "design:screen_flow_design"
+API_NODE = "design:http-contract"
+FLOW_NODE = "design:navigation"
+
+
+def _ordering_project(root, *, web):
+    catalog = None if web else [_catalog_row(API_ROW, "API contract"), _catalog_row(FLOW_ROW, "Navigation")]
+    config_path = _project(root, catalog)
+    if web:
+        config = yaml.safe_load(config_path.read_bytes())
+        config["project"]["type"] = "web"
+        config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+        catalog = RequiredArtifactsDeriver(root)._load_defaults("web")
+    return config_path, catalog
+
+
+def _ordering_selection(root, monkeypatch, catalog, selected, *, accounted=True):
+    selected = selected | {row["id"] for row in catalog if row.get("always_required")}
+    responses = {
+        "required_artifacts": [
+            {
+                "id": row["id"], "title": row["title"], "scope": PROJECT_SCOPE,
+                "source": "ai_derived", "rationale": RATIONALE, "depends_on": [], "requirement_ids": ["R1"],
+            }
+            for row in catalog if row["id"] in selected
+        ],
+        "omitted_artifacts": [
+            {"id": row["id"], "rationale": "Separate coverage is unnecessary."}
+            for row in catalog if row["id"] not in selected
+        ],
+        "unassigned_requirements": [],
+    }
+    calls = []
+
+    def invoke(self, prompt, **kwargs):
+        calls.append((self.ai_command, prompt))
+        return json.dumps(responses)
+
+    monkeypatch.setattr(RequiredArtifactsDeriver, "_call_ai", invoke)
+    flags = ["--account-decisions"] if accounted else []
+    result = _cli(root, "--derive", *flags)
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1 and calls[0][0] == "mock-ai"
+    return selected, result.output, calls[0][1]
+
+
+def _ordering_entry(artifact_id, *dependencies):
+    node = {API_ROW: API_NODE, FLOW_ROW: FLOW_NODE}.get(artifact_id, artifact_id)
+    return _entry(artifact_id, node, f"docs/design/{node.split(':')[1]}.md", *dependencies)
+
+
+@pytest.mark.parametrize(("case", "expected"), [
+    ("no_rule", "84d84012fd4c2eadb5468f502998411b9aa8e3c83b4048b386e1b8bd798835be"),
+    ("api_only", "ac94ec501ad8df97cea8b7b533f5bc6ce72b302891dacd6d08990f949cf9c681"),
+    ("flow_only", "faa66bc6fcc2bb626b00ec1e4678c6e6768883d34ac3b96de2717bba134420aa"),
+    ("plain_init", "615a116a05a0047fa415303effa0d551b82b9bad64e1ec9eadf3d19c78dedcea"),
+])
+def test_ordering_unaffected_plans_match_badf2db(tmp_path, monkeypatch, case, expected):
+    config_path, catalog = _ordering_project(tmp_path, web=case != "no_rule")
+    # A complete fixture lexicon keeps draft timestamps out of the captured prompt.
+    lexicon = {
+        "node_vocabulary": [{"id": "record", "description": "Imported record"}],
+        "naming_conventions": [{"id": "snake", "regex": "[a-z_]+"}],
+        "design_principles": ["Keep transformations reproducible."],
+        "failure_modes": [{"id": "bad_input", "description": "Malformed record"}],
+    }
+    (tmp_path / "project_lexicon.yaml").write_text(yaml.safe_dump(lexicon), encoding="utf-8")
+    chosen = {API_ROW, FLOW_ROW}
+    if case == "api_only":
+        chosen = {API_ROW}
+    elif case == "flow_only":
+        chosen = {FLOW_ROW}
+    selected, selection_output, selection_prompt = _ordering_selection(tmp_path, monkeypatch, catalog, chosen)
+    waves = {"2": [_ordering_entry(row) for row in sorted(selected - {"design:requirements"})]}
+    saved = case != "plain_init"
+    prompts = _replies(monkeypatch, _saved_plan(waves) if saved else waves)
+    flags = ["--use-required-artifacts"] if saved else []
+
+    result = _cli(tmp_path, "--init", *flags, "--no-contract-gate")
+
+    assert result.exit_code == 0, result.output
+    assert len(prompts) == 1
+    wave_bytes = config_path.read_bytes().split(b"\nwave_config:\n", 1)[1].split(b"\ntest_coverage:", 1)[0]
+    # Captured on badf2db with these fixture inputs. No checkout, remote or Git config is needed.
+    trace = [selection_prompt.encode(), selection_output.encode(), prompts[0].encode(), result.output.encode()]
+    trace.append(wave_bytes)
+    assert sha256(b"\0".join(trace)).hexdigest() == expected
+
+
+def test_ordering_legacy_selection_prompt_matches_badf2db(tmp_path, monkeypatch):
+    _, catalog = _ordering_project(tmp_path, web=True)
+    _, _, prompt = _ordering_selection(tmp_path, monkeypatch, catalog, {API_ROW}, accounted=False)
+    assert sha256(prompt.encode()).hexdigest() == "1ed9c183ad500327769d72c7ef3be3f566718b801f32a76f2f536ce360d8f615"
+
+
+@pytest.mark.parametrize("dependency_already_planned", [False, True])
+def test_web_ordering_moves_only_required_waves(tmp_path, monkeypatch, dependency_already_planned):
+    config_path, catalog = _ordering_project(tmp_path, web=True)
+    transitions = "design:screen_transitions"
+    consumer = "design:auth_authorization_design"
+    later = "design:database_design"
+    selected, _, selection_prompt = _ordering_selection(
+        tmp_path, monkeypatch, catalog, {API_ROW, FLOW_ROW, transitions, consumer, later},
+    )
+    api = _ordering_entry(API_ROW, *((FLOW_NODE,) if dependency_already_planned else ()))
+    flow = _ordering_entry(FLOW_ROW) | {"owns_actor_facing": True, "owns_operation_flow": True}
+    unaffected = selected - {"design:requirements", API_ROW, FLOW_ROW, transitions, consumer, later}
+    prompts = _replies(monkeypatch, _saved_plan({
+        "4": [api, flow, *(_ordering_entry(row) for row in sorted(unaffected))],
+        "5": [_ordering_entry(transitions, API_NODE, FLOW_NODE)],
+        "6": [_ordering_entry(consumer, transitions)],
+        "8": [_ordering_entry(later, transitions)],
+    }, {}))
+
+    result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
+
+    assert result.exit_code == 0, result.output
+    assert len(prompts) == 1
+    assert all("ordered_after" not in prompt for prompt in [selection_prompt, *prompts])
+    waves = yaml.safe_load(config_path.read_bytes())["wave_config"]
+    assert [entry["node_id"] for entry in waves["4"]] == [FLOW_NODE, *sorted(unaffected)]
+    api_entry, = waves["5"]
+    assert api_entry["node_id"] == API_NODE
+    assert [dep["id"] for dep in api_entry["depends_on"]].count(FLOW_NODE) == 1
+    assert [entry["node_id"] for entry in waves["6"]] == [transitions]
+    assert [entry["node_id"] for entry in waves["7"]] == [consumer]
+    assert [entry["node_id"] for entry in waves["8"]] == [later]
+    reports = [line for line in result.output.splitlines() if "ordered_after" in line]
+    assert len(reports) == 1 and API_ROW in reports[0] and FLOW_ROW in reports[0]
+
+
+@pytest.mark.parametrize("has_dependency", [False, True])
+def test_ordering_of_already_separated_waves(tmp_path, monkeypatch, has_dependency):
+    base, final = "design:base", "design:final"
+    catalog = [
+        _catalog_row(base, "Base design"),
+        _catalog_row(final, "Final design") | {"ordered_after": [base]},
+    ]
+    config_path = _project(tmp_path, catalog)
+    _ordering_selection(tmp_path, monkeypatch, catalog, {base, final})
+    final_dependencies = [base] if has_dependency else []
+    prompts = _replies(monkeypatch, _saved_plan({
+        "2": [_ordering_entry(base)], "5": [_ordering_entry(final, *final_dependencies)],
+    }))
+
+    result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
+
+    assert result.exit_code == 0, result.output
+    reports = [line for line in result.output.splitlines() if "ordered_after" in line]
+    assert len(reports) == (0 if has_dependency else 1)
+    assert len(prompts) == 1
+    waves = yaml.safe_load(config_path.read_bytes())["wave_config"]
+    assert waves["2"][0]["node_id"] == base
+    entry, = waves["5"]
+    assert entry["node_id"] == final
+    assert [dep["id"] for dep in entry["depends_on"]].count(base) == 1
+
+
+def test_ordering_keeps_a_pair_already_ordered_the_other_way(tmp_path, monkeypatch):
+    # The rule only exists to order the pair; a plan that orders it the other way
+    # is already ordered and must not become a new planning failure.
+    base, middle, final = "design:base", "design:middle", "design:final"
+    catalog = [
+        _catalog_row(base, "Base design"),
+        _catalog_row(middle, "Intermediate design"),
+        _catalog_row(final, "Final design") | {"ordered_after": [base]},
+    ]
+    config_path = _project(tmp_path, catalog)
+    _ordering_selection(tmp_path, monkeypatch, catalog, {base, middle, final})
+    prompts = _replies(monkeypatch, _saved_plan({
+        "1": [_ordering_entry(final)], "2": [_ordering_entry(middle, final)], "3": [_ordering_entry(base, middle)],
+    }))
+
+    result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
+
+    assert result.exit_code == 0, result.output
+    assert len(prompts) == 1
+    assert not [line for line in result.output.splitlines() if "ordered_after" in line]
+    waves = yaml.safe_load(config_path.read_bytes())["wave_config"]
+    assert [entry["node_id"] for entry in waves["1"]] == [final]
+    assert [entry["node_id"] for entry in waves["3"]] == [base]
+    assert base not in [dep["id"] for dep in waves["1"][0].get("depends_on", [])]
+
+
+def test_conflicting_ordering_rules_name_the_rule_and_preserve_saved_files(tmp_path, monkeypatch):
+    base, final = "design:base", "design:final"
+    catalog = [
+        _catalog_row(base, "Base design") | {"ordered_after": [final]},
+        _catalog_row(final, "Final design") | {"ordered_after": [base]},
+    ]
+    config_path = _project(tmp_path, catalog)
+    _ordering_selection(tmp_path, monkeypatch, catalog, {base, final})
+    lexicon_path = tmp_path / "project_lexicon.yaml"
+    original_config, original_lexicon = config_path.read_bytes(), lexicon_path.read_bytes()
+    prompts = _replies(monkeypatch, _saved_plan({"2": [_ordering_entry(base), _ordering_entry(final)]}))
+
+    result = _cli(tmp_path, "--init", "--use-required-artifacts", "--no-contract-gate")
+
+    assert result.exit_code == 1, result.output
+    assert "ordered_after" in result.output and "dependency cycle" in result.output
+    assert len(prompts) == 1
+    assert config_path.read_bytes() == original_config and lexicon_path.read_bytes() == original_lexicon

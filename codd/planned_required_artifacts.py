@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from graphlib import CycleError, TopologicalSorter
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -11,6 +12,7 @@ import yaml
 from codd.artifact_ids import catalog_id_for
 from codd.design_consistency import is_behavior_document, is_behavior_owner_document
 from codd.frontmatter import codd_block, parse_frontmatter
+from codd.generator import _normalize_dependencies
 from codd.lexicon import validate_lexicon
 from codd.path_safety import resolve_project_path
 from codd.requirements_meta import operation_flow_operations
@@ -35,6 +37,10 @@ _DESIGN_ROLES = {
     "owns_operation_flow": "Operational model",
     "owns_actor_facing": "Actor-facing surfaces and copy",
 }
+
+
+class OrderedAfterCycleError(ValueError):
+    """The catalog ordering cannot be applied to a cyclic plan."""
 
 
 def structured_ownership_requirements(
@@ -216,6 +222,83 @@ class RequiredArtifactLineup:
             errors.append(f"No design owner is available in the saved selection. {_REDERIVE}")
         if errors:
             raise ValueError("Saved artifact selection mismatch:\n- " + "\n- ".join(errors))
+
+    def apply_ordering(self, waves: dict[str, list[dict[str, Any]]]) -> list[str]:
+        """Apply selected catalog rules and preserve wave positions wherever possible."""
+        nodes_by_row = {
+            entry["required_artifact_id"]: entry["node_id"]
+            for entries in waves.values() for entry in entries
+        }
+        rules = {
+            (nodes_by_row[row], nodes_by_row[after]): f"ordered_after: {row} after {after}"
+            for row, candidate in self.candidates.items() if row in nodes_by_row
+            for after in candidate.get("ordered_after", []) if after in nodes_by_row
+        }
+        if not rules:
+            return []
+
+        indexed = {
+            entry["node_id"]: (int(wave), entry)
+            for wave, entries in waves.items() for entry in entries
+        }
+        original_waves = {node: wave for node, (wave, _) in indexed.items()}
+        dependencies = {
+            node: [dep["id"] for dep in entry.get("depends_on", []) if dep["id"] in indexed]
+            for node, (_, entry) in indexed.items()
+        }
+
+        def depends(node: str, target: str) -> bool:
+            stack, seen = [node], set()
+            while stack:
+                current = stack.pop()
+                if current == target:
+                    return True
+                if current not in seen:
+                    seen.add(current)
+                    stack.extend(dependencies.get(current, []))
+            return False
+
+        # A plan that already orders the pair the other way is ordered, which is all
+        # the rule exists for; never turn it into a new planning failure.
+        rules = {edge: label for edge, label in rules.items() if not depends(edge[1], edge[0])}
+        if not rules:
+            return []
+        added = {(node, after) for node, after in rules if after not in dependencies[node]}
+        if not added and all(original_waves[node] > original_waves[after] for node, after in rules):
+            return []
+        for node, after in rules:
+            if (node, after) in added:
+                dependencies[node].append(after)
+
+        new_waves = original_waves.copy()
+        try:
+            for node in TopologicalSorter(dependencies).static_order():
+                # Only enforce catalog edges and propagate delays from nodes that moved.
+                for after in dependencies[node]:
+                    if (node, after) in rules or new_waves[after] > original_waves[after]:
+                        new_waves[node] = max(new_waves[node], new_waves[after] + 1)
+        except CycleError as exc:
+            cycle = exc.args[1]
+            cycle_rules = [rules[edge] for edge in zip(cycle[1:], cycle) if edge in rules]
+            message = "wave_config contains a dependency cycle: " + " -> ".join(cycle)
+            if cycle_rules:
+                message += " (" + ", ".join(cycle_rules) + ")"
+            raise OrderedAfterCycleError(message) from exc
+
+        changes = []
+        for (node, after), label in rules.items():
+            if (node, after) in added:
+                indexed[node][1].setdefault("depends_on", []).extend(_normalize_dependencies([after]))
+            if (node, after) in added or original_waves[node] <= new_waves[after]:
+                changes.append(f"{label} ({node}, wave {new_waves[node]} after {after}, wave {new_waves[after]})")
+
+        if new_waves != original_waves:
+            grouped: dict[int, list[dict[str, Any]]] = {}
+            for node, (_, entry) in indexed.items():
+                grouped.setdefault(new_waves[node], []).append(entry)
+            waves.clear()
+            waves.update((str(wave), grouped[wave]) for wave in sorted(grouped))
+        return changes
 
     def annotate_and_report(
         self, waves: dict[str, list[dict[str, Any]]], *, not_applicable: dict[str, str],

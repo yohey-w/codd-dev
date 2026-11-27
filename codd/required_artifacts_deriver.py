@@ -245,7 +245,7 @@ class RequiredArtifactsDeriver:
         defaults: list[dict[str, Any]],
     ) -> str:
         """Build the AI prompt used for artifact derivation."""
-        defaults_yaml = yaml.safe_dump(defaults, sort_keys=False, allow_unicode=True)
+        defaults_yaml = _candidate_prompt_yaml(defaults)
         lines = [
             "You are deriving the complete set of design artifacts needed to implement a project.",
             f"Project type: {project_type}",
@@ -488,6 +488,14 @@ class RequiredArtifactsDeriver:
         return "\n".join(lines)
 
 
+def _candidate_prompt_yaml(candidates: list[dict[str, Any]]) -> str:
+    """Keep planner-only ordering rules out of artifact selection prompts."""
+    return yaml.safe_dump(
+        [{key: value for key, value in row.items() if key != "ordered_after"} for row in candidates],
+        sort_keys=False, allow_unicode=True,
+    )
+
+
 def _accounted_prompt(
     project_type: str,
     requirements: str,
@@ -504,7 +512,7 @@ User decisions from requirement completeness audit:
 {decisions or '(none)'}
 
 Default candidate artifacts for this project type:
-{yaml.safe_dump(defaults, sort_keys=False, allow_unicode=True).rstrip()}
+{_candidate_prompt_yaml(defaults).rstrip()}
 
 Rules:
 - List each candidate ID exactly once, in required_artifacts or omitted_artifacts.
@@ -747,6 +755,13 @@ def _normalize_default_artifact(raw: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(artifact.get(field_name), str) or not artifact[field_name].strip():
             raise ValueError(f"default artifact missing non-empty {field_name}: {raw}")
     artifact["depends_on"] = _string_list(artifact.get("depends_on", []), "depends_on")
+    if "ordered_after" in artifact:
+        predecessors = artifact["ordered_after"]
+        if not isinstance(predecessors, list) or any(
+            not isinstance(item, str) or not item.strip() for item in predecessors
+        ):
+            raise ValueError(f"default artifact {artifact['id']!r}: ordered_after must be a list of IDs")
+        artifact["ordered_after"] = [item.strip() for item in predecessors]
     if "condition" in artifact:
         artifact["condition"] = str(artifact["condition"])
     artifact["always_required"] = bool(artifact.get("always_required", False))
