@@ -459,9 +459,10 @@ def _test_environment_guidance(canonical: bool, language: str | None) -> tuple[s
     ]
     if can_provision_test_packages(language):
         lines.append(
-            "- In `packages`, list registry packages imported by tests or helper processes they start "
-            "that are absent from runtime dependencies. Keep runtime dependencies in the project's dependency "
-            "manifest. Version constraints are optional. Do not use `===`, paths, or URLs."
+            "- In `packages`, list every registry package that tests, or the helper processes and servers "
+            "they start, import or run, including packages that are also runtime dependencies: the "
+            "implementation may not declare them. Write package names only, without versions, paths, or URLs, "
+            "so the list cannot conflict with the project's own requirements."
         )
     else:
         lines.append(
