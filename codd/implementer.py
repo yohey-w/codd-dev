@@ -3840,7 +3840,7 @@ def _build_implementation_prompt(
                 "- When a test measures elapsed time, define for each measured target where it starts, completes and fails, "
                 "correlate them on one monotonic clock, check the measuring path against a response whose completion is known "
                 "and one that is cut short, and on failure record which events and times the verdict used.",
-                "- A test-only TLS certificate (for a local HTTPS or mail server the tests start) MUST become valid well before it is issued (for example, a day earlier) and stay valid beyond the run, so a system clock adjusted during the run cannot make it not yet valid. The readiness check connects with the same trust and name verification the consumer uses and reports the verification reason, time and validity window when it fails.",
+                "- A test-only TLS certificate that tests expect to be valid (for a local HTTPS or mail server the tests start) MUST become valid well before it is issued (for example, a day earlier) and stay valid beyond the run, so a system clock adjusted during the run cannot make it not yet valid; certificates a test deliberately makes invalid or expired are exempt. The readiness check connects with the same trust and name verification the consumer uses and reports the verification reason, time and validity window when it fails.",
                 "",
             ]
         )
