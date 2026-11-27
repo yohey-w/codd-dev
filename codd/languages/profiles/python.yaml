@@ -107,6 +107,7 @@ tests:
 
   environment_assets:
     playwright-chromium:
+      description: Chromium browser binaries used by Playwright tests.
       check:
         - python
         - -c
