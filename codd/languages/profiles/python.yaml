@@ -104,6 +104,14 @@ implement_oracle:
 tests:
   semantics_adapter: python-test-semantics
   runner_report_adapter: pytest-junit-xml
+  feedback_adapter: pytest-feedback
+  feedback_runtime_paths:
+    - "__pycache__/**"
+    - "**/__pycache__/**"
+    - ".pytest_cache/**"
+    - "**/.pytest_cache/**"
+    - "*.pyc"
+  feedback_environment_paths: [".venv"]
 
   environment_assets:
     playwright-chromium:
@@ -151,6 +159,7 @@ tests:
   assertion_hints:
     primitive:
       - assert
+    feedback_callable_assertions: ["pytest.raises", "pytest.warns"]
     libraries:
       - import_path: "pytest"
         functions:

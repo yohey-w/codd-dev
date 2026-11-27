@@ -904,12 +904,14 @@ class Implementer:
         use_derived_steps: bool | None = None,
         sleep: Callable[[float], None] = time.sleep,
         _from_verification: bool = False,
+        _single_attempt: bool = False,
     ) -> None:
         self.project_root = Path(project_root).resolve()
         self.config = config if config is not None else _load_project_config(self.project_root)
         self.ai_command = ai_command
         self.use_derived_steps = _use_derived_steps_enabled(self.config, use_derived_steps)
         self._from_verification = _from_verification
+        self._single_attempt = _single_attempt
         # Injectable backoff between no-usable-output retries (tests stub it to
         # avoid real sleeps); mirrors ai_invoke._invoke_with_recovery's ``sleep``.
         self._sleep = sleep
@@ -924,7 +926,8 @@ class Implementer:
         spec = _normalize_spec_paths(spec)
         protect_requirement_appendix(self.project_root, [Path(path) for path in (*spec.output_paths, *spec.expected_outputs)])
         _check_guard_files_uniqueness(self.project_root, self.config)
-        _create_output_paths(self.project_root, spec.output_paths)
+        if not self._single_attempt:
+            _create_output_paths(self.project_root, spec.output_paths)
 
         design_context = _load_design_context(self.project_root, self.config, spec.design_node)
         node_paths = build_document_node_path_map(self.project_root, self.config)
@@ -982,6 +985,7 @@ class Implementer:
                 dependency_documents=all_documents,
                 project_root=self.project_root,
                 known_design_paths=node_paths.values(),
+                **({"derive": False} if self._single_attempt else {}),
             )
             if self.use_derived_steps
             else None
@@ -1007,6 +1011,9 @@ class Implementer:
         # counts only against the limit for the rejection that triggered it.
         syntax_gate_max_attempts = _syntax_gate_max_attempts(self.config) if gate_active else 1
         no_usable_file_retries = _no_usable_file_retries(self.config)
+        if self._single_attempt:
+            syntax_gate_max_attempts = 1
+            no_usable_file_retries = 0
 
         command = resolved_ai_command
         route: str | None = None
@@ -1090,7 +1097,7 @@ class Implementer:
                         NoUsableGeneratedFiles: "no_usable_output",
                         ImplementSyntaxGateError: "syntax_gate",
                     }.get(type(exc.__cause__))
-                    if route != "one_shot" or fallback_reason is None:
+                    if self._single_attempt or route != "one_shot" or fallback_reason is None:
                         raise
                     route, command = "standard", resolved_ai_command
                     _log_implement_route(
@@ -1270,10 +1277,16 @@ class Implementer:
         one_shot = False
         if select_command is not None and dependency_coverage is not None:
             resolved_ai_command, one_shot = select_command(existing_output_coverage, dependency_coverage)
+        invocation_options: dict[str, Any] = {}
+        if self._single_attempt:
+            from codd.greenfield.implement_test_feedback import STATE_DIRECTORY
+
+            invocation_options = {"recover": False, "file_capture_exclusions": (STATE_DIRECTORY,)}
         try:
             with preserve_requirement_appendix(self.project_root):
                 raw_output = generator_module._invoke_ai_command(
                     resolved_ai_command, prompt, project_root=self.project_root,
+                    **invocation_options,
                 )
         except RequirementAppendixWriteError as exc:
             raise NoUsableGeneratedFiles(str(exc)) from exc
@@ -1309,6 +1322,7 @@ class Implementer:
                 test_root=_test_root_from_config(self.config),
                 existing_output_coverage=existing_output_coverage,
                 one_shot_prompt=prompt if one_shot and not self._from_verification else None,
+                **({"strict_outputs": True} if self._single_attempt else {}),
             )
         except (ImplementSyntaxGateError, _IncompleteExistingOutputError):
             # These write-time rejections have their own retry limits.
@@ -1343,6 +1357,7 @@ def implement_tasks(
     language: str | None = None,
     feedback: str | None = None,
     _from_verification: bool = False,
+    _single_attempt: bool = False,
     **_ignored: Any,
 ) -> list[ImplementationResult]:
     project_root = Path(project_root).resolve()
@@ -1379,6 +1394,7 @@ def implement_tasks(
         ai_command=ai_command,
         use_derived_steps=use_derived_steps,
         _from_verification=_from_verification,
+        **({"_single_attempt": True} if _single_attempt else {}),
     ).run_implement(spec, feedback=feedback)
     return [result]
 
@@ -2044,10 +2060,13 @@ def _implementation_steps_context(
     dependency_documents: list[DependencyDocument],
     project_root: Path,
     known_design_paths: Iterable[Path] = (),
+    derive: bool = True,
 ) -> _ImplementationStepsContext | None:
     from codd.llm.impl_step_deriver import render_impl_steps_for_prompt
 
-    steps = _load_or_derive_implementation_steps(config, spec, dependency_documents, project_root)
+    steps = _load_or_derive_implementation_steps(
+        config, spec, dependency_documents, project_root, **({"derive": False} if not derive else {}),
+    )
     explicit = _filter_layer1_impl_steps([step for step in steps if not step.inferred], config)
     implicit = _filter_layer2_impl_steps([step for step in steps if step.inferred], config)
     if not explicit and not implicit:
@@ -2239,6 +2258,8 @@ def _load_or_derive_implementation_steps(
     spec: ImplementSpec,
     dependency_documents: list[DependencyDocument],
     project_root: Path,
+    *,
+    derive: bool = True,
 ) -> list[Any]:
     from codd.deployment.providers.ai_command import SubprocessAiCommand
     from codd.llm.best_practice_augmenter import SubprocessAiCommandBestPracticeAugmenter
@@ -2256,6 +2277,8 @@ def _load_or_derive_implementation_steps(
     cache_path = impl_step_cache_path(spec, context)
     record = read_impl_step_cache(cache_path)
     steps = list(record.steps) if record is not None else []
+    if not derive:
+        return steps
     explicit = [step for step in steps if not step.inferred]
     implicit = [step for step in steps if step.inferred]
     nodes = _dependency_documents_as_nodes(dependency_documents)
@@ -4103,7 +4126,23 @@ def _write_generated_files(
     test_root: str | None = None,
     existing_output_coverage: _ExistingOutputCoverage | None = None,
     one_shot_prompt: str | None = None,
+    strict_outputs: bool = False,
 ) -> list[Path]:
+    if strict_outputs:
+        from codd.ai_invoke import _CapturedFileOutput
+        from codd.greenfield.implement_test_feedback import DeclaredOutputs
+
+        declared = DeclaredOutputs(project_root, spec.expected_outputs)
+        changed = raw_output.changed_paths if isinstance(raw_output, _CapturedFileOutput) else ()
+        headers = file_block_paths(raw_output)
+        for path in [*headers, *changed]:
+            if not declared.allows(path):
+                raise ValueError(f"write outside declared outputs: {path}")
+        if not headers:
+            from codd.repair.verify_runner import _command_output_tail
+
+            note = _command_output_tail(raw_output, None)
+            raise ValueError(f"no file change proposed: {note}")
     protect_requirement_appendix(project_root, file_block_paths(raw_output))
     file_payloads = _parse_file_payloads(
         raw_output,
@@ -4112,6 +4151,10 @@ def _write_generated_files(
         root_artifact_patterns=root_artifact_patterns,
         test_root=test_root,
     )
+    if strict_outputs:
+        for path, _ in file_payloads:
+            if not declared.allows(Path(path)):
+                raise ValueError(f"write outside declared outputs: {path}")
     from codd.ai_invoke import _CapturedFileOutput
 
     captured_paths = raw_output.captured_paths if isinstance(raw_output, _CapturedFileOutput) else frozenset()
