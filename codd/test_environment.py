@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import shlex
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass
+from enum import Enum, auto
 from pathlib import Path
 
 import yaml
@@ -15,6 +17,7 @@ from codd.languages.profile import TestAssetSpec
 from codd.path_safety import PathEscapeError, resolve_project_path
 from codd.verifiable_behavior_audit import (
     _CANONICAL_VB_OUTPUT_PATH,
+    _DEFAULT_VB_DOC_DIR,
     canonical_vb_wave_entries,
     discover_vb_documents,
 )
@@ -37,9 +40,52 @@ class MissingTestEnvironment(ValueError):
     """The generated strategy omitted its environment declaration."""
 
 
+class TestEnvironmentDocumentRole(Enum):
+    CANONICAL = auto()
+    NONCANONICAL = auto()
+
+
+_Block = tuple[int, str] | ValueError
+_MarkedDeclarations = dict[Path, tuple[_Block, TestEnvironmentDeclaration | ValueError]]
+
+
 def read_test_environment(project_root: Path, config: dict) -> TestEnvironmentDeclaration | None:
     """Detect opt-in before interpreting the settings that locate the strategy."""
     project_root = project_root.resolve()
+    roles, error = resolve_test_environment_documents(project_root, config)
+    marked = _probe_declarations(project_root, roles)
+    if not marked:
+        return None
+    if exc := _first_yaml_error(marked):
+        raise exc
+    if error:
+        raise ValueError(error)
+    for doc, (block, _) in marked.items():
+        if roles[doc] is TestEnvironmentDocumentRole.NONCANONICAL:
+            raise _noncanonical_declaration(doc.relative_to(project_root), block)
+    [(_, declaration)] = marked.values()
+    if isinstance(declaration, ValueError):
+        raise declaration
+    return declaration
+
+
+def test_environment_wave_output(entry: dict) -> str | None:
+    """Use the same wave path spelling for discovery and for writing the document."""
+    output = entry.get("output")
+    node_id = entry.get("node_id") or entry.get("id")
+    if isinstance(output, str) and isinstance(node_id, str) and node_id.strip().casefold().startswith("test:"):
+        return output.strip()
+    return None
+
+
+def resolve_test_environment_documents(
+    project_root: Path, config: dict, *, pending_outputs: Iterable[str] = (),
+) -> tuple[dict[Path, TestEnvironmentDocumentRole], str | None]:
+    """Classify the paths E1 probes, including documents E2 is about to write."""
+    project_root = project_root.resolve()
+    pending = {
+        path for output in pending_outputs if (path := _document_path(project_root, output)) is not None
+    }
     documents = set(discover_vb_documents(project_root))
     pin_paths = _coverage_pin_paths(project_root, config)
     for path in pin_paths.values():
@@ -48,37 +94,31 @@ def read_test_environment(project_root: Path, config: dict) -> TestEnvironmentDe
         except (OSError, PathEscapeError, RuntimeError):
             continue
 
-    for entry in _planned_entries(config):
-        node_id = entry.get("node_id") or entry.get("id")
-        if isinstance(node_id, str) and node_id.strip().casefold().startswith("test:"):
-            if path := _document_path(project_root, entry.get("output"), strip=True):
-                documents.add(path)
-
     default_doc = _document_path(project_root, _CANONICAL_VB_OUTPUT_PATH)
     if default_doc is not None:
         documents.add(default_doc)
-    marked = {doc: block for doc in sorted(documents) if (block := _probe_block(project_root, doc))}
-    if not marked:
-        return None
-    # An empty declaration asks for nothing, so it behaves exactly as no
-    # declaration, whatever the surrounding configuration looks like. Malformed
-    # blocks still stop (``_parse_declaration`` raises for them).
-    if all(not isinstance(block, ValueError) for block in marked.values()) and all(
-        _parse_declaration(doc.relative_to(project_root).as_posix(), *block) is None
-        for doc, block in marked.items()
-    ):
-        return None
+    for entry in _planned_entries(config):
+        if path := _document_path(project_root, test_environment_wave_output(entry)):
+            documents.add(path)
 
-    canonical, error = resolve_test_strategy_path(project_root, config, pin_paths=pin_paths)
-    if error:
-        raise ValueError(error)
-    for doc, block in marked.items():
-        if doc != canonical:
-            raise _noncanonical_declaration(doc.relative_to(project_root), block)
-    block = marked[canonical]
-    if isinstance(block, ValueError):
-        raise block
-    return _parse_declaration(canonical.relative_to(project_root).as_posix(), *block)
+    # A pinned directory can be created by generating a document under it.
+    pin_directories = {
+        pin for pin in pin_paths.values()
+        if pin.is_dir() or (not pin.exists() and any(pin in path.parents for path in pending))
+    }
+    canonical, error = _resolve_test_strategy_path(project_root, config, pin_paths, pin_directories)
+    directories = pin_directories.copy()
+    if default_dir := _document_path(project_root, _DEFAULT_VB_DOC_DIR):
+        directories.add(default_dir)
+    documents.update(
+        path for path in pending
+        if path == canonical or path in pin_paths.values()
+        or (path.match("*.md") and any(directory in path.parents for directory in directories))
+    )
+    return {
+        path: TestEnvironmentDocumentRole.CANONICAL if path == canonical else TestEnvironmentDocumentRole.NONCANONICAL
+        for path in documents
+    }, error
 
 
 def _coverage_pin_paths(project_root: Path, config: dict) -> dict[int, Path]:
@@ -92,15 +132,13 @@ def _coverage_pin_paths(project_root: Path, config: dict) -> dict[int, Path]:
     return pin_paths
 
 
-def resolve_test_strategy_path(
-    project_root: Path, config: dict, *, pin_paths: dict[int, Path] | None = None,
+def _resolve_test_strategy_path(
+    project_root: Path, config: dict, pin_paths: dict[int, Path], pin_directories: set[Path],
 ) -> tuple[Path | None, str | None]:
     """Select the strategy without reading documents, reporting configuration errors separately."""
     waves = config.get("wave_config")
     coverage = config.get("test_coverage")
     pins = coverage.get("docs") if isinstance(coverage, dict) else None
-    if pin_paths is None:
-        pin_paths = _coverage_pin_paths(project_root, config)
     errors: list[str] = []
     if coverage is not None and not isinstance(coverage, dict):
         errors.append("test_coverage must be a mapping")
@@ -122,41 +160,61 @@ def resolve_test_strategy_path(
                 elif any(not isinstance(entry, dict) for entry in entries):
                     errors.append(f"wave_config[{wave!r}] entries must be mappings")
 
-    strategy_output = next((
-        output for entry in canonical_vb_wave_entries(waves, node_only=True)
+    strategy_entry = next((
+        entry for entry in canonical_vb_wave_entries(waves, node_only=True)
         if (output := entry.get("output")) is not None
         and (not isinstance(output, str) or output.strip())
     ), None)
-    if strategy_output is None:
+    if strategy_entry is None:
         pin_path = next(iter(pin_paths.values())) if len(pin_paths) == 1 else None
         canonical = (
-            pin_path if pin_path is not None and not pin_path.is_dir()
+            pin_path if pin_path is not None and pin_path not in pin_directories
             else _document_path(project_root, _CANONICAL_VB_OUTPUT_PATH)
         )
     else:
-        canonical = _document_path(project_root, strategy_output, strip=True)
+        canonical = _document_path(project_root, test_environment_wave_output(strategy_entry))
         if canonical is None:
             errors.append("wave_config test:test-strategy output must be a path inside the project")
     error = f"invalid test strategy configuration: {', '.join(errors)}" if errors else None
     return canonical, error
 
 
-def _noncanonical_declaration(path: Path, block: tuple[int, str] | ValueError) -> ValueError:
+def _noncanonical_declaration(path: Path, block: _Block) -> ValueError:
     location = str(block) if isinstance(block, ValueError) else f"{path}:{block[0]}"
     return ValueError(f"{location}: {_FENCE} declaration is in a noncanonical test document")
 
 
-def _document_path(project_root: Path, value: object, *, strip: bool = False) -> Path | None:
+def _document_path(project_root: Path, value: object) -> Path | None:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
-        return resolve_project_path(project_root, value.strip() if strip else value)
+        return resolve_project_path(project_root, value)
     except RuntimeError:
         # Python versions before 3.13 can raise on a symlink loop.
         return None
 
 
-def _probe_block(project_root: Path, doc: Path) -> tuple[int, str] | ValueError | None:
+def _probe_declarations(project_root: Path, documents: Iterable[Path]) -> _MarkedDeclarations:
+    marked = {}
+    for doc in sorted(documents):
+        if block := _probe_block(project_root, doc):
+            declaration = _parse_block(doc.relative_to(project_root), block)
+            if declaration is not None:
+                marked[doc] = (block, declaration)
+    return marked
+
+
+def _first_yaml_error(marked: _MarkedDeclarations) -> ValueError | None:
+    # E1's opt-in probe parses through empty blocks until the first nonempty
+    # block, unless a broken fence or unreadable document already proves opt-in.
+    if marked and not any(isinstance(block, ValueError) for block, _ in marked.values()):
+        _, declaration = marked[min(marked)]
+        if isinstance(declaration, ValueError):
+            return declaration
+    return None
+
+
+def _probe_block(project_root: Path, doc: Path) -> _Block | None:
     """Find the declaration and retain malformed declarations as opt-in evidence."""
     try:
         if not doc.is_file():
@@ -175,7 +233,7 @@ def _probe_block(project_root: Path, doc: Path) -> tuple[int, str] | ValueError 
     return _find_declaration_block(path, text)
 
 
-def _find_declaration_block(path: str, text: str) -> tuple[int, str] | ValueError | None:
+def _find_declaration_block(path: str, text: str) -> _Block | None:
     body = parse_frontmatter(text, yaml_loader=yaml.BaseLoader).body
     offset = len(text.splitlines()) - len(body.splitlines())
     try:
@@ -191,22 +249,42 @@ def _find_declaration_block(path: str, text: str) -> tuple[int, str] | ValueErro
 
 
 def parse_generated_test_environment(
-    path: Path, text: str, *, canonical: bool, strategy_error: str | None,
+    project_root: Path, doc: Path, text: str, *,
+    roles: dict[Path, TestEnvironmentDocumentRole], strategy_error: str | None,
 ) -> TestEnvironmentDeclaration | None:
     """Check the declaration in a generated document before it is written."""
+    role = roles[doc]
+    path = doc.relative_to(project_root)
     block = _find_declaration_block(path.as_posix(), text)
     if block is None:
-        if canonical:
+        if role is TestEnvironmentDocumentRole.CANONICAL:
             raise MissingTestEnvironment(f"{path}: write exactly one {_FENCE} block")
         return None
-    declaration = None if isinstance(block, ValueError) else _parse_declaration(path.as_posix(), *block)
-    if strategy_error and (isinstance(block, ValueError) or declaration is not None):
+    declaration = _parse_block(path, block)
+    if declaration is None:
+        return None
+    if isinstance(declaration, ValueError) and not isinstance(block, ValueError):
+        marked = _probe_declarations(project_root, roles.keys() - {doc})
+        marked[doc] = (block, declaration)
+        if _first_yaml_error(marked) is declaration:
+            raise declaration
+    if strategy_error:
         raise ValueError(strategy_error)
-    if not canonical:
+    if role is TestEnvironmentDocumentRole.NONCANONICAL:
         raise _noncanonical_declaration(path, block)
-    if isinstance(block, ValueError):
-        raise block
+    if isinstance(declaration, ValueError):
+        raise declaration
     return declaration
+
+
+def _parse_block(path: Path, block: _Block) -> TestEnvironmentDeclaration | ValueError | None:
+    if isinstance(block, ValueError):
+        return block
+    try:
+        return _parse_declaration(path.as_posix(), *block)
+    except ValueError as exc:
+        # Retain malformed blocks while deciding which diagnostic to report.
+        return exc
 
 
 class _TestEnvironmentLoader(StrictDesignLoader):

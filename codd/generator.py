@@ -61,8 +61,10 @@ from codd.requirement_appendix import protect_requirement_appendix, with_require
 from codd.requirements_meta import normalize_operation_flow, ui_pattern_choices
 from codd.test_environment import (
     MissingTestEnvironment,
+    TestEnvironmentDocumentRole,
     parse_generated_test_environment,
-    resolve_test_strategy_path,
+    resolve_test_environment_documents,
+    test_environment_wave_output,
 )
 from codd.verifiable_behavior_audit import VB_BLOCKER_SCOPE_GUIDANCE
 
@@ -1078,6 +1080,8 @@ def generate_wave(
     force: bool = False,
     ai_command: str | None = None,
     feedback: str | None = None,
+    *,
+    environment_language: str | None = None,
 ) -> list[GenerationResult]:
     """Generate or skip all documents configured for a wave."""
     config = _load_project_config(project_root)
@@ -1086,7 +1090,9 @@ def generate_wave(
     if not selected:
         raise ValueError(f"wave_config has no entries for wave {wave}")
 
-    generate_artifact = _artifact_generator(project_root, config, artifacts, ai_command)
+    generate_artifact = _artifact_generator(
+        project_root, config, artifacts, ai_command, environment_language=environment_language,
+    )
 
     results: list[GenerationResult] = []
     for artifact in selected:
@@ -1111,8 +1117,14 @@ def generate_wave(
 
 def _artifact_generator(
     project_root: Path, config: dict[str, Any], artifacts: list[WaveArtifact], ai_command: str | None,
+    *, environment_language: str | None = None,
 ) -> Callable[..., GenerationResult]:
     from codd.scanner import build_document_node_path_map
+
+    root = project_root.resolve()
+    environment_roles, strategy_error = resolve_test_environment_documents(
+        root, config, pending_outputs=(artifact.output for artifact in artifacts),
+    )
 
     resolved_ai_command = _resolve_ai_command(config, ai_command, command_name="generate")
     return partial(
@@ -1127,6 +1139,9 @@ def _artifact_generator(
         capabilities=_resolve_generation_capabilities(config, project_root),
         project_language=_resolve_project_language(config),
         layout_placement=_resolve_layout_placement_contract(config, project_root),
+        environment_roles=environment_roles,
+        environment_language=environment_language,
+        strategy_error=strategy_error,
     )
 
 
@@ -1142,6 +1157,9 @@ def _generate_one_artifact(
     body_max_retries: int,
     capabilities: "ProjectCapabilities | None",
     project_language: str | None,
+    environment_roles: dict[Path, TestEnvironmentDocumentRole],
+    environment_language: str | None,
+    strategy_error: str | None,
     layout_placement: str = "",
     feedback: str | None,
     drafts: dict[str, str | None] | None = None,
@@ -1182,29 +1200,21 @@ def _generate_one_artifact(
         document_node_paths | {peer.node_id: Path(peer.output) for peer in context}, drafts=drafts,
     )
     environment_guidance: tuple[str, ...] = ()
-    environment_path = None
-    canonical_environment = False
-    strategy_error = None
-    if not _is_test_code_output(artifact.output):
-        root = project_root.resolve()
-        target = resolve_project_path(root, artifact.output)
-        strategy, strategy_error = resolve_test_strategy_path(root, config)
-        canonical_environment = target is not None and target == strategy
-        if canonical_environment or _infer_doc_type(artifact.output) == "test" or (
-            output_path.suffix.casefold() in {".md", ".markdown"}
-            and artifact.node_id.strip().casefold().startswith("test:")
-        ):
-            environment_path = target.relative_to(root) if target is not None else Path(artifact.output)
-    project = config.get("project")
-    language = project.get("language") if isinstance(project, dict) else None
-    environment_language = language if isinstance(language, str) else None
-    if environment_path is not None:
+    root = project_root.resolve()
+    target = resolve_project_path(root, artifact.output)
+    role = environment_roles.get(target) if target is not None else None
+    canonical_environment = role is TestEnvironmentDocumentRole.CANONICAL
+    if canonical_environment:
+        from codd.greenfield.pipeline import resolve_verify_language
+
+        environment_language = resolve_verify_language(config, language=environment_language, project_root=root)
+    if role is not None:
         environment_guidance = _test_environment_guidance(canonical_environment, environment_language)
 
     def check_environment(text: str) -> None:
-        if environment_path is not None:
+        if target is not None and role is not None:
             declaration = parse_generated_test_environment(
-                environment_path, text, canonical=canonical_environment, strategy_error=strategy_error,
+                root, target, text, roles=environment_roles, strategy_error=strategy_error,
             )
             if declaration is not None:
                 validate_declared_test_environment(declaration, environment_language)
@@ -1240,7 +1250,7 @@ def _generate_one_artifact(
         nonlocal validate_contract
         if managed or check_emitted_contract:
             validate_contract = validate_contract or has_behavior_contract(body)
-        if not validate_contract and environment_path is None:
+        if not validate_contract and role is None:
             return
         text = render(body)
         if validate_contract:
@@ -1266,7 +1276,7 @@ def _generate_one_artifact(
         project_language=project_language,
         layout_placement=layout_placement,
         behavior_contract=managed, contract_is_required=lambda: validate_contract,
-        validate_body=check_candidate if managed or check_emitted_contract or environment_path is not None else None,
+        validate_body=check_candidate if managed or check_emitted_contract or role is not None else None,
         operation_flow_owner_elsewhere=operation_flow_owner_elsewhere,
         test_environment_guidance=environment_guidance,
     )
@@ -1287,6 +1297,7 @@ def regenerate_artifact(
     output_path: str | None = None,
     feedback: str | None = None,
     ai_command: str | None = None,
+    environment_language: str | None = None,
 ) -> GenerationResult:
     """Regenerate a SINGLE wave artifact in place, scoped to one document.
 
@@ -1327,12 +1338,15 @@ def regenerate_artifact(
         target = node_id or output_path
         raise ValueError(f"wave_config has {len(matched)} artifacts matching {target!r}; ambiguous")
 
-    generate_artifact = _artifact_generator(project_root, config, artifacts, ai_command)
+    generate_artifact = _artifact_generator(
+        project_root, config, artifacts, ai_command, environment_language=environment_language,
+    )
     return generate_artifact(artifact=matched[0], feedback=feedback)
 
 
 def reconcile_generated_design(
     project_root: Path, *, ai_command: str | None = None, wave: int | None = None,
+    environment_language: str | None = None,
 ) -> None:
     """Reconcile already-written reports before the usual end-of-generation checks."""
     try:
@@ -1346,7 +1360,9 @@ def reconcile_generated_design(
             reporters = {issue.reporter for issue in exc.disagreements}
             if not any(artifact.wave == wave and artifact.output in reporters for artifact in artifacts):
                 return
-        generate_artifact = _artifact_generator(project_root, config, artifacts, ai_command)
+        generate_artifact = _artifact_generator(
+            project_root, config, artifacts, ai_command, environment_language=environment_language,
+        )
         if _reconcile_upstream_design(
             project_root, config, artifacts, generate_artifact, exc, complete=wave is None,
         ) is None:
@@ -1896,6 +1912,11 @@ def _load_wave_artifacts(
                 raise ValueError(
                     f"wave_config[{wave_key!r}] entry is missing required fields: {', '.join(missing)}"
                 )
+            output = test_environment_wave_output(entry)
+            if output is None:
+                output = str(entry["output"])
+            elif not output:
+                raise ValueError(f"wave_config[{wave_key!r}] test output must be a nonempty path")
 
             owners = None
             owns_operation_flow = None
@@ -1934,7 +1955,7 @@ def _load_wave_artifacts(
                 WaveArtifact(
                     wave=wave,
                     node_id=str(entry["node_id"]),
-                    output=str(entry["output"]),
+                    output=output,
                     title=str(entry["title"]),
                     depends_on=_normalize_dependencies(entry.get("depends_on", [])),
                     conventions=_normalize_conventions(entry.get("conventions", [])),

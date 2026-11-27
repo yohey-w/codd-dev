@@ -4,8 +4,15 @@ import pytest
 import yaml
 
 from codd import generator
+from codd.greenfield.pipeline import (
+    EnvironmentProvisionError,
+    GreenfieldPipeline,
+    load_session,
+    new_session,
+    save_session,
+)
 from codd.languages.adapters import env_python
-from codd.project_types import provision_project_env
+from codd.project_types import EnvProvisionResult, provision_project_env
 from codd.test_environment import read_test_environment
 
 
@@ -148,9 +155,8 @@ def test_valid_environment_succeeds_first_attempt(author, capsys):
     assert capsys.readouterr().err == ""
 
 
-@pytest.mark.parametrize("packages", [[], ["test-helpers"]], ids=["empty", "nonempty"])
-def test_noncanonical_environment_is_rejected(author, packages):
-    project, _, prompts = author(*[BODY + environment(packages=packages)] * 3, entries=[artifact(
+def test_noncanonical_environment_is_rejected(author):
+    project, _, prompts = author(*[BODY + environment(packages=["test-helpers"])] * 3, entries=[artifact(
         ARCHIVE, "test:archive",
     )])
     with pytest.raises(ValueError, match="declaration is in a noncanonical test document"):
@@ -158,6 +164,129 @@ def test_noncanonical_environment_is_rejected(author, packages):
     assert len(prompts) == 3
     assert all(NO_DECLARATION in prompt and INSTRUCTION not in prompt for prompt in prompts)
     assert not (project / ARCHIVE).exists()
+
+
+@pytest.mark.parametrize("pins", [
+    ["docs/qa/smoke.md", "docs/qa/integration.md"],
+    ["docs/qa"],
+], ids=["multiple-files", "directory"])
+def test_pinned_noncanonical_environment_matches_verification(author, pins):
+    candidate = "docs/qa/smoke.md"
+    body = BODY + environment(packages=["demo-helper>=1"])
+    project, config, prompts = author(
+        body, body, body, entries=[artifact(candidate, "design:smoke")],
+        test_coverage={"docs": pins},
+    )
+    path = project / candidate
+    path.parent.mkdir(parents=True)
+    (path.parent / "integration.md").write_text(BODY, encoding="utf-8")
+    assert_rejection_matches_verification(project, config, path, body, "noncanonical test document")
+    assert len(prompts) == 3 and all(NO_DECLARATION in prompt for prompt in prompts)
+
+
+@pytest.mark.parametrize(("has_strategy", "reason"), [
+    (True, "noncanonical test document"),
+    (False, "version must be the integer 1"),
+], ids=["active-strategy", "malformed-archive-only"])
+def test_malformed_noncanonical_environment_matches_verification(author, has_strategy, reason):
+    archive = "docs/test/z_archive/test_strategy.md"
+    body = BODY + environment(version=2)
+    project, config, prompts = author(body, body, body, entries=[artifact(archive, "test:archive")])
+    path = project / archive
+    path.parent.mkdir(parents=True)
+    if has_strategy:
+        (project / STRATEGY).write_text(BODY + environment(packages=["demo-helper>=1"]), encoding="utf-8")
+    assert_rejection_matches_verification(project, config, path, body, reason)
+    assert len(prompts) == 3 and all(NO_DECLARATION in prompt for prompt in prompts)
+
+
+def assert_rejection_matches_verification(project, config, path, body, reason):
+    [planned] = generator._load_wave_artifacts(config)
+    path.write_text(generator._render_document(planned, [], [], body), encoding="utf-8")
+    with pytest.raises(ValueError, match=reason) as verify:
+        read_test_environment(project, config)
+    path.unlink()
+    with pytest.raises(ValueError) as generate:
+        generator.generate_wave(project, 1)
+    assert str(generate.value) == str(verify.value)
+    assert not path.exists()
+
+
+def test_strategy_wave_path_trailing_space_matches_verification(author):
+    project, config, prompts = author(
+        BODY + environment(packages=["demo-helper>=1"]), entries=[artifact(STRATEGY + " ")],
+    )
+    [result] = generator.generate_wave(project, 1)
+    assert result.path == project / STRATEGY
+    assert not (project / (STRATEGY + " ")).exists()
+    assert len(prompts) == 1 and INSTRUCTION in prompts[0]
+    declaration = read_test_environment(project, config)
+    assert declaration.packages == ("demo-helper>=1",)
+    assert declaration.location.startswith(f"{STRATEGY}:")
+
+
+@pytest.mark.parametrize("existing", [True, False], ids=["existing-archive", "generated-archive"])
+def test_empty_noncanonical_environment_matches_verification(author, existing):
+    archive = BODY + environment()
+    valid = BODY + environment(packages=["demo-helper>=1"])
+    project, config, prompts = author(
+        valid, archive, entries=[artifact(), artifact(ARCHIVE, "test:archive")],
+    )
+    path = project / ARCHIVE
+    if existing:
+        path.parent.mkdir(parents=True)
+        path.write_text(archive, encoding="utf-8")
+        assert read_test_environment(project, config) is None
+    canonical, archived = generator.generate_wave(project, 1)
+    assert canonical.status == "generated"
+    assert archived.status == ("skipped" if existing else "generated")
+    assert len(prompts) == (1 if existing else 2)
+    assert "packages: []" in path.read_text(encoding="utf-8")
+    assert read_test_environment(project, config).packages == ("demo-helper>=1",)
+
+
+@pytest.mark.parametrize(("configured", "saved"), [("python", "go"), ("go", "python")])
+def test_saved_language_matches_verification(author, monkeypatch, configured, saved):
+    packages = ("demo-helper>=1",)
+    body = BODY + environment(packages=packages)
+    project, config, prompts = author(body, body, body, language=configured)
+    save_session(project, new_session({"language": saved}))
+    installed = []
+    success = EnvProvisionResult(True, "provisioned", "")
+
+    def prepare(root, *_):
+        state = root / ".codd/verify/exec_env.json"
+        state.parent.mkdir(parents=True)
+        state.write_text("{}", encoding="utf-8")
+        return success
+
+    def install(root, declaration):
+        installed.append(declaration.packages)
+        return success
+
+    monkeypatch.setattr(env_python, "_provision_python_base_env", prepare)
+    monkeypatch.setattr(env_python, "_install_test_packages", install)
+    pipeline = GreenfieldPipeline(echo=lambda _: None)
+    pipeline._restore_session_options(load_session(project))
+
+    if saved == "go":
+        [planned] = generator._load_wave_artifacts(config)
+        path = project / STRATEGY
+        path.parent.mkdir(parents=True)
+        path.write_text(generator._render_document(planned, [], [], body), encoding="utf-8")
+        with pytest.raises(EnvironmentProvisionError, match="for language 'go'") as verify:
+            pipeline._provision_env(project)
+        path.unlink()
+        with pytest.raises(ValueError) as generate:
+            generator.generate_wave(project, 1)
+        assert str(verify.value).endswith(str(generate.value))
+        assert not installed
+        assert len(prompts) == 3 and "Keep `packages` empty" in prompts[0]
+    else:
+        generator.generate_wave(project, 1)
+        pipeline._provision_env(project)
+        assert installed == [packages]
+        assert len(prompts) == 1 and "list registry packages" in prompts[0]
 
 
 def test_wave_strategy_wins_over_same_basename_and_pin(author):
