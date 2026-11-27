@@ -28,9 +28,13 @@ _MISSING_IMPORT = re.compile(
     r"['\"]([\w.]+)['\"]",
     re.MULTILINE,
 )
-_MISSING_EXECUTABLE = re.compile(
-    r"^(?:[^:\n]+/)?(?:ba|da|z|k)?sh: [^\n]+: (?:command )?not found\s*$",
-    re.MULTILINE,
+_CHILD_EXECUTION_ERRORS = {
+    126: "test environment denied access to an executable",
+    127: "test executable unavailable",
+}
+_SHELL_EXECUTION_ERROR = re.compile(
+    r"\b(?:ba|da|z|k)?sh:[^\r\n]*?: (?P<problem>(?:command )?not found|permission denied)\b",
+    re.IGNORECASE,
 )
 
 
@@ -38,19 +42,31 @@ def pytest_configure(config):
     config.pluginmanager.register(_Probe(), "codd-feedback-observer")
 
 
+def _exception_children(exc):
+    for cause in (exc.__cause__, exc.__context__):
+        if cause is not None:
+            yield cause
+    # Exception groups, including the backport, expose a tuple of exceptions.
+    members = getattr(exc, "exceptions", None)
+    if isinstance(members, tuple):
+        yield from (member for member in members if isinstance(member, BaseException))
+
+
 def _exception_chain(exc, seen):
     if exc is None or id(exc) in seen:
         return
     seen.add(id(exc))
-    yield from _exception_chain(exc.__cause__, seen)
-    yield from _exception_chain(exc.__context__, seen)
-    # Exception groups, including the backport, expose a tuple of exceptions.
-    members = getattr(exc, "exceptions", None)
-    if isinstance(members, tuple):
-        for member in members:
-            if isinstance(member, BaseException):
-                yield from _exception_chain(member, seen)
+    for child in _exception_children(exc):
+        yield from _exception_chain(child, seen)
     yield exc
+
+
+def _shell_launch_problem(output):
+    # A captured diagnostic can be embedded in an assertion message or repr.
+    if match := _SHELL_EXECUTION_ERROR.search(output):
+        status = 126 if match["problem"].lower() == "permission denied" else 127
+        return f"{_CHILD_EXECUTION_ERRORS[status]}: {match[0]}"
+    return None
 
 
 class _Probe:
@@ -121,13 +137,13 @@ class _Probe:
             problem = self._environment_problem(chain, report.capstdout, report.capstderr)
             if problem:
                 self.environment.append(problem)
-            tracebacks = [self._project_frames(error) for error in chain]
-            origin = next((paths[-1] for paths in tracebacks if paths), "")
+            origins, paths = self._failure_paths(chain)
             self.failures.append({
                 "case": case,
                 "file": file,
-                "origin": origin,
-                "paths": list(dict.fromkeys(path for paths in tracebacks for path in paths)),
+                "origin": origins[0] if origins else "",
+                "origins": origins,
+                "paths": paths,
                 "phase": report.when,
                 "detail": str(report.longrepr),
             })
@@ -175,6 +191,20 @@ class _Probe:
             tb = tb.tb_next
         return paths
 
+    def _failure_paths(self, chain):
+        frames = []
+        origins = {}
+        for error in chain:
+            paths = self._project_frames(error)
+            frames.extend(paths)
+            # Use the deepest project frame of each branch. Wrapping an
+            # exception in the test itself doesn't make the test its origin.
+            child_origins = dict.fromkeys(
+                origin for child in _exception_children(error) for origin in origins.get(id(child), ())
+            )
+            origins[id(error)] = list(child_origins) or paths[-1:]
+        return (origins[id(chain[-1])] if chain else []), list(dict.fromkeys(frames))
+
     def _external_import(self, module):
         top = module.split(".", 1)[0]
         return not any(
@@ -190,9 +220,11 @@ class _Probe:
             if isinstance(exc, ImportError) and exc.path and not self._project_path(exc.path):
                 return f"external import could not be loaded: {exc}"
             if isinstance(exc, subprocess.CalledProcessError):
-                if exc.returncode == 127:
-                    return f"test executable unavailable: {exc}"
+                if reason := _CHILD_EXECUTION_ERRORS.get(exc.returncode):
+                    return f"{reason}: {exc}"
                 outputs.extend((exc.stdout, exc.stderr))
+            if isinstance(exc, AssertionError) and (problem := _shell_launch_problem(str(exc))):
+                return problem
             if isinstance(exc, (PermissionError, ConnectionError)):
                 return f"test environment denied access: {exc}"
             if not isinstance(exc, AssertionError) and _ENVIRONMENT_DIAGNOSTIC.search(str(exc)):
@@ -213,8 +245,8 @@ class _Probe:
                 for match in _MISSING_IMPORT.finditer(output):
                     if self._external_import(match[1]):
                         return f"external import could not be loaded: {match[0].strip()}"
-                if match := _MISSING_EXECUTABLE.search(output):
-                    return f"test executable unavailable: {match[0].strip()}"
+                if problem := _shell_launch_problem(output):
+                    return problem
                 if match := _ENVIRONMENT_DIAGNOSTIC.search(output):
                     return f"test environment denied access: {match[0]}"
         return None

@@ -103,9 +103,13 @@ def test_environment_write_discards_and_reprovisions(project_factory, audit_fail
     assert _trace(trace)[-3:] == ["provision", "verify", "suite"]
 
 
-def test_candidate_test_cannot_leave_an_undeclared_write(project_factory):
+def test_candidate_test_write_is_restored_before_each_run_and_round_end(project_factory):
     candidate = "from pathlib import Path\n\n" + FIXED.replace(
-        "    actual = [7][0]", "    Path('settings.txt').write_text('candidate')\n    actual = [7][0]",
+        "    actual = [7][0]",
+        "    settings = Path('settings.txt')\n"
+        "    assert settings.read_bytes() == b'original\\r\\n'\n"
+        "    settings.write_text('candidate')\n"
+        "    actual = [7][0]",
     )
     pipeline, root, _, _ = project_factory(fixes={"case": {"files": {TEST_FILE: candidate}}})
     settings = root / "settings.txt"
@@ -120,9 +124,9 @@ def test_candidate_test_cannot_leave_an_undeclared_write(project_factory):
     result = pipeline.run(root)
     assert result.status == "success", result.error
     [attempt] = _round(root)["attempts"]
-    assert attempt["decision"] == "rejected"
-    assert "write outside declared outputs: settings.txt" in attempt["reason"]
-    assert "[7][1]" in (root / TEST_FILE).read_text()
+    assert attempt["decision"] == "accepted"
+    assert attempt["suite_after"] == attempt["isolated_after"] == 0
+    assert "[7][0]" in (root / TEST_FILE).read_text()
 
 
 def test_round_cleanup_keeps_accepted_output_and_restores_suite_side_effects(project_factory):

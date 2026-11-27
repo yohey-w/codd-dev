@@ -290,12 +290,15 @@ class _Suite:
     unavailable: str | None = None
     timed_out: bool = False
     collection_errors: dict[str, str] = field(default_factory=dict)
-    writes: dict[str, _Entry | None] = field(default_factory=dict)
 
 
 def _writes(before, after):
     return {rel: after.get(rel) for rel in before.keys() | after.keys()
             if before.get(rel) != after.get(rel)}
+
+
+def _failure_origins(failure):
+    return failure.get("origins") or (failure["origin"],)
 
 
 class _Feedback:
@@ -313,7 +316,6 @@ class _Feedback:
         self.callable_assertions = callable_assertions
         self.snapshot = _Snapshot(root, tuple(state["ignored"]), state["environment_paths"])
         self.target: dict[str, _Entry] = {}
-        self.isolation_writes: dict[str, dict[str, _Entry | None]] = {}
         self.environment_dirty = False
         self.outputs = {task.task_id: DeclaredOutputs(root, task.expected_outputs) for task in tasks}
         self.logs = {AUDIT_RELATIVE_PATH}
@@ -345,7 +347,6 @@ class _Feedback:
         except (OSError, ValueError) as exc:
             return f"cannot snapshot project artifacts: {exc}"
         self.environment_dirty = False
-        self.isolation_writes.clear()
         round_record["baseline_saved"] = True
         self.pipeline._checkpoint(self.root)
         return None
@@ -385,8 +386,6 @@ class _Feedback:
                     scratch, process.returncode, _command_output_tail(strip_ansi(out), strip_ansi(err)),
                 )
                 result = _Suite(cases, failures, unavailable, collection_errors=collection_errors)
-                if not result.unavailable:
-                    result.writes = _writes(target, self.snapshot.capture())
         except subprocess.TimeoutExpired:
             result = _Suite(unavailable=f"test command exceeded {timeout:g}s", timed_out=True)
         except (OSError, ValueError) as exc:
@@ -423,13 +422,16 @@ class _Feedback:
         return bool(path) and any(Path(path).is_relative_to(root) for root in self.test_roots)
 
     def owner(self, failure) -> str | None:
-        path = Path(failure["origin"])
-        if not self.in_test_tree(failure["origin"]) or any(
-            not self.in_test_tree(frame) for frame in failure.get("paths", ())
-        ):
+        origins = _failure_origins(failure)
+        if not all(self.in_test_tree(path) for path in (*origins, *failure.get("paths", ()))):
             return None
-        owners = [owner for owner, outputs in self.outputs.items() if outputs.allows(path)]
-        return owners[0] if len(owners) == 1 else None
+        owners = set()
+        for origin in origins:
+            matches = [owner for owner, outputs in self.outputs.items() if outputs.allows(Path(origin))]
+            if len(matches) != 1:
+                return None
+            owners.add(matches[0])
+        return next(iter(owners)) if len(owners) == 1 else None
 
     def screen(self, round_record, suite) -> str | None:
         screened = round_record["screened"]
@@ -456,7 +458,6 @@ class _Feedback:
                 for f in isolated.failures if [f["origin"], f["phase"]] in signature
             ]
             screened[case] = [signature, reproduced]
-            self.isolation_writes[case] = isolated.writes
             passed = round_record.setdefault("passed_cases", [])
             if isolated.cases.get(case) == "passed" and case not in passed:
                 passed.append(case)
@@ -502,7 +503,7 @@ class _Feedback:
 
     @staticmethod
     def has_helper(failures) -> bool:
-        return any(f["origin"] != f["file"] for f in failures)
+        return any(origin != f["file"] for f in failures for origin in _failure_origins(f))
 
     def integrity_problem(self, before, after) -> str | None:
         for rel in sorted(before.keys() | after.keys()):
@@ -542,21 +543,6 @@ class _Feedback:
             return f"write outside declared outputs: {', '.join(sorted(outside))}"
         return self.integrity_problem(before, after)
 
-    def check_writes(self, owner, target, writes, expected_writes) -> str | None:
-        # Repeatable suite side effects are discarded. New writes by the
-        # candidate must still respect the same output boundary as the agent.
-        outputs = self.outputs[owner]
-        if any(outputs.matches(Path(rel)) for rel in writes):
-            return "declared outputs changed during candidate checks"
-        outside = [
-            rel for rel, entry in writes.items()
-            if (rel not in expected_writes or expected_writes[rel] != entry)
-            and not self.allowed_change(Path(rel), outputs, target.get(rel), entry)
-        ]
-        if outside:
-            return f"write outside declared outputs: {', '.join(sorted(outside))}"
-        return None
-
     def assess(self, round_record, attempt, suite, failures, owner, target) -> tuple[str | None, _Suite]:
         from codd.greenfield.pipeline import _enforce_stage_coverage_gate
 
@@ -571,8 +557,6 @@ class _Feedback:
             )
         except StageError as exc:
             return f"implement gate or coverage audit failed: {exc}", suite
-        if reason := self.check_writes(owner, target, _writes(target, self.snapshot.capture()), {}):
-            return reason, suite
         if self.snapshot.environment_changed(round_record["environment_before"]):
             self.environment_dirty = True
             return "test environment changed during candidate checks", suite
@@ -584,8 +568,6 @@ class _Feedback:
             return "candidate suite could not complete", suite
         if candidate.collection_errors.keys() - suite.collection_errors.keys():
             return "candidate introduced collection errors", suite
-        if reason := self.check_writes(owner, target, candidate.writes, suite.writes):
-            return reason, suite
         if list(candidate.cases.values()).count("skipped") > list(suite.cases.values()).count("skipped"):
             return "runtime skip/xfail increased", suite
         if attempt["after"] >= attempt["before"]:
@@ -602,9 +584,6 @@ class _Feedback:
             result = self.run_tests(round_record, "candidate isolate", case, remaining, target=target)
             if result.unavailable or result.cases[case] == "skipped":
                 return f"candidate could not verify {case}", suite
-            expected_writes = self.isolation_writes.get(case, suite.writes)
-            if reason := self.check_writes(owner, target, result.writes, expected_writes):
-                return reason, suite
             if case in regressions and result.cases[case] != "passed":
                 return f"previously passing test now fails in isolation: {case}", suite
             isolated_after += len(result.failures)
@@ -707,6 +686,9 @@ class _Feedback:
         elif reason is not None:
             self.snapshot.restore(before)
             candidate = suite
+        else:
+            # Every accepted change can affect another case's isolated result.
+            round_record["screened"].clear()
         attempt.update(decision="rejected" if reason else "accepted", reason=reason or "failures decreased")
         if dirty:
             self.pipeline._checkpoint(self.root)
@@ -750,7 +732,6 @@ class _Feedback:
                 suite, reprovisioned = self.attempt(round_record, tasks[owner], failures, suite)
                 if not suite.unavailable and (reprovisioned or self.has_helper(failures)):
                     round_record["screened"].clear()
-                    self.isolation_writes.clear()
                     purpose = "suite after reprovisioning" if reprovisioned else "suite after helper decision"
                     suite = self.run_tests(round_record, purpose)
             stop = bool(suite.unavailable) or not suite.failures or not groups

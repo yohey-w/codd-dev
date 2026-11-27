@@ -6,6 +6,7 @@ import ast
 import json
 import os
 import shutil
+from collections import defaultdict
 from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
@@ -120,16 +121,24 @@ class PytestFeedbackAdapter:
             for node in nodes
         )
         functions = _python_test_function_nodes(ast.unparse(tree))
-        aliases = {}
+        # Keep every meaning of an alias in this file. An unrelated import
+        # in another scope must not hide a possible assertion.
+        aliases = defaultdict(set)
         for node in nodes:
             if isinstance(node, ast.Import):
-                aliases.update((name.asname, name.name) for name in node.names if name.asname)
+                for name in node.names:
+                    if name.asname:
+                        aliases[name.asname].add(name.name)
             elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-                aliases.update((name.asname or name.name, f"{node.module}.{name.name}") for name in node.names)
+                for name in node.names:
+                    aliases[name.asname or name.name].add(f"{node.module}.{name.name}")
 
-        def callee(call):
-            name, dot, member = _py_callee_name(call.func).partition(".")
-            return aliases.get(name, name) + dot + member
+        def matches(call, known_assertions):
+            callee = _py_callee_name(call.func)
+            name, dot, member = callee.partition(".")
+            return callee in known_assertions or any(
+                alias + dot + member in known_assertions for alias in aliases.get(name, ())
+            )
 
         context_calls = {
             item.context_expr
@@ -138,9 +147,9 @@ class PytestFeedbackAdapter:
         }
         assertions = sum(_is_py_primitive_assert_node(node) for node in nodes
                          if not isinstance(node, (ast.With, ast.AsyncWith)))
-        assertions += sum(callee(call) in _WITH_ASSERT_CONTEXT_CALLEES for call in context_calls)
+        assertions += sum(matches(call, _WITH_ASSERT_CONTEXT_CALLEES) for call in context_calls)
         for node in nodes:
             if (isinstance(node, ast.Call) and node not in context_calls
-                    and len(node.args) >= 2 and callee(node) in callable_assertions):
+                    and len(node.args) >= 2 and matches(node, callable_assertions)):
                 assertions += 1
         return len(functions), assertions, disabled
