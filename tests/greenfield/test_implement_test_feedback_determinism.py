@@ -162,12 +162,12 @@ def test_retry_ignores_interrupted_attempt_in_rejection_history(scripted_feedbac
     attempt = engine._Feedback.attempt
     interruption = "interrupted; restored before resuming"
 
-    def attempt_with_history(self, round_record, task, failures, suite):
+    def attempt_with_history(self, round_record, task, failures, suite, unstable):
         if round_record["number"] == 2:
             self.state["rounds"][0]["attempts"].append({
                 "owner": task.task_id, "decision": "rejected", "reason": interruption, "interrupted": True,
             })
-        return attempt(self, round_record, task, failures, suite)
+        return attempt(self, round_record, task, failures, suite, unstable)
 
     monkeypatch.setattr(engine._Feedback, "attempt", attempt_with_history)
     attempts, prompts, _, _ = scripted_feedback(rounds=2)

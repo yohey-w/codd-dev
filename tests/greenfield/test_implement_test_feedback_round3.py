@@ -46,10 +46,13 @@ def test_remaining_case_is_isolated_after_own_test_fix(project_factory):
     pipeline, root, trace, _ = project_factory(
         initial={"case": {TEST_FILE: "FIX_ENABLED = False\n" + TESTS}, "dependent": {other: dependent}},
         owned={"case": (TEST_FILE,), "dependent": (other,)},
-        fixes={"case": {"files": {TEST_FILE: "FIX_ENABLED = True\n" + FIXED}}},
+        fixes={
+            "case": {"files": {TEST_FILE: "FIX_ENABLED = True\n" + FIXED}},
+            "dependent": {"files": {other: "# Still depends on collection.\n" + dependent}},
+        },
     )
     record = _run(pipeline, root)
-    [attempt] = record["attempts"]
+    attempt, unstable = record["attempts"]
     assert (attempt["owner"], attempt["decision"]) == ("case", "accepted")
     assert attempt["suite_after"] == 1
     assert record["passed_in_isolation"] == 1
@@ -57,7 +60,9 @@ def test_remaining_case_is_isolated_after_own_test_fix(project_factory):
     isolate = f"isolate {other}::test_dependent"
     assert timeline.count(isolate) == 1
     assert timeline.index("feedback case") < timeline.index(isolate)
-    assert "feedback dependent" not in timeline
+    assert timeline.index(isolate) < timeline.index("feedback dependent")
+    assert (unstable["owner"], unstable["decision"]) == ("dependent", "rejected")
+    assert unstable["reason"] == f"unstable test still fails: {other}::test_dependent"
 
 
 @pytest.mark.parametrize("other_origin", ["different-owner", "application", "same-owner"])

@@ -100,7 +100,10 @@ def test_reprovision_precedes_isolation_for_next_owner(project_factory):
         """)
     pipeline, root, trace, _ = project_factory(
         initial={"case": {TEST_FILE: TESTS}, "second": {second: second_case}},
-        fixes={"case": {"files": {TEST_FILE: FIXED}, "direct": {asset: "candidate"}}},
+        fixes={
+            "case": {"files": {TEST_FILE: FIXED}, "direct": {asset: "candidate"}},
+            "second": {"files": {second: "# Still depends on collection.\n" + second_case}},
+        },
         owned={"case": (TEST_FILE,), "second": (second,)},
     )
     provision = pipeline._provision_env
@@ -114,15 +117,16 @@ def test_reprovision_precedes_isolation_for_next_owner(project_factory):
 
     pipeline._provision_env = prepare
     record = _run(pipeline, root)
-    [attempt] = record["attempts"]
+    attempt, unstable = record["attempts"]
     assert attempt["owner"] == "case" and attempt["decision"] == "rejected"
     assert "test environment changed" in attempt["reason"]
     lines = trace.read_text().splitlines()
     case = f"isolate {second}::test_second"
     assert lines.count(case) == 1
-    assert lines.index("feedback case") < lines.index(case)
-    assert [run["purpose"] for run in record["runs"][-2:]] == ["suite after reprovisioning", "isolate"]
-    assert "feedback second" not in lines
+    assert lines.index("feedback case") < lines.index(case) < lines.index("feedback second")
+    assert [run["purpose"] for run in record["runs"][-3:]] == ["suite after reprovisioning", "isolate", "candidate suite"]
+    assert (unstable["owner"], unstable["decision"]) == ("second", "rejected")
+    assert unstable["reason"] == f"unstable test still fails: {second}::test_second"
     assert record["passed_in_isolation"] == 1
 
 
