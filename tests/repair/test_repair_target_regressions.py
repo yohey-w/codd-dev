@@ -1,9 +1,11 @@
 import errno
 import json
+from pathlib import Path
 
 import pytest
 
 from codd.dag import DAG, Node
+from codd.dag.builder import build_dag
 from codd.repair import history
 from codd.repair.llm_repair_engine import LlmRepairEngine
 from codd.repair.loop import NullRepairabilityClassifier, RepairLoop, RepairLoopConfig
@@ -185,3 +187,140 @@ def test_q11_retry_history_write_failure_preserves_first_answer(monkeypatch, rep
     assert attempt.rca.affected_nodes == [TEST]
     assert attempt.evidence["analysis_retry_error"] == "HistoryUnavailableError"
     assert attempt.evidence["calls"][-1]["stage"] == "repair_propose"
+
+
+def test_q12_symlink_target_keeps_attributed_name_for_scope(tmp_path, repair):
+    dag, _, run, analyses, proposals, _ = repair
+    alias = "src/compat.py"
+    (tmp_path / alias).symlink_to(Path(SOURCE).name)
+    other = "src/other.py"
+    _write(tmp_path, other, "unrelated\n")
+    dag.add_node(Node(alias, "impl_file", alias))
+    dag.add_node(Node(other, "impl_file", other))
+
+    def propose(targets):
+        if SOURCE not in targets:
+            return {"patches": []}
+        return {"patches": [{"file_path": alias, "patch_mode": "full_file_replacement", "content": FIXED}]}
+
+    outcome = run(
+        lambda prompt: _analysis([other] if RETRY_MENU in prompt else [alias]),
+        propose,
+        failed=alias, kind="runtime_exception",
+    )
+
+    assert outcome.status == "REPAIR_SUCCESS"
+    assert outcome.partial_success_patches == [alias]
+    assert len(analyses) == 1
+    assert proposals == [{SOURCE: "wrong result\n"}]
+
+
+def test_q13_inaccessible_menu_entry_preserves_first_answer(tmp_path, monkeypatch, repair):
+    dag, _, run, analyses, proposals, _ = repair
+    hidden = "src/inaccessible/module.py"
+    _write(tmp_path, hidden, "unchanged\n")
+    dag.add_node(Node(hidden, "impl_file", hidden))
+    stat = Path.stat
+
+    def stat_with_inaccessible_file(path, *args, **kwargs):
+        if path == tmp_path / hidden:
+            raise PermissionError(errno.EACCES, "inaccessible menu entry", str(path))
+        return stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_with_inaccessible_file)
+    outcome = run(lambda _: _analysis([TEST]), _claim_if_test_target)
+
+    assert outcome.reason == "TEST_DEFECT_CLAIM"
+    assert outcome.attempts[0].rca.affected_nodes == [TEST]
+    assert len(analyses) == 1
+    assert proposals == [{TEST: "expected assertion\n"}]
+
+
+@pytest.mark.parametrize("target_kind", ["latin1", "missing", "directory"])
+def test_q14_retry_needs_a_readable_in_scope_target(tmp_path, repair, target_kind):
+    dag, _, run, analyses, proposals, _ = repair
+    dag.add_node(Node(SOURCE, "impl_file", SOURCE))
+    target = "src/retry.py"
+    if target_kind == "latin1":
+        (tmp_path / target).write_bytes('# coding: latin-1\ncaption = "café"\n'.encode("latin-1"))
+    elif target_kind == "directory":
+        (tmp_path / target).mkdir()
+
+    outcome = run(
+        lambda prompt: _analysis([target, TEST] if RETRY_MENU in prompt else [TEST]),
+        _claim_if_test_target,
+    )
+
+    assert outcome.reason == "TEST_DEFECT_CLAIM"
+    assert outcome.attempts[0].rca.affected_nodes == [TEST]
+    assert len(analyses) == 2
+    assert proposals == [{TEST: "expected assertion\n"}]
+
+
+def test_q15_shared_test_is_excluded_from_implementation_menu(tmp_path, repair):
+    dag, config, run, analyses, _, _ = repair
+    test_path = "spec/behavior.js"
+    _write(tmp_path, test_path, "throw Error('failed check');\n")
+    built = build_dag(tmp_path, {"impl_file_patterns": ["src/**/*.py"],
+                                 "test_file_patterns": ["spec/**/*.js", "tests/**/*.py"],
+                                 "common_node_patterns": [test_path]})
+    assert built.nodes[test_path].kind == "common"
+    dag.add_node(built.nodes[test_path])
+    dag.add_node(built.nodes[SOURCE])
+    config["scan"]["source_dirs"] = ["."]
+
+    outcome = run(lambda _: _analysis([TEST]), _claim_if_test_target)
+
+    assert outcome.reason == "TEST_DEFECT_CLAIM"
+    assert len(analyses) == 2
+    assert json.loads(analyses[1].split(RETRY_MENU, 1)[1]) == [SOURCE]
+
+
+@pytest.mark.parametrize("mode,target", [("auto", SOURCE), ("required", SOURCE), ("per_attempt", SOURCE), ("auto", TEST)])
+def test_q16_forwarding_engine_keeps_legacy_analyze_call(tmp_path, monkeypatch, mode, target):
+    _write(tmp_path, SOURCE, "wrong result\n")
+    _write(tmp_path, TEST, "expected assertion\n")
+    config = {"repair": {"allow_auto": {"require_explicit_optin": True}, "approval_decision": "yes"}}
+    dag = DAG()
+    dag.add_node(Node(SOURCE, "impl_file", SOURCE))
+    failure = VerificationFailureReport(
+        "test_command", [SOURCE], ["wrong result"], {}, "fixture",
+        failure_class="runtime_exception", code_addressable=True,
+    )
+    analyses = []
+
+    def fake_analyze(prompt):
+        analyses.append(prompt)
+        return json.dumps(_analysis([target]))
+
+    def fake_propose(prompt):
+        block = prompt.split("Target file contents:\n", 1)[1].split("\n\nRules:", 1)[0]
+        targets = json.loads(block)
+        if target == TEST:
+            return json.dumps(_claim_if_test_target(targets))
+        proposal = _replacement_if_target(SOURCE, targets, otherwise={"patches": []})
+        return json.dumps(proposal)
+
+    engine = LlmRepairEngine(tmp_path, config=config,
+                             ai_command={"repair_analyze": fake_analyze, "repair_propose": fake_propose})
+    analyze = engine.analyze
+
+    def legacy_analyze(failure, dag, *, repair_context="", record_call=None):
+        return analyze(failure, dag, repair_context=repair_context, record_call=record_call)
+
+    def forwarding_analyze(*args, **kwargs):
+        return legacy_analyze(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "analyze", forwarding_analyze)
+    loop = RepairLoop(RepairLoopConfig(max_attempts=1, approval_mode=mode, codd_yaml=config), tmp_path)
+    monkeypatch.setattr(loop, "_new_engine", lambda: engine)
+    outcome = loop.run(failure, dag, verify_callable=lambda: VerificationResult(
+        (tmp_path / SOURCE).read_text(encoding="utf-8") == FIXED))
+
+    if target == TEST:
+        assert outcome.reason == "TEST_DEFECT_CLAIM"
+        assert outcome.test_defect_claim == [CLAIM]
+    else:
+        assert outcome.status == "REPAIR_SUCCESS"
+        assert outcome.partial_success_patches == [SOURCE]
+    assert len(analyses) == 1 and AUTO_SCOPE_RULE not in analyses[0]

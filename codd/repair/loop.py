@@ -7,11 +7,13 @@ from datetime import datetime, timezone
 import inspect
 import json
 from pathlib import Path
+from stat import S_ISREG
 import subprocess
-from typing import Any, Callable, Literal, Mapping
+from typing import Any, Callable, Iterator, Literal, Mapping
 
 from codd.config import find_codd_dir, load_project_config
 from codd.dag import DAG
+from codd.dag.impact import is_test_path
 from codd.path_safety import project_relative_path, resolve_project_path
 from codd.repair.approval_repair import (
     RepairApprovalError,
@@ -265,16 +267,21 @@ class RepairLoop:
             rca = None
             proposal = None
             try:
-                auto_scope = self.config.approval_mode == "auto"
-                rca = engine.analyze(current_failure, dag, **_supported_kwargs(
-                    engine.analyze, repair_context=repair_context, record_call=record_call, auto_scope=auto_scope))
-                if auto_scope:
-                    rca = self._retry_out_of_scope_analysis(
-                        engine, rca, current_failure, dag, codd_yaml, repair_context, record_call, evidence,
+                analyze = engine.analyze
+                analysis_kwargs = _supported_kwargs(
+                    analyze, explicit_only=("auto_scope",), repair_context=repair_context, record_call=record_call,
+                    **({"auto_scope": True} if self.config.approval_mode == "auto" else {}),
+                )
+                rca = analyze(current_failure, dag, **analysis_kwargs)
+                file_contents = None
+                if "auto_scope" in analysis_kwargs and "repair_context" in analysis_kwargs:
+                    rca, file_contents = self._retry_out_of_scope_analysis(
+                        analyze, rca, current_failure, dag, codd_yaml, analysis_kwargs, evidence,
                     )
                 evidence["stage"] = "propose"
                 self.history.update_evidence(session_dir, attempt_n, evidence)
-                file_contents = self._load_affected_file_contents(rca, dag)
+                if file_contents is None:
+                    file_contents = self._load_affected_file_contents(rca, dag)
                 proposal = self._propose_fix(engine, rca, file_contents, current_failure,
                                              repair_context=repair_context, record_call=record_call)
             except HistoryUnavailableError:
@@ -668,57 +675,68 @@ class RepairLoop:
 
     def _retry_out_of_scope_analysis(
         self,
-        engine: Any,
+        analyze: Callable[..., RootCauseAnalysis],
         rca: RootCauseAnalysis,
         failure: VerificationFailureReport,
         dag: DAG,
         codd_yaml: Mapping[str, Any],
-        repair_context: str,
-        record_call: Callable[..., None],
+        analysis_kwargs: dict[str, Any],
         evidence: dict,
-    ) -> RootCauseAnalysis:
-        paths = self._candidate_paths(rca, dag)
-        if not any(map(_normalize, paths)) or self._has_in_scope_target(paths, failure, rca, codd_yaml):
-            return rca
-
-        implementation_paths = self._retry_implementation_paths(rca, failure, dag, codd_yaml)
-        retry_context = (
-            f"{repair_context}\n\n"
-            "The automatic patch scope guard rejected every target selected by the previous "
-            "affected_nodes. Analyze again and identify the implementation responsible for the "
-            "observed failure. You may use project-relative paths in affected_nodes.\n"
-            f"Previous affected_nodes: {json.dumps(rca.affected_nodes)}\n"
-            f"Editable implementation paths from the DAG:\n{json.dumps(implementation_paths)}"
-        )
-        evidence["analysis_retried"] = True
-        missing_before = len(evidence["missing"])
+    ) -> tuple[RootCauseAnalysis, dict[str, str] | None]:
         try:
-            retry = engine.analyze(failure, dag, **_supported_kwargs(
-                engine.analyze, repair_context=retry_context, record_call=record_call, auto_scope=True))
-        except Exception as exc:  # A failed optional analysis leaves the first answer usable.
+            paths = self._candidate_paths(rca, dag)
+            if not any(map(_normalize, paths)) or any(self._in_scope_paths(paths, failure, rca, codd_yaml)):
+                return rca, None
+
+            implementation_paths = self._retry_implementation_paths(rca, failure, dag, codd_yaml)
+            retry_context = (
+                f"{analysis_kwargs['repair_context']}\n\n"
+                "The automatic patch scope guard rejected every target selected by the previous "
+                "affected_nodes. Analyze again and identify the implementation responsible for the "
+                "observed failure. You may use project-relative paths in affected_nodes.\n"
+                f"Previous affected_nodes: {json.dumps(rca.affected_nodes)}\n"
+                f"Editable implementation paths from the DAG:\n{json.dumps(implementation_paths)}"
+            )
+            evidence["analysis_retried"] = True
+            missing_before = len(evidence["missing"])
+            retry = analyze(failure, dag, **(analysis_kwargs | {"repair_context": retry_context}))
+
+            # History records post-call write failures as missing evidence.
+            if len(evidence["missing"]) != missing_before:
+                evidence["analysis_retry_error"] = HistoryUnavailableError.__name__
+                return rca, None
+
+            paths = self._candidate_paths(retry, dag)
+            in_scope = set(self._in_scope_paths(paths, failure, retry, codd_yaml))
+            if in_scope:
+                loaded = list(self._read_affected_files(paths))
+                if any(raw_path in in_scope for raw_path, _, _ in loaded):
+                    return retry, {relative: content for _, relative, content in loaded}
+        except Exception as exc:  # Any failure in the optional retry leaves the first answer usable.
             evidence["analysis_retry_error"] = type(exc).__name__
-            return rca
+        return rca, None
 
-        # History records post-call write failures as missing evidence.
-        if len(evidence["missing"]) != missing_before:
-            evidence["analysis_retry_error"] = HistoryUnavailableError.__name__
-            return rca
-
-        if self._has_in_scope_target(self._candidate_paths(retry, dag), failure, retry, codd_yaml):
-            return retry
-        return rca
-
-    def _has_in_scope_target(
+    def _in_scope_paths(
         self, paths: list[str], failure: VerificationFailureReport, rca: RootCauseAnalysis,
         codd_yaml: Mapping[str, Any],
-    ) -> bool:
+    ) -> Iterator[str]:
         classify = _scope_path_checker(failure, rca, codd_yaml)
         for raw_path in paths:
-            # Creation patches can target paths that are still absent.
-            path = project_relative_path(self.project_root, raw_path)
+            path = self._relative_scope_path(raw_path)
             if path and classify(path) is None:
-                return True
-        return False
+                yield raw_path
+
+    def _relative_scope_path(self, raw_path: str) -> str:
+        # Attribution and the scope guard compare names, including symlink names.
+        # The proposal loader separately resolves and confines paths before reading.
+        path = _normalize(raw_path)
+        candidate = Path(path)
+        if not candidate.is_absolute():
+            return path
+        root = self.project_root.absolute()
+        if not candidate.is_relative_to(root):
+            root = root.resolve()
+        return candidate.relative_to(root).as_posix() if candidate.is_relative_to(root) else ""
 
     def _retry_implementation_paths(
         self, rca: RootCauseAnalysis, failure: VerificationFailureReport, dag: DAG, codd_yaml: Mapping[str, Any],
@@ -738,17 +756,24 @@ class RepairLoop:
                 continue
             raw_path = node.path or node.attributes.get("path")
             resolved = self._resolve_project_file(str(raw_path)) if raw_path else None
-            if resolved is None or not resolved.is_file():
+            if resolved is None:
                 continue
-            if not any(root is not None and resolved.is_relative_to(root) for root in source_roots):
+            try:
+                mode = resolved.stat().st_mode
+            except (FileNotFoundError, NotADirectoryError):
                 continue
-            path = resolved.relative_to(project_root).as_posix()
-            if path in evidence_paths or _is_test_file(path) or _is_oracle_artifact(path):
+            if not S_ISREG(mode) or not any(root is not None and resolved.is_relative_to(root) for root in source_roots):
                 continue
-            # The retry can name this path explicitly. Check scope with the
-            # allowlist that such an answer would produce.
-            classify = _scope_path_checker(failure, replace(rca, affected_nodes=[path]), codd_yaml)
-            if classify(path) is None:
+            path = self._relative_scope_path(str(raw_path))
+            resolved_path = resolved.relative_to(project_root).as_posix()
+            if not path or any(
+                name in evidence_paths or _is_test_file(name) or _is_oracle_artifact(name) or is_test_path(name)
+                for name in (path, resolved_path)
+            ):
+                continue
+            # Check both names so an alias cannot obscure a protected artifact.
+            classify = _scope_path_checker(failure, replace(rca, affected_nodes=[path, resolved_path]), codd_yaml)
+            if classify(path) is None and classify(resolved_path) is None:
                 paths.add(path)
         return sorted(paths)
 
@@ -841,14 +866,16 @@ class RepairLoop:
         return paths
 
     def _load_affected_file_contents(self, rca: RootCauseAnalysis, dag: DAG) -> dict[str, str]:
-        contents: dict[str, str] = {}
-        for raw_path in self._candidate_paths(rca, dag):
+        paths = self._candidate_paths(rca, dag)
+        return {relative: content for _, relative, content in self._read_affected_files(paths)}
+
+    def _read_affected_files(self, paths: list[str]) -> Iterator[tuple[str, str, str]]:
+        for raw_path in paths:
             resolved = self._resolve_project_file(raw_path)
             if resolved is None or not resolved.is_file():
                 continue
             relative = resolved.relative_to(self.project_root.resolve(strict=False))
-            contents[str(relative)] = resolved.read_text(encoding="utf-8")
-        return contents
+            yield raw_path, str(relative), resolved.read_text(encoding="utf-8")
 
     def _load_evidence_file_contents(self, failure: VerificationFailureReport) -> dict[str, str]:
         """Read-only evidence file contents (the failing test files) for the F3
@@ -1251,12 +1278,16 @@ def _positive_attempts(value: Any) -> int:
         return 10
 
 
-def _supported_kwargs(method: Any, **values: Any) -> dict[str, Any]:
+def _supported_kwargs(method: Any, *, explicit_only: tuple[str, ...] = (), **values: Any) -> dict[str, Any]:
     """Optional context must not break pre-evidence third-party engines."""
     try:
         parameters = inspect.signature(method).parameters
     except (TypeError, ValueError):
         return {}
+    for key in explicit_only:
+        param = parameters.get(key)
+        if param is None or param.kind not in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY):
+            values.pop(key, None)
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
         return values
     return {key: value for key, value in values.items() if key in parameters
