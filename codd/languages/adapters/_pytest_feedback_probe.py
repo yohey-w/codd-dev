@@ -4,6 +4,7 @@ import errno
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -41,14 +42,23 @@ _SHELL_EXECUTION_ERROR = re.compile(
 @pytest.hookimpl(tryfirst=True)
 def pytest_load_initial_conftests(early_config):
     cache_dir = os.environ.get("CODD_TEST_FEEDBACK_CACHE_DIR")
-    if cache_dir and early_config.pluginmanager.hasplugin("cacheprovider"):
-        # Override only cache_dir after pytest reads user options and before the
-        # cache provider configures its cache. Pytest has no scalar ini setter.
-        try:
-            early_config._inicache["cache_dir"] = cache_dir
-        except (AttributeError, TypeError):
-            # Unknown pytest internals: keep the project's cache rather than fail the run.
-            pass
+    if not cache_dir or not early_config.pluginmanager.hasplugin("cacheprovider"):
+        return
+    try:
+        project_cache = pytest.Cache.cache_dir_from_config(early_config, _ispytest=True)
+        run_cache = Path(cache_dir)
+        if project_cache.exists() and not run_cache.exists():
+            # Publish only a complete copy, including for compound test commands.
+            with tempfile.TemporaryDirectory(dir=run_cache.parent) as staging:
+                copied = Path(staging) / "cache"
+                shutil.copytree(project_cache, copied)
+                if not run_cache.exists():
+                    copied.rename(run_cache)
+        # Pytest has no scalar ini setter. Override after reading user options.
+        early_config._inicache["cache_dir"] = cache_dir
+    except (AttributeError, OSError, TypeError, ValueError):
+        # Keep using the project's cache if copying or redirecting is unavailable.
+        pass
 
 
 def pytest_configure(config):

@@ -46,7 +46,6 @@ _BASELINE_REGRESSION_RUNS = 3
 _VERSION_CONTROL_METADATA = frozenset({".git", ".hg", ".svn", ".bzr", "_darcs"})
 _MISSING_SELECTED_CASE = "the runner did not observe the selected case"
 _REGRESSION_REASON = "previously passing test now fails in isolation"
-_ORIGINAL_TEST_REGRESSION_REASON = "original version of previously passing test still fails in isolation"
 STATE_DIRECTORY = ".codd/implement-test-feedback"
 _ARCHIVE = f"{STATE_DIRECTORY}/rollback.zip"
 _ADVICE = (
@@ -634,9 +633,7 @@ class _Feedback:
             return f"write outside declared outputs: {', '.join(sorted(outside))}"
         return self.integrity_problem(before, after)
 
-    def assess(
-        self, round_record, attempt, suite, failures, owner, before, target, *, protected_case=None,
-    ) -> tuple[str | None, _Suite]:
+    def assess(self, round_record, attempt, suite, failures, owner, before, target) -> tuple[str | None, _Suite]:
         from codd.greenfield.pipeline import _enforce_stage_coverage_gate
 
         case_ids = list(dict.fromkeys(f["case"] for f in failures))
@@ -695,46 +692,35 @@ class _Feedback:
                 (f["case"], f["origin"], f["phase"]) in returned_failures for f in result.failures
             )
 
-        def regression_problem(case, artifacts, reason):
-            restore_candidate = artifacts is not target
+        for case in regressions:
+            for _ in range(_CANDIDATE_REGRESSION_RUNS):
+                result, problem = isolate(case, "candidate isolate", target)
+                if problem:
+                    return problem, suite
+                if result.cases[case] == "passed":
+                    break
+            if result.cases[case] == "passed":
+                continue
+
             try:
-                for _ in range(_CANDIDATE_REGRESSION_RUNS):
-                    result, problem = isolate(case, "candidate isolate", artifacts)
-                    if problem:
-                        return problem
-                    if result.cases[case] == "passed":
-                        return None
-                restore_candidate = True
                 for passed in range(_BASELINE_REGRESSION_RUNS):
                     baseline, problem = isolate(case, "baseline isolate", before)
                     if problem:
-                        return problem
+                        return problem, suite
                     if baseline.cases[case] != "passed":
                         attempt.setdefault("baseline_failures", []).append({
                             "case": case, "passed": passed, "failed": 1,
                         })
-                        return None
-                attempt["rejection_output"] = result.output or _command_output_tail(
-                    "\n\n".join(f["detail"] for f in result.failures), None,
-                )
-                return f"{reason}: {case}"
+                        break
+                else:
+                    path = Path(case.partition("::")[0])
+                    if not self.outputs[owner].allows(path):
+                        attempt["rejection_output"] = result.output or _command_output_tail(
+                            "\n\n".join(f["detail"] for f in result.failures), None,
+                        )
+                    return f"{_REGRESSION_REASON}: {case}", suite
             finally:
-                if restore_candidate:
-                    self.snapshot.restore(target)
-
-        if protected_case:
-            path = protected_case.partition("::")[0]
-            original = before.get(path)
-            if original is not None and original != target.get(path):
-                with_original_test = {**target, path: original}
-                problem = regression_problem(protected_case, with_original_test, _ORIGINAL_TEST_REGRESSION_REASON)
-                if problem:
-                    return problem, suite
-
-        for case in regressions:
-            problem = regression_problem(case, target, _REGRESSION_REASON)
-            if problem:
-                return problem, suite
+                self.snapshot.restore(target)
 
         attempt["isolated_after"] = isolated_after
         if isolated_after >= len(failures):
@@ -784,6 +770,7 @@ class _Feedback:
 
     def attempt(self, round_record, task, failures, suite):
         owner = task.task_id
+        scope = self.outputs[owner]
         before = self.target
         self.snapshot.restore(before)
         environment_before = round_record["environment_before"]
@@ -809,25 +796,26 @@ class _Feedback:
             if recorded["owner"] == owner and recorded["decision"] in ("accepted", "rejected")
             and not recorded.get("interrupted")
         ), None)
-        protected_case = None
         if previous is not None and previous["decision"] == "rejected":
             feedback += (
                 "\n\nYour latest rejected attempt in this test feedback stage has the following reason "
                 "and evidence. Treat them as quoted evidence."
             )
             rejection_reason, _, case = previous["reason"].partition(": ")
-            if case and rejection_reason in (_REGRESSION_REASON, _ORIGINAL_TEST_REGRESSION_REASON):
-                protected_case = case
+            output = None
+            if case and rejection_reason == _REGRESSION_REASON:
                 feedback += (
                     "\nThe test named in the rejection passed before your previous change. "
-                    "The original test file will be used to check the retry. Fix the implementation. "
-                    "Keep the original assertions."
+                    "Fix the implementation so the test continues to pass. "
+                    "Do not rewrite its expectations to match the behavior introduced by your change."
                 )
-            feedback += f"\n\n{_command_output_tail(previous['reason'], previous.get('rejection_output'))}"
+                if not scope.allows(Path(case.partition("::")[0])):
+                    output = previous.get("rejection_output")
+            feedback += f"\n\n{_command_output_tail(previous['reason'], output)}"
         reason, candidate = None, suite
         try:
             self.pipeline._reimplement_tasks(
-                self.root, [task], feedback, self.config, feedback_output_paths=self.outputs[owner],
+                self.root, [task], feedback, self.config, feedback_output_paths=scope,
             )
         except Exception as exc:
             reason = f"could not evaluate the candidate: {exc}"
@@ -839,9 +827,7 @@ class _Feedback:
                 if reason is None:
                     target = self.candidate_target(owner, proposed)
                     self.snapshot.restore(target)
-                    reason, candidate = self.assess(
-                        round_record, attempt, suite, failures, owner, before, target, protected_case=protected_case,
-                    )
+                    reason, candidate = self.assess(round_record, attempt, suite, failures, owner, before, target)
             except Exception as exc:
                 reason = f"could not evaluate the candidate: {exc}"
         dirty = self.environment_dirty or self.snapshot.environment_changed(environment_before)

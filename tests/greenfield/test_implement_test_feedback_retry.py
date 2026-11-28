@@ -4,12 +4,13 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
 from codd import implementer
 from codd.greenfield import implement_test_feedback as engine, pipeline as greenfield
+from codd.languages.adapters import _pytest_feedback_probe as probe
 from codd.languages.adapters.pytest_feedback import PytestFeedbackAdapter
 
 
@@ -37,17 +38,25 @@ def test_observer():
     assert response() == 200
 """
 UPDATED_TESTS = TESTS + "\n# Clarify the test file without changing expectations.\n"
-CACHE_TESTS = "import os\n\nimport pytest\n\n" + TEST_SUBJECTS + """\
+CACHE_TESTS = "import pytest\n\n" + TEST_SUBJECTS + """\
 
 @pytest.mark.feedback_observer
 def test_observer(cache, pytestconfig):
     assert pytestconfig.getoption('strict_markers')
     key = 'fixture/response'
     actual = response()
-    # A fresh fixture or a full candidate run publishes the current value.
-    if cache.get(key, None) is None or (actual == 404 and not os.environ.get('CODD_TEST_FEEDBACK_CASE')):
+    # The bad response overwrites the cached value whenever the candidate runs.
+    if cache.get(key, None) is None or actual == 404:
         cache.set(key, actual)
     assert cache.get(key, None) == 200
+"""
+PINNED_CACHE_TESTS = TEST_SUBJECTS + """\
+
+def test_observer(cache):
+    actual = response()
+    expected = cache.get('fixture/response', actual)
+    cache.set('fixture/response', expected)
+    assert actual == expected
 """
 
 FAKE_TEST_RUNNER = """\
@@ -83,24 +92,29 @@ sys.exit(status)
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
-    def make(*proposals, cache=False):
+    def make(*proposals, tests=TESTS, pytest_args=None, pytest_addopts=""):
         proposals = iter(proposals)
         root = tmp_path / "project"
         source_path, test_path = root / SOURCE, root / TEST_FILE
-        for path, content in ((source_path, ORIGINAL), (test_path, CACHE_TESTS if cache else TESTS)):
+        for path, content in ((source_path, ORIGINAL), (test_path, tests)):
             path.parent.mkdir(parents=True)
             path.write_text(content)
         env = {"PYTHONPATH": str(source_path.parent), "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
-        if cache:
-            env["PYTEST_ADDOPTS"] = "--strict-markers -o 'markers=feedback_observer: observed test'"
-            command = [sys.executable, "-m", "pytest", "-q", "-o", "cache_dir=.pytest_cache", "checks"]
-            # Seed the real cache before C. The feedback commands must leave it alone.
-            seed = subprocess.run([*command[:-1], OBSERVER], cwd=root, env=env, capture_output=True, text=True)
-            assert seed.returncode == 0, seed.stdout + seed.stderr
+        pytest_command = [sys.executable, "-m", "pytest", "-q"]
+        if pytest_args is not None:
+            (root / "pytest.ini").write_text("[pytest]\ncache_dir = .project-cache\n")
+            env["PYTEST_ADDOPTS"] = pytest_addopts
+            command = [*pytest_command, *pytest_args, "checks"]
         else:
             driver = tmp_path / "run_tests.py"
             driver.write_text(FAKE_TEST_RUNNER)
             command = [sys.executable, str(driver), TEST_FILE, DIAGNOSTIC]
+
+        def run_pytest(*args):
+            return subprocess.run(
+                [*pytest_command, *args], cwd=root, env={**env, "PYTHONDONTWRITEBYTECODE": "1"},
+                capture_output=True, text=True,
+            )
 
         prompts = []
         config = {"project": {"language": "python"}, "scan": {"test_dirs": ["checks"], "source_dirs": ["src"]}}
@@ -134,13 +148,52 @@ def project(tmp_path, monkeypatch):
             pipeline, root, [task], state, {}, config, PytestFeedbackAdapter(), (Path("checks"),), ["src"], (),
         )
         return SimpleNamespace(root=root, source=source_path, tests=test_path, prompts=prompts,
-                               rounds=state["rounds"], run=feedback.run)
+                               rounds=state["rounds"], run=feedback.run, pytest=run_pytest)
 
     return make
 
 
+def test_last_failed_selection_matches_ordinary_pytest(project):
+    last_failed = ("--lf", "--lfnf=none")
+    sample = project((ORIGINAL, None), pytest_args=last_failed)
+    seed = sample.pytest("checks")
+    assert seed.returncode == 1 and "2 failed, 1 passed" in seed.stdout, seed.stdout + seed.stderr
+    normal = sample.pytest(*last_failed, "checks")
+    assert normal.returncode == 1, normal.stdout + normal.stderr
+    failed_cases = {line.split()[1] for line in normal.stdout.splitlines() if line.startswith("FAILED ")}
+    assert failed_cases == {f"{TEST_FILE}::test_first", f"{TEST_FILE}::test_second"}
+    sample.run(1)
+    [record] = sample.rounds
+    suite = record["runs"][0]
+    assert suite["executed_cases"] == suite["failures_and_errors"] == len(failed_cases)
+    assert {run["case"] for run in record["runs"] if run["purpose"] == "isolate"} == failed_cases
+
+
+def test_persisted_cache_value_matches_ordinary_pytest(project):
+    sample = project((REGRESSION, None), tests=PINNED_CACHE_TESTS, pytest_args=())
+    seed = sample.pytest(OBSERVER)
+    assert seed.returncode == 0, seed.stdout + seed.stderr
+    sample.run(1)
+    [record] = sample.rounds
+    [attempt] = record["attempts"]
+    retained = sample.source.read_text()
+    assert (sample.root / ".project-cache/v/fixture/response").read_text() == "200"
+    sample.source.write_text(REGRESSION)
+    normal = sample.pytest("checks")
+    assert normal.returncode == 1 and f"FAILED {OBSERVER}" in normal.stdout, normal.stdout + normal.stderr
+    assert attempt["decision"] == "rejected", attempt
+    assert attempt["suite_after"] == 1 and attempt["reason"].endswith(OBSERVER)
+    assert retained == ORIGINAL
+
+
 def test_candidate_cache_cannot_contaminate_baseline(project):
-    sample = project((REGRESSION, None), cache=True)
+    cache_option = ("-o", "cache_dir=.pytest_cache")
+    sample = project(
+        (REGRESSION, None), tests=CACHE_TESTS, pytest_args=cache_option,
+        pytest_addopts="--strict-markers -o 'markers=feedback_observer: observed test'",
+    )
+    seed = sample.pytest(*cache_option, OBSERVER)
+    assert seed.returncode == 0, seed.stdout + seed.stderr
     sample.run(1)
     [record] = sample.rounds
     [attempt] = record["attempts"]
@@ -153,44 +206,69 @@ def test_candidate_cache_cannot_contaminate_baseline(project):
     assert sample.source.read_text() == ORIGINAL
 
 
-def test_retry_checks_original_assertion_against_candidate(project):
-    weakened = TESTS.replace("response() == 200", "response() == 404")
-    sample = project((REGRESSION, None), (REGRESSION, weakened), (REGRESSION, weakened))
-    sample.run(3)
-    first, second, *later = [record["attempts"][0] for record in sample.rounds]
-    assert first["reason"] == f"previously passing test now fails in isolation: {OBSERVER}"
-    for attempt in [second, *later]:
-        assert attempt["decision"] == "rejected", attempt
-        assert attempt["reason"] == f"original version of previously passing test still fails in isolation: {OBSERVER}"
-    assert len(later) == 1
-    for record in sample.rounds[1:]:
-        assert [run["purpose"] for run in record["runs"] if run.get("case") == OBSERVER] == [
-            "candidate isolate", "candidate isolate", "baseline isolate", "baseline isolate", "baseline isolate",
-        ]
-    for prompt in sample.prompts[1:]:
-        assert DIAGNOSTIC in prompt
-        assert "The test named in the rejection passed before your previous change." in prompt
-        assert "The original test file will be used to check the retry. Fix the implementation." in prompt
-    assert sample.tests.read_text() == TESTS
-    assert sample.source.read_text() == ORIGINAL
+@pytest.mark.parametrize("mode", ["copy-fails", "override-fails", "disabled"])
+def test_pytest_cache_redirect_keeps_project_setting_on_failure_or_disable(tmp_path, monkeypatch, mode):
+    project_cache = tmp_path / "project-cache"
+    project_cache.mkdir()
+    (project_cache / "value").write_text("200")
+    run_cache = tmp_path / "run-cache"
+    ini = {"cache_dir": project_cache.name}
+    config = SimpleNamespace(
+        rootpath=tmp_path, getini=ini.__getitem__,
+        _inicache=MappingProxyType(ini) if mode == "override-fails" else ini,
+        pluginmanager=SimpleNamespace(hasplugin=lambda name: name == "cacheprovider" and mode != "disabled"),
+    )
+    monkeypatch.setenv("CODD_TEST_FEEDBACK_CACHE_DIR", str(run_cache))
+
+    if mode == "copy-fails":
+        def fail_after_starting_copy(source, destination):
+            assert source == project_cache
+            destination.mkdir()
+            raise OSError("copy failed")
+
+        monkeypatch.setattr(probe.shutil, "copytree", fail_after_starting_copy)
+
+    probe.pytest_load_initial_conftests(config)
+
+    assert config.getini("cache_dir") == project_cache.name
+    assert (project_cache / "value").read_text() == "200"
+    if mode != "override-fails":
+        assert not run_cache.exists()
 
 
-def test_retry_keeps_candidate_test_file_when_original_passes(project):
-    sample = project((REGRESSION, None), (REPAIRED_BOTH, UPDATED_TESTS))
+def test_retry_omits_regression_output_for_writable_test(project):
+    sample = project((REGRESSION, None), (REPAIRED_BOTH, None))
+    sample.run(2)
+    first, retry = (record["attempts"][0] for record in sample.rounds)
+    reason = f"previously passing test now fails in isolation: {OBSERVER}"
+    prompt = sample.prompts[1]
+    assert first["reason"] == reason and reason in prompt
+    assert DIAGNOSTIC not in prompt
+    assert "rejection_output" not in first
+    assert "The test named in the rejection passed before your previous change." in prompt
+    assert "Fix the implementation so the test continues to pass." in prompt
+    assert "Do not rewrite its expectations to match the behavior introduced by your change." in prompt
+    assert retry["decision"] == "accepted", retry
+
+
+def test_retry_accepts_coordinated_source_and_test_change(project):
+    updated_source = REPAIRED_BOTH.replace("response", "status_code")
+    updated_tests = TESTS.replace("response", "status_code")
+    sample = project((REGRESSION, None), (updated_source, updated_tests))
     sample.run(2)
     _, retry = sample.rounds
     [attempt] = retry["attempts"]
     assert attempt["decision"] == "accepted", attempt
-    assert [run["purpose"] for run in retry["runs"] if run.get("case") == OBSERVER] == ["candidate isolate"]
-    assert sample.tests.read_text() == UPDATED_TESTS
+    assert all(run.get("case") != OBSERVER for run in retry["runs"])
+    assert sample.source.read_text() == updated_source
+    assert sample.tests.read_text() == updated_tests
 
 
 def test_retry_after_acceptance_omits_stale_rejection(project):
     sample = project((REGRESSION, None), (REPAIRED, None), (REPAIRED_BOTH, UPDATED_TESTS))
     sample.run(3)
     assert [record["attempts"][0]["decision"] for record in sample.rounds] == ["rejected", "accepted", "accepted"]
-    assert DIAGNOSTIC in sample.prompts[1]
-    assert DIAGNOSTIC not in sample.prompts[2]
+    assert OBSERVER in sample.prompts[1]
     assert OBSERVER not in sample.prompts[2]
     for record in sample.rounds[1:]:
         assert all(run.get("case") != OBSERVER for run in record["runs"])
