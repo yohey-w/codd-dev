@@ -1703,8 +1703,9 @@ def find_orphan_artifacts(
     it AND it is not in ``extra_owned`` (the harness/profile contract escape hatch:
     manifests, scaffolded config, entrypoints a profile owns implicitly). Only
     tracked SOURCE files (``_TS_SOURCE_EXTS``) under the project are considered;
-    vendored/build/VCS dirs are skipped. Pure + best-effort: an unreadable tree
-    yields an empty list (warn mode must never crash the gate).
+    vendored/build/VCS dirs and Python virtual environments are skipped.
+    Pure + best-effort: an unreadable tree yields an empty list (warn mode must
+    never crash the gate).
 
     This is the OBSERVATION primitive; the gate decides warn-vs-enforce. It is
     deliberately conservative (source files only, owner-or-extra) so the default
@@ -2014,12 +2015,16 @@ _FANOUT_SKIP_DIRS = frozenset(
 
 
 def _iter_project_source_files(project_root: Path):
-    """Yield tracked TS/JS source files under ``project_root`` (vendored skipped)."""
+    """Yield tracked TS/JS source files, skipping vendored dirs and virtualenvs."""
     import os
 
     root = project_root.resolve()
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _FANOUT_SKIP_DIRS]
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in _FANOUT_SKIP_DIRS
+            and not os.path.isfile(os.path.join(dirpath, d, "pyvenv.cfg"))
+        ]
         for name in filenames:
             if PurePosixPath(name).suffix in _TS_SOURCE_EXTS:
                 yield Path(dirpath) / name

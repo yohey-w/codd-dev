@@ -488,6 +488,27 @@ def test_find_orphan_artifacts_flags_unowned_file(tmp_path: Path) -> None:
     assert "src/index.ts" not in orphans, "an owned file is not an orphan"
 
 
+@pytest.mark.parametrize("env_dir", [".venv", "tools/env"])
+def test_find_orphan_artifacts_skips_virtualenv(tmp_path: Path, env_dir: str) -> None:
+    _write(tmp_path, f"{env_dir}/pyvenv.cfg", "include-system-site-packages = false\n")
+    _write(tmp_path, f"{env_dir}/lib/site-packages/driver/index.mjs", "export {};\n")
+    _write(tmp_path, f"{env_dir}/lib/site-packages/driver/cli.js", "export {};\n")
+    index = build_path_owner_index([], project_root=tmp_path)
+
+    assert find_orphan_artifacts(index, tmp_path) == []
+
+
+@pytest.mark.parametrize("source_dir", ["scripts", ".venv"])
+def test_find_orphan_artifacts_scans_dirs_without_virtualenv_marker(
+    tmp_path: Path, source_dir: str
+) -> None:
+    unowned = f"{source_dir}/unowned.js"
+    _write(tmp_path, unowned, "export {};\n")
+    index = build_path_owner_index([], project_root=tmp_path)
+
+    assert [orphan.path for orphan in find_orphan_artifacts(index, tmp_path)] == [unowned]
+
+
 def test_find_orphan_artifacts_adopts_dir_owned_helper(tmp_path: Path) -> None:
     """adopt-or-reject: a helper under a task's OWN output dir is adopted (not orphan)."""
     _write(tmp_path, "src/index.ts", "export const a = 1;\n")

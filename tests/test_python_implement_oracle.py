@@ -34,6 +34,7 @@ from pathlib import Path
 
 import pytest
 
+from codd.greenfield.pipeline import GreenfieldPipeline, ImplementTaskRef, StageError
 from codd.implement_oracle import (
     EVIDENCE_MISSING_SYMBOL,
     EVIDENCE_MODULE_RESOLUTION,
@@ -261,6 +262,31 @@ def test_clean_project_passes(tmp_path: Path) -> None:
         f"{[(f.category, f.code, f.message) for f in result.findings]}"
     )
     assert result.executed is True
+
+
+def test_verdict_only_orphan_gate_ignores_virtualenv(tmp_path: Path) -> None:
+    _scaffold(tmp_path, with_path_shim=True)
+    _write(tmp_path, "codd/codd.yaml", "implement:\n  orphan_artifact_gate: enforce\n")
+    _write(tmp_path, "src/app/core.py", "VALUE = 1\n")
+    _write(
+        tmp_path,
+        "tests/test_core.py",
+        "from app.core import VALUE\n\ndef test_value():\n    assert VALUE == 1\n",
+    )
+    _write(tmp_path, ".venv/pyvenv.cfg", "include-system-site-packages = false\n")
+    _write(tmp_path, ".venv/lib/site-packages/driver/index.mjs", "export {};\n")
+    tasks = [
+        ImplementTaskRef(
+            task_id="core", design_node="design/core.md", output_paths=("src/app/core.py",)
+        )
+    ]
+    pipeline = GreenfieldPipeline(project_name=_PACKAGE, language="python")
+
+    pipeline._enforce_implement_oracle_gate(tmp_path, tasks, {}, verdict_only=True)
+
+    _write(tmp_path, "scripts/unowned.js", "export {};\n")
+    with pytest.raises(StageError, match=r"orphan-artifact gate \(enforce\): 1 unowned artifact"):
+        pipeline._enforce_implement_oracle_gate(tmp_path, tasks, {}, verdict_only=True)
 
 
 # ═════════════════════════════════════════════════════════════
