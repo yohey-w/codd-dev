@@ -145,7 +145,9 @@ def require_project_path(
     return resolved
 
 
-def iter_project_glob(project_root: Union[str, Path], raw_glob: str) -> list[Path]:
+def iter_project_glob(
+    project_root: Union[str, Path], raw_glob: str, *, follow_symlinks: bool = True,
+) -> list[Path]:
     """Glob ``raw_glob`` under ``project_root`` and return only in-root matches.
 
     The pattern is anchored to the project root, and the leading-slash semantics
@@ -169,7 +171,9 @@ def iter_project_glob(project_root: Union[str, Path], raw_glob: str) -> list[Pat
     confinement is the real security boundary, so an in-root symlink whose target
     escapes the tree (or an absolute base reached through such a symlink) can
     never smuggle an off-root file into the results. Resolved, de-duplicated
-    matches are returned sorted for determinism.
+    matches are returned sorted for determinism. With ``follow_symlinks=False``,
+    a match that resolves to a different path is discarded so a symlink cannot
+    grant write access to a different target.
     """
     raw_text = str(raw_glob or "").strip()
     if not raw_text:
@@ -193,6 +197,8 @@ def iter_project_glob(project_root: Union[str, Path], raw_glob: str) -> list[Pat
             resolved = match.resolve()
             resolved.relative_to(root)
         except (ValueError, OSError):
+            continue
+        if not follow_symlinks and resolved != root / match.relative_to(project_root):
             continue
         matches[str(resolved)] = resolved
     return [matches[key] for key in sorted(matches)]
