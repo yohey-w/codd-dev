@@ -2014,20 +2014,40 @@ _FANOUT_SKIP_DIRS = frozenset(
 )
 
 
+def _is_python_virtualenv(directory: Path) -> bool:
+    """Recognize a virtual environment by its configured home and interpreter."""
+    config = directory / "pyvenv.cfg"
+    try:
+        if not config.is_file() or not any(
+            (directory / executable).is_file()
+            for executable in ("bin/python", "bin/python3", "Scripts/python.exe")
+        ):
+            return False
+        with config.open(encoding="utf-8") as lines:
+            for line in lines:
+                key, _, value = line.partition("=")
+                if key.strip() == "home" and value.strip():
+                    return True
+    except (OSError, UnicodeError):
+        return False
+    return False
+
+
 def _iter_project_source_files(project_root: Path):
     """Yield tracked TS/JS source files, skipping vendored dirs and virtualenvs."""
     import os
 
     root = project_root.resolve()
     for dirpath, dirnames, filenames in os.walk(root):
+        directory = Path(dirpath)
         dirnames[:] = [
             d for d in dirnames
             if d not in _FANOUT_SKIP_DIRS
-            and not os.path.isfile(os.path.join(dirpath, d, "pyvenv.cfg"))
+            and not _is_python_virtualenv(directory / d)
         ]
         for name in filenames:
             if PurePosixPath(name).suffix in _TS_SOURCE_EXTS:
-                yield Path(dirpath) / name
+                yield directory / name
 
 
 def _allowed_paths(

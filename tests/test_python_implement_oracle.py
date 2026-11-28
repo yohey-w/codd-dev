@@ -30,6 +30,8 @@ STATICALLY regardless of whether the package is installed.
 from __future__ import annotations
 
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -264,7 +266,8 @@ def test_clean_project_passes(tmp_path: Path) -> None:
     assert result.executed is True
 
 
-def test_verdict_only_orphan_gate_ignores_virtualenv(tmp_path: Path) -> None:
+@pytest.mark.parametrize("with_empty_marker", [False, True], ids=["unmarked", "empty-marker"])
+def test_verdict_only_orphan_gate_ignores_virtualenv(tmp_path: Path, with_empty_marker: bool) -> None:
     _scaffold(tmp_path, with_path_shim=True)
     _write(tmp_path, "codd/codd.yaml", "implement:\n  orphan_artifact_gate: enforce\n")
     _write(tmp_path, "src/app/core.py", "VALUE = 1\n")
@@ -273,20 +276,26 @@ def test_verdict_only_orphan_gate_ignores_virtualenv(tmp_path: Path) -> None:
         "tests/test_core.py",
         "from app.core import VALUE\n\ndef test_value():\n    assert VALUE == 1\n",
     )
-    _write(tmp_path, ".venv/pyvenv.cfg", "include-system-site-packages = false\n")
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(tmp_path / ".venv")], check=True
+    )
     _write(tmp_path, ".venv/lib/site-packages/driver/index.mjs", "export {};\n")
     tasks = [
         ImplementTaskRef(
             task_id="core", design_node="design/core.md", output_paths=("src/app/core.py",)
         )
     ]
-    pipeline = GreenfieldPipeline(project_name=_PACKAGE, language="python")
+    messages: list[str] = []
+    pipeline = GreenfieldPipeline(project_name=_PACKAGE, language="python", echo=messages.append)
 
     pipeline._enforce_implement_oracle_gate(tmp_path, tasks, {}, verdict_only=True)
 
-    _write(tmp_path, "scripts/unowned.js", "export {};\n")
+    if with_empty_marker:
+        _write(tmp_path, "scripts/pyvenv.cfg", "")
+    _write(tmp_path, "scripts/frontend.js", "export {};\n")
     with pytest.raises(StageError, match=r"orphan-artifact gate \(enforce\): 1 unowned artifact"):
         pipeline._enforce_implement_oracle_gate(tmp_path, tasks, {}, verdict_only=True)
+    assert any("scripts/frontend.js" in message for message in messages)
 
 
 # ═════════════════════════════════════════════════════════════
