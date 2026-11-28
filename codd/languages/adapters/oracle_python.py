@@ -63,6 +63,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 
 import ast
+import os
 import shlex
 import subprocess  # noqa: S404 — argv is sys.executable + pytest, shell run is the legacy parity behaviour
 import sys
@@ -85,6 +86,7 @@ from codd.implement_oracle_types import (
 from codd.languages.adapters.implement_oracle import (
     OracleContext,
     OracleStepObservation,
+    PreparedTestExecutable,
 )
 from codd.languages.adapters.python_pytest import pytest_launcher
 from codd.languages.profile import CommandSpec, LanguageProfile
@@ -1086,6 +1088,7 @@ def _run_python_pytest_collect_layer(
     *,
     profile: LanguageProfile | None = None,
     interpreter: str | None = None,
+    isolated: bool = False,
 ) -> PythonToolRun:
     """``python -m pytest <test_root> --collect-only -q`` — test importability.
 
@@ -1104,6 +1107,14 @@ def _run_python_pytest_collect_layer(
     command = shlex.join([
         *launcher, test_root_rel, "--collect-only", "-q", "-p", "no:cacheprovider",
     ])
+    # A fresh venv must not import from ambient Python paths or pytest overrides.
+    options = {}
+    if isolated:
+        import_path_overrides = {
+            "PYTHONHOME", "PYTHONPATH", "PYTHONUSERBASE", "PYTHONPLATLIBDIR",
+            "PYTHONPYCACHEPREFIX", "PYTHONEXECUTABLE", "__PYVENV_LAUNCHER__", "PYTEST_ADDOPTS",
+        }
+        options["env"] = {key: value for key, value in os.environ.items() if key.upper() not in import_path_overrides}
     try:
         completed = subprocess.run(
             command,
@@ -1112,6 +1123,7 @@ def _run_python_pytest_collect_layer(
             capture_output=True,
             text=True,
             timeout=timeout,
+            **options,
         )
     except subprocess.TimeoutExpired:
         return PythonToolRun(
@@ -1655,7 +1667,9 @@ class PythonCompositeOracleAdapter:
             ctx.prepare_test_executable(pytest_launcher(ctx.language_profile)[0])
             if ctx.prepare_test_executable is not None else nullcontext()
         )
-        with prepared as interpreter:
+        with prepared as executable:
+            interpreter = executable.interpreter if isinstance(executable, PreparedTestExecutable) else executable
+            isolated = isinstance(executable, PreparedTestExecutable) and executable.isolated
             source_root, package_root, test_root = _py_layout_from_layout_spec(ctx)
             project_root = ctx.project_root
             config = ctx.config
@@ -1669,6 +1683,7 @@ class PythonCompositeOracleAdapter:
                 _run_python_pytest_collect_layer(
                     project_root, source_root, package_root, test_root, scope, config,
                     profile=ctx.language_profile, interpreter=interpreter,
+                    **({"isolated": True} if isolated else {}),
                 ),
             ]
         lint_mode = _python_lint_mode(config)

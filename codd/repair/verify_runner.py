@@ -1068,7 +1068,7 @@ class VerifyRunner:
         return env
 
     def test_command_environment(
-        self, settings: dict[str, Any], *, include_shell_assignments: bool = True,
+        self, settings: dict[str, Any], *, include_shell_assignments: bool = True, deadline: float | None = None,
     ) -> dict[str, str]:
         """Environment for a preflight command that must see the same assets as tests."""
         from codd.languages.contract import resolve_language_contract
@@ -1076,6 +1076,7 @@ class VerifyRunner:
         from codd.languages.verify_executor import verify_command_env
         from codd.languages.verify_plan import build_verify_plan
         from codd.test_detection import _explicit_test_command
+        from codd.test_environment import bounded_environment_timeout
 
         command = _explicit_test_command(settings)
         if command is not None and include_shell_assignments:
@@ -1089,7 +1090,7 @@ class VerifyRunner:
                 ))
                 try:
                     completed = self._run_evidence_subprocess(
-                        f"{prefix} {probe}", timeout=_test_timeout_seconds(settings),
+                        f"{prefix} {probe}", timeout=bounded_environment_timeout(deadline, _test_timeout_seconds(settings)),
                     )
                 except subprocess.TimeoutExpired as exc:
                     raise ValueError(

@@ -41,6 +41,12 @@ from codd.languages.profile import (
 
 
 @dataclass(frozen=True)
+class PreparedTestExecutable:
+    interpreter: str
+    isolated: bool = False
+
+
+@dataclass(frozen=True)
 class OracleContext:
     """Everything an oracle adapter needs to certify scope + normalize + execute.
 
@@ -80,7 +86,7 @@ class OracleContext:
     package_name: str | None = None
     #: Optional greenfield hook for an adapter that collects project tests. Called
     #: once per evaluation to prepare the environment and keep it live for collection.
-    prepare_test_executable: Callable[[str], ContextManager[str | None]] | None = None
+    prepare_test_executable: Callable[[str], ContextManager[PreparedTestExecutable | str | None]] | None = None
 
 
 @dataclass(frozen=True)

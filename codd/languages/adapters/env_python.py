@@ -18,7 +18,7 @@ from pathlib import Path
 
 from codd.project_types import EnvProvisionResult, LayoutProfile, _parse_pyproject_toml
 from codd.languages.profile import TestAssetSpec
-from codd.test_environment import TestEnvironmentDeclaration, check_test_asset
+from codd.test_environment import TestEnvironmentDeclaration, bounded_environment_timeout, check_test_asset
 
 
 # Keep the verifier-only toolchain aligned with the profile CI setup.
@@ -131,6 +131,7 @@ def _probe_python_env(
     imports: dict[str, str],
     *,
     trust_declarations: bool = True,
+    deadline: float | None = None,
 ) -> EnvProvisionResult:
     """Prove imports resolve to the project or its directly declared dependencies."""
     next_step = "Inspect the import traceback and correct the generated source or dependency manifest."
@@ -143,7 +144,7 @@ def _probe_python_env(
             ],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=bounded_environment_timeout(deadline, 120),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return _env_build_error(
@@ -315,6 +316,7 @@ def provision_python_env(
     asset_specs: Mapping[str, TestAssetSpec] | None = None,
     config: Mapping | None = None,
     environment_root: Path | None = None,
+    deadline: float | None = None,
 ) -> EnvProvisionResult:
     # Isolated callers provide an empty, disposable directory for this evaluation.
     if environment_root is not None and (environment_root.is_symlink() or any(environment_root.iterdir())):
@@ -323,6 +325,8 @@ def provision_python_env(
             "Create a fresh directory for the isolated test environment.",
         )
     environment_options = {"environment_root": environment_root} if environment_root is not None else {}
+    if deadline is not None:
+        environment_options["deadline"] = deadline
     if declaration is None:
         return _provision_python_base_env(project_root, profile, propose_dependencies, **environment_options)
     if failure := validate_test_packages(declaration):
@@ -347,6 +351,7 @@ def _prepare_declared_environment(
     project_root: Path, state_path: Path, declaration: TestEnvironmentDeclaration,
     asset_specs: Mapping[str, TestAssetSpec], config: dict, base: EnvProvisionResult, cached: object,
     *, environment_root: Path | None = None,
+    deadline: float | None = None,
 ) -> EnvProvisionResult:
     summary = {"packages": list(declaration.packages), "assets": list(declaration.assets)}
     reusable = (
@@ -366,6 +371,8 @@ def _prepare_declared_environment(
     try:
         if declaration.packages and not reusable:
             environment_options = {"environment_root": environment_root} if environment_root is not None else {}
+            if deadline is not None:
+                environment_options["deadline"] = deadline
             installed = _install_test_packages(project_root, declaration, **environment_options)
             if not installed.ok:
                 return installed
@@ -375,7 +382,9 @@ def _prepare_declared_environment(
             from codd.repair.verify_runner import VerifyRunner
 
             try:
-                env = VerifyRunner(project_root, config, exec_env_root=environment_root).test_command_environment(config)
+                env = VerifyRunner(project_root, config, exec_env_root=environment_root).test_command_environment(
+                    config, deadline=deadline,
+                )
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 return _env_build_error(
                     f"{declaration.location}: could not prepare the test command environment: {exc}",
@@ -387,7 +396,7 @@ def _prepare_declared_environment(
             for name, spec in asset_specs.items():
                 check = check_test_asset(
                     project_root, name, spec, env=env, acquire=acquire,
-                    install_timeout=_ENV_PROVISION_TIMEOUT_SECONDS,
+                    install_timeout=_ENV_PROVISION_TIMEOUT_SECONDS, deadline=deadline,
                 )
                 checks[name] = "failed" if check.failure else "passed"
                 if check.failure:
@@ -405,6 +414,7 @@ def _prepare_declared_environment(
 def _install_test_packages(
     project_root: Path, declaration: TestEnvironmentDeclaration,
     *, environment_root: Path | None = None,
+    deadline: float | None = None,
 ) -> EnvProvisionResult:
     interpreter = _venv_interpreter((environment_root or project_root) / ".venv")
     argv = _pip_install_argv(
@@ -416,13 +426,13 @@ def _install_test_packages(
     try:
         installed = subprocess.run(
             argv, cwd=str(project_root), capture_output=True, text=True,
-            timeout=_ENV_PROVISION_TIMEOUT_SECONDS,
+            timeout=bounded_environment_timeout(deadline, _ENV_PROVISION_TIMEOUT_SECONDS),
         )
     except subprocess.TimeoutExpired as exc:
         output = exc.stderr or exc.stdout or b""
         if isinstance(output, bytes):
             output = output.decode(errors="replace")
-        detail = f"{label}: timed out after {_ENV_PROVISION_TIMEOUT_SECONDS:g}s\n{output.strip()[-2000:]}"
+        detail = f"{label}: timed out after {exc.timeout:g}s\n{output.strip()[-2000:]}"
         return _env_build_error(detail.rstrip(), next_step)
     except (OSError, subprocess.SubprocessError) as exc:
         return _env_build_error(f"{label}: {exc}", next_step)
@@ -435,6 +445,7 @@ def _install_test_packages(
 def _provision_python_base_env(
     project_root: Path, profile: LayoutProfile, propose_dependencies: Callable[[str], str] | None,
     *, environment_root: Path | None = None,
+    deadline: float | None = None,
 ) -> EnvProvisionResult:
     """Build from the manifest and try one scoped declaration repair if needed."""
     from codd.path_safety import resolve_project_path
@@ -449,6 +460,8 @@ def _provision_python_base_env(
         return _env_build_error(f"could not read the dependency manifest: {exc}", inspect_manifest)
     imports = _python_runtime_imports(project_root, profile)
     environment_options = {"environment_root": environment_root} if environment_root is not None else {}
+    if deadline is not None:
+        environment_options["deadline"] = deadline
     result = _build_python_env(project_root, profile, original, imports, **environment_options)
     if not result.undeclared_imports or propose_dependencies is None:
         return result
@@ -493,6 +506,7 @@ def _provision_python_base_env(
 def _build_python_env(
     project_root: Path, profile: LayoutProfile, manifest: str, imports: dict[str, str],
     *, environment_root: Path | None = None,
+    deadline: float | None = None,
 ) -> EnvProvisionResult:
     """Install the test toolchain and editable project, then prove the result."""
     from codd.path_safety import require_project_path
@@ -526,6 +540,7 @@ def _build_python_env(
     legacy_env = not cached_digest and not declares_dependencies
     if interpreter.exists() and (current_manifest or legacy_env) and _probe_python_env(
         interpreter, profile, distribution, source_root, imports, trust_declarations=current_manifest,
+        deadline=deadline,
     ).ok:
         return _record_env_provision_state(
             state_root, venv_dir, action="up_to_date",
@@ -541,7 +556,7 @@ def _build_python_env(
                 [sys.executable, "-m", "venv", str(venv_dir)],
                 capture_output=True,
                 text=True,
-                timeout=_ENV_PROVISION_TIMEOUT_SECONDS,
+                timeout=bounded_environment_timeout(deadline, _ENV_PROVISION_TIMEOUT_SECONDS),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             return _env_build_error(f"could not create virtualenv at {venv_dir}: {exc}", venv_next_step)
@@ -561,11 +576,11 @@ def _build_python_env(
             cwd=str(project_root),
             capture_output=True,
             text=True,
-            timeout=_ENV_PROVISION_TIMEOUT_SECONDS,
+            timeout=bounded_environment_timeout(deadline, _ENV_PROVISION_TIMEOUT_SECONDS),
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
         return _env_build_error(
-            f"editable install exceeded {_ENV_PROVISION_TIMEOUT_SECONDS:g}s",
+            f"editable install exceeded {exc.timeout:g}s",
             install_next_step,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -577,7 +592,7 @@ def _build_python_env(
             install_next_step,
         )
 
-    probe = _probe_python_env(interpreter, profile, distribution, source_root, imports)
+    probe = _probe_python_env(interpreter, profile, distribution, source_root, imports, deadline=deadline)
     if not probe.ok:
         return probe
     return _record_env_provision_state(

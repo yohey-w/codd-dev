@@ -836,6 +836,7 @@ def invoke_ai(
     stage: str | None = None,
     recover: bool = True,
     file_capture_exclusions: tuple[str, ...] = (),
+    timeout: float | None = None,
 ) -> str:
     """Invoke the AI CLI through the one unified path.
 
@@ -867,6 +868,7 @@ def invoke_ai(
             after an App Server invocation fails.
         file_capture_exclusions: Project-relative harness files excluded from
             staging and capture by the file-writing command path.
+        timeout: Optional per-call limit supplied by a caller with a shared deadline.
 
     Wall-clock timeout: every direct-subprocess AI call carries a finite
     per-call timeout (resolved via :func:`resolve_ai_call_timeout`; default
@@ -908,7 +910,10 @@ def invoke_ai(
                 # auto-retry still applies via the same identical re-invocation.
                 def attempt(current_prompt: str, env: Mapping[str, str] | None = None) -> str:
                     with usage_trial(current_prompt, "adapter", command_str, defer_if_nested=True):
-                        output = adapter.invoke(current_prompt)
+                        options = {}
+                        if timeout is not None:
+                            options["timeout"] = min(timeout, getattr(adapter, "timeout_seconds", timeout))
+                        output = adapter.invoke(current_prompt, **options)
                         note_output(output)
                         return output
             else:
@@ -926,6 +931,7 @@ def invoke_ai(
                             command_str, current_prompt, project_root=subprocess_root, env=env,
                             **({"working_directory": effective_root} if harden_read_only else {}),
                             **({"file_capture_exclusions": file_capture_exclusions} if file_capture_exclusions else {}),
+                            **({"timeout": timeout} if timeout is not None else {}),
                         )
                         note_output(output)
                         return output
@@ -956,10 +962,12 @@ def invoke_read_only(
     config: Mapping[str, Any],
     stage: str,
     recover: bool = True,
+    timeout: float | None = None,
 ) -> str:
     """Request a plain-text response from outside the project workspace.
 
     Pass `recover=False` when this request may be attempted only once.
+    Pass `timeout` to cap the request at the caller's remaining time.
     """
     return invoke_ai(
         ai_command,
@@ -970,6 +978,7 @@ def invoke_read_only(
         harden_read_only=True,
         force_print_on_claude=True,
         recover=recover,
+        **({"timeout": timeout} if timeout is not None else {}),
     )
 
 

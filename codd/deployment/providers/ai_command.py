@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import hashlib
 import os
@@ -179,7 +180,15 @@ class CodexAppServerAiCommand:
                 with usage_trial(
                     prompt, "app_server", lambda: getattr(self.client, "command", []), model or self.model
                 ):
-                    output = str(self._run_async(self._invoke_app_server(prompt, model=model, timeout=timeout)))
+                    request = self._invoke_app_server(prompt, model=model, timeout=timeout)
+                    if timeout is not None:
+                        request = asyncio.wait_for(request, timeout)
+                    try:
+                        output = str(self._run_async(request))
+                    except asyncio.TimeoutError as exc:
+                        if timeout is None:
+                            raise
+                        raise CodexAppServerTimeout(f"Codex App Server call timed out after {timeout:g}s") from exc
                     note_output(output)
                     return output
             except (CodexAppServerInitError, CodexAppServerTimeout, CodexAppServerTurnError) as exc:
@@ -220,6 +229,7 @@ class CodexAppServerAiCommand:
                 self.project_root,
                 self.base_instructions,
             )
+            cancelled = False
             try:
                 return await self.client.send_turn(
                     thread_id,
@@ -229,8 +239,12 @@ class CodexAppServerAiCommand:
                     effort=self.effort,
                     cwd=self.project_root,
                 )
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
             finally:
-                await self.client.archive_thread(thread_id)
+                if not cancelled:
+                    await self.client.archive_thread(thread_id)
         thread_id = await self._ensure_thread(resolved_model)
         return await self.client.send_turn(
             thread_id,

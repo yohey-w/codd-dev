@@ -93,7 +93,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import Any, ContextManager
+from typing import TYPE_CHECKING, Any, ContextManager
+
+if TYPE_CHECKING:
+    from codd.languages.adapters.implement_oracle import PreparedTestExecutable
 
 from codd.project_types import (
     ImplementOracleSpec,
@@ -1285,7 +1288,7 @@ def _run_contract_oracle(
     *,
     package_name: str | None = None,
     layout_profile: "LayoutProfile | None" = None,
-    prepare_test_executable: Callable[[str], ContextManager[str | None]] | None = None,
+    prepare_test_executable: Callable[[str], ContextManager[PreparedTestExecutable | str | None]] | None = None,
 ) -> ImplementOracleResult:
     """Run a modeled oracle on the contract path (certify already done by caller).
 
@@ -1390,7 +1393,7 @@ def _run_oracle_command(
     spec: ImplementOracleSpec,  # noqa: ARG001 — kept for the stable gate signature.
     config: Mapping[str, Any] | None,
     *,
-    prepare_test_executable: Callable[[str], ContextManager[str | None]] | None = None,
+    prepare_test_executable: Callable[[str], ContextManager[PreparedTestExecutable | str | None]] | None = None,
 ) -> ImplementOracleResult:
     """Run the native oracle ONCE on the Contract-Kernel contract path.
 
@@ -1646,7 +1649,7 @@ def run_implement_oracle_gate(
     scope_index: Any = None,
     structured_source: Any = None,
     manifest_paths: Any = None,
-    prepare_test_executable: Callable[[str], ContextManager[str | None]] | None = None,
+    prepare_test_executable: Callable[..., ContextManager[PreparedTestExecutable | str | None]] | None = None,
 ) -> ImplementOracleResult:
     """Run the implement-time native-oracle gate (stage-level, once).
 
@@ -1785,10 +1788,14 @@ def run_implement_oracle_gate(
         @contextmanager
         def timed_preparation(executable):
             started = time.monotonic()
-            with prepare_test_executable(executable) as interpreter:
+            deadline = preparation.broad_deadline
+            if deadline is not None and started >= deadline:
+                raise _OracleBroadDeadlineReached
+            options = {"deadline": deadline} if deadline is not None else {}
+            with prepare_test_executable(executable, **options) as interpreter:
                 now = time.monotonic()
                 preparation.seconds += now - started
-                if preparation.broad_deadline is not None and now >= preparation.broad_deadline:
+                if deadline is not None and now >= deadline:
                     raise _OracleBroadDeadlineReached
                 yield interpreter
 
@@ -2344,6 +2351,8 @@ def _execute_broad_campaign(
         try:
             rechecked = recheck()
         except _OracleBroadDeadlineReached:
+            if preparation is not None:
+                preparation.broad_budget_exhausted = True
             return _out_of_budget(result)
         finally:
             if preparation is not None:
