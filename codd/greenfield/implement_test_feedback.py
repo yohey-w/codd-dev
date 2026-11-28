@@ -15,6 +15,7 @@ import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
+from io import BytesIO
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
@@ -26,10 +27,12 @@ from codd.greenfield.pipeline import (
     _declared_output_is_file_path,
     _is_glob_decl,
 )
+from codd.implementer import COMMENT_PREFIX_BY_SUFFIX
 from codd.languages.builtin_adapters import ensure_builtin_adapters_registered
 from codd.languages.contract import resolve_language_profile
 from codd.languages.registry import UnknownLanguageError, default_adapter_registry
 from codd.operational_e2e_audit import _COVER_MARKER_RE
+from codd.path_safety import iter_project_glob
 from codd.reference_resolution import AUDIT_RELATIVE_PATH
 from codd.repair.verify_runner import VerifyRunner, _command_output_tail
 from codd.verifiable_behavior_audit import coverage_gate_enabled
@@ -48,9 +51,9 @@ _ADVICE = (
 
 
 class DeclaredOutputs:
-    """Match exact file and directory declarations, including extensionless files."""
+    """File and directory scopes with globs expanded to existing files."""
 
-    def __init__(self, root: Path, outputs):
+    def __init__(self, root: Path, outputs, *, expand_globs: bool = True):
         self.root = root
         self.paths: dict[Path, bool] = {}
         for raw in outputs:
@@ -58,7 +61,12 @@ class DeclaredOutputs:
             path = Path(name)
             if not name or not path.parts or path.is_absolute() or ".." in path.parts:
                 continue
-            if ":" in name or _is_glob_decl(name):
+            if ":" in name:
+                continue
+            if expand_globs and _is_glob_decl(name):
+                for match in iter_project_glob(root, name, follow_symlinks=False):
+                    if match.is_file():
+                        self.paths[match.relative_to(root)] = False
                 continue
             target = root / path
             if target.resolve() != target:
@@ -82,7 +90,48 @@ class DeclaredOutputs:
 
     @property
     def names(self) -> tuple[str, ...]:
-        return tuple(path.as_posix() for path in self.paths)
+        return tuple(path.as_posix() + ("/" if directory else "")
+                     for path, directory in self.paths.items())
+
+
+def _traceability_design(root: Path, path: Path, content: bytes) -> str | None:
+    prefix = COMMENT_PREFIX_BY_SUFFIX.get(path.suffix.lower())
+    if prefix is None:
+        return None
+    leader = f"{prefix} @".encode()
+    lines = BytesIO(content)
+    first = lines.readline()
+    if first.startswith(b"#!"):
+        first = lines.readline()
+    while first and not first.strip():
+        first = lines.readline()
+    if first.strip() != leader + b"generated-by: codd implement":
+        return None
+
+    fields = {}
+    for line in lines:
+        line = line.strip()
+        if not line.startswith(leader):
+            break
+        key, _, value = line[len(leader):].partition(b": ")
+        if key in (b"design-node", b"output-paths"):
+            if key in fields:
+                return None
+            fields[key] = value
+    try:
+        design = fields[b"design-node"].decode().strip()
+        scopes = fields[b"output-paths"].decode().split(", ")
+    except (KeyError, UnicodeDecodeError):
+        return None
+    if not design:
+        return None
+    # Implementation scopes are literal path prefixes. A broad prefix in the
+    # banner can vouch for this file only.
+    for scope in scopes:
+        scope = scope.strip()
+        if scope and (root / path).is_relative_to(root / scope):
+            return design
+    return None
 
 
 @dataclass(frozen=True)
@@ -317,7 +366,7 @@ class _Feedback:
         self.snapshot = _Snapshot(root, tuple(state["ignored"]), state["environment_paths"])
         self.target: dict[str, _Entry] = {}
         self.environment_dirty = False
-        self.outputs = {task.task_id: DeclaredOutputs(root, task.expected_outputs) for task in tasks}
+        self.outputs: dict[str, DeclaredOutputs] = {}
         self.logs = {AUDIT_RELATIVE_PATH}
         try:
             usage_log = resolve_usage_log(config, root)
@@ -325,6 +374,21 @@ class _Feedback:
             usage_log = None
         if usage_log is not None and usage_log.is_relative_to(root) and not usage_log.is_dir():
             self.logs.add(usage_log.relative_to(root))
+
+    def round_outputs(self) -> dict[str, DeclaredOutputs]:
+        outputs = {task.task_id: DeclaredOutputs(self.root, task.expected_outputs) for task in self.tasks}
+        by_design = defaultdict(list)
+        for task in self.tasks:
+            by_design[task.design_node.strip()].append(task.task_id)
+        for rel, entry in sorted(self.target.items()):
+            if not stat.S_ISREG(entry.mode):
+                continue
+            path = Path(rel)
+            design = _traceability_design(self.root, path, entry.data)
+            owners = by_design.get(design, ())
+            if len(owners) == 1 and not any(declared.matches(path) for declared in outputs.values()):
+                outputs[owners[0]].paths[path] = False
+        return outputs
 
     def emit(self, message: str) -> None:
         self.pipeline.echo(f"[implement test feedback] {message}")
@@ -342,6 +406,7 @@ class _Feedback:
         self.display = self.command if isinstance(self.command, str) else shlex.join(self.command)
         try:
             self.target = self.snapshot.capture()
+            self.outputs = self.round_outputs()
             round_record["environment_before"] = self.snapshot.environment_fingerprint()
             self.snapshot.persist(self.target, _round_archive(self.snapshot, round_record))
         except (OSError, ValueError) as exc:
@@ -427,7 +492,16 @@ class _Feedback:
             return None
         owners = set()
         for origin in origins:
-            matches = [owner for owner, outputs in self.outputs.items() if outputs.allows(Path(origin))]
+            path = Path(origin)
+            # Tests can change paths on disk. A captured entry has no symlink
+            # ancestors because the snapshot walk never descends through links.
+            entry = self.target.get(path.as_posix())
+            if entry is not None and stat.S_ISLNK(entry.mode):
+                return None
+            matches = [
+                owner for owner, outputs in self.outputs.items()
+                if (outputs.matches(path) if entry is not None else outputs.allows(path))
+            ]
             if len(matches) != 1:
                 return None
             owners.add(matches[0])

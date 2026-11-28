@@ -3125,17 +3125,9 @@ class GreenfieldPipeline:
         elapsed: dict[str, float] = {}
         failed_task_ids: list[str] = []
         for task in tasks:
-            # FIX-3 (Fable5 ts-v9 Secondary 2): a task that authors NO artifact can
-            # repair nothing, so it must never consume an AI call inside a repair
-            # scope. The first-pass runner already short-circuits these (see
-            # ``_default_implement_task_runner`` above); the rerun / broad-campaign
-            # path funnels through HERE, so this is the belt-and-braces skip that
-            # closes it for EVERY scope (legacy-broad, fenced narrow/expanded, and
-            # the chunked-broad phase that scopes all tasks). It echoes the skip —
-            # exactly like the first-pass short-circuit — instead of re-running the
-            # doc/gate task and emitting the "outside output paths ['src','tests']"
-            # noise the wasted retries produced (8 calls/campaign in the ts-v9 plan).
-            if _task_declares_no_authored_artifact(task, config):
+            # Oracle/VB repair may include gate tasks that author nothing.
+            # Test feedback has already located a real output for each task it returns.
+            if not feedback_output_paths and _task_declares_no_authored_artifact(task, config):
                 self.echo(
                     f"[greenfield] re-implement {task.task_id}: skip — verification/gate "
                     "or non-codebase task (no authored artifact; nothing to repair)."
@@ -3158,13 +3150,14 @@ class GreenfieldPipeline:
 
             declared_paths = feedback_output_paths or task.output_paths
             output_paths = list(declared_paths) if declared_paths else _output_paths_for_task(config, task)
+            expected_outputs = list(feedback_output_paths or task.expected_outputs)
             started = time.monotonic()
             try:
                 implement_tasks(
                     project_root,
                     design=task.design_node,
                     output_paths=output_paths,
-                    expected_outputs=list(task.expected_outputs),
+                    expected_outputs=expected_outputs,
                     task_title=task.title,
                     task_description=task.description,
                     ai_command=self.ai_command,

@@ -4152,7 +4152,8 @@ def _write_generated_files(
         from codd.ai_invoke import _CapturedFileOutput
         from codd.greenfield.implement_test_feedback import DeclaredOutputs
 
-        declared = DeclaredOutputs(project_root, spec.expected_outputs)
+        # Feedback supplies already-expanded paths, including banner-owned files.
+        declared = DeclaredOutputs(project_root, spec.expected_outputs, expand_globs=False)
         changed = raw_output.changed_paths if isinstance(raw_output, _CapturedFileOutput) else ()
         headers = file_block_paths(raw_output)
         for path in [*headers, *changed]:
