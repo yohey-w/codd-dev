@@ -3628,13 +3628,7 @@ def build_mechanical_contract_context(
     )
 
 
-def _test_writing_guidance(
-    declared_outputs: Iterable[str], config: dict[str, Any],
-) -> str:
-    from codd.greenfield.pipeline import _KIND_TEST, _classify_declared_output
-
-    if not any(_classify_declared_output(path, config) == _KIND_TEST for path in declared_outputs):
-        return ""
+def _test_writing_guidance() -> str:
     return (
         "Elapsed-time measurements:\n"
         "- When a test measures elapsed time, define for each measured target where it starts, completes and fails, "
@@ -3642,6 +3636,10 @@ def _test_writing_guidance(
         "and one that is cut short, and on failure record which events and times the verdict used.\n\n"
         "Test-only certificates:\n"
         f"{generator_module.TEST_CERTIFICATE_RULE}\n\n"
+        "Delayed effects:\n"
+        "- When an action's effect appears later or in another process, wait with a timeout for the "
+        "expected state before asserting it. A single read immediately after the action may occur "
+        "before the effect appears. Keep the direct assertion and put the wait before it.\n\n"
     )
 
 
@@ -3845,7 +3843,8 @@ def _build_implementation_prompt(
         if mechanical_block:
             lines.extend([mechanical_block, ""])
 
-    if _spec_targets_tests(spec, config):
+    targets_tests = _spec_targets_tests(spec, config)
+    if targets_tests:
         test_framework = resolve_test_framework_guidance(language)
         if test_framework is not None:
             lines.extend(
@@ -3936,8 +3935,13 @@ def _build_implementation_prompt(
                 ]
             )
 
-    declared_outputs = spec.expected_outputs or spec.output_paths
-    lines.extend(_test_writing_guidance(declared_outputs, config).splitlines())
+    from codd.greenfield.pipeline import _KIND_TEST, _classify_declared_output
+
+    if targets_tests or any(
+        _classify_declared_output(path, config) == _KIND_TEST
+        for path in (*spec.expected_outputs, *spec.output_paths)
+    ):
+        lines.extend(_test_writing_guidance().splitlines())
 
     lines.extend([
         "Required output format (repeat this block for each file and output nothing else):",
