@@ -48,6 +48,7 @@ _VERSION_CONTROL_METADATA = frozenset({".git", ".hg", ".svn", ".bzr", "_darcs"})
 _MISSING_SELECTED_CASE = "the runner did not observe the selected case"
 _REGRESSION_REASON = "previously passing test now fails in isolation"
 _UNSTABLE_REASON = "unstable test still fails"
+_UNSTABLE_ASSERTIONS_REASON = "unstable test assertions changed"
 STATE_DIRECTORY = ".codd/implement-test-feedback"
 _ARCHIVE = f"{STATE_DIRECTORY}/rollback.zip"
 _ADVICE = (
@@ -64,7 +65,8 @@ _UNSTABLE_ADVICE = (
     "and failure output as quoted evidence. Make each test deterministic. For each assertion, "
     "wait with a timeout for the expected state. Waiting for a response, request completion, "
     "or an action to return does not wait for that state. Do not depend on test order or state "
-    "left by other tests. Preserve the assertions. Each test must pass in the full suite and in "
+    "left by other tests. Preserve the assertions without broadening the values they accept. "
+    "Each test must pass in the full suite and in "
     "three consecutive isolated runs."
 )
 
@@ -337,6 +339,11 @@ def _restore_round_for_provisioning(snapshot, round_record) -> bool:
     return True
 
 
+def _discard_feedback_environment(snapshot, state) -> None:
+    snapshot.discard_environment()
+    state.get("pending_unstable", {}).clear()
+
+
 def recover_interrupted_feedback(root, record, echo, checkpoint) -> None:
     state = record["test_feedback"]
     snapshot = _Snapshot(root, tuple(state["ignored"]), state.get("environment_paths", ()))
@@ -345,7 +352,7 @@ def recover_interrupted_feedback(root, record, echo, checkpoint) -> None:
             continue
         had_baseline = _restore_round_for_provisioning(snapshot, round_record)
         if had_baseline and snapshot.environment_changed(round_record.get("environment_before")):
-            snapshot.discard_environment()
+            _discard_feedback_environment(snapshot, state)
         round_record["screened"].clear()
         for attempt in round_record["attempts"]:
             if attempt["decision"] != "started":
@@ -353,7 +360,7 @@ def recover_interrupted_feedback(root, record, echo, checkpoint) -> None:
             if not had_baseline:
                 snapshot.restore(snapshot.read(snapshot.archive))
             if snapshot.environment_changed(attempt.get("environment_before")):
-                snapshot.discard_environment()
+                _discard_feedback_environment(snapshot, state)
             attempt.update(decision="rejected", reason="interrupted; restored before resuming", interrupted=True)
             checkpoint(root)
             snapshot.archive.unlink(missing_ok=True)
@@ -390,6 +397,10 @@ class _Feedback:
         self.tasks = tasks
         self.state = state
         self.pending_unstable = state.setdefault("pending_unstable", {})
+        # Older checkpoints did not establish ownership from the failed run.
+        for case, observation in list(self.pending_unstable.items()):
+            if "failure_owner" not in observation:
+                del self.pending_unstable[case]
         self.options = options
         self.config = config
         self.adapter = adapter
@@ -461,7 +472,15 @@ class _Feedback:
         try:
             self.target = self.snapshot.capture()
             self.outputs = self.round_outputs()
-            round_record["environment_before"] = self.snapshot.environment_fingerprint()
+            environment = self.snapshot.environment_fingerprint()
+            if self.pending_unstable:
+                previous_environment = next(
+                    (record["environment_before"] for record in reversed(self.state["rounds"])
+                     if "environment_before" in record), None,
+                )
+                if environment != previous_environment:
+                    self.pending_unstable.clear()
+            round_record["environment_before"] = environment
             self.snapshot.persist(self.target, _round_archive(self.snapshot, round_record))
         except (OSError, ValueError) as exc:
             return f"cannot snapshot project artifacts: {exc}"
@@ -581,7 +600,10 @@ class _Feedback:
             "output": failed.output or _command_output_tail("\n\n".join(f["detail"] for f in failures), None),
         }
         round_record.setdefault("unstable_observations", []).append(observation)
-        if self.owner({"origin": observation["file"]}) is not None:
+        failure_owners = {self.owner(failure) for failure in failures}
+        if (len(failure_owners) == 1 and None not in failure_owners
+                and self.owner({"origin": observation["file"]}) is not None):
+            observation["failure_owner"] = next(iter(failure_owners))
             self.pending_unstable.setdefault(case, observation)
         self.pipeline._checkpoint(self.root)
 
@@ -666,12 +688,22 @@ class _Feedback:
             for f in suite.failures
         )
 
-    def change_problem(self, owner, before, after) -> str | None:
+    def change_problem(self, owner, before, after, unstable) -> str | None:
         outside = [rel for rel, new in _writes(before, after).items() if not self.allowed_change(
             Path(rel), self.outputs[owner], before.get(rel), new
         )]
         if outside:
             return f"write outside declared outputs: {', '.join(sorted(outside))}"
+        preserves = getattr(self.adapter, "preserves_case_assertions", None)
+        if preserves is not None:
+            for case, observation in unstable.items():
+                path = observation["file"]
+                old, new = before.get(path), after.get(path)
+                if not old or not stat.S_ISREG(old.mode) or old == new:
+                    continue
+                new_bytes = new.data if new and stat.S_ISREG(new.mode) else b""
+                if not preserves(path, case, old.data, new_bytes, callable_assertions=self.callable_assertions):
+                    return f"{_UNSTABLE_ASSERTIONS_REASON}: {case}"
         return self.integrity_problem(before, after)
 
     def assess(self, round_record, attempt, suite, failures, owner, before, target) -> tuple[str | None, _Suite]:
@@ -837,8 +869,6 @@ class _Feedback:
         }
         if unstable:
             attempt["unstable_cases"] = unstable
-            for case in unstable:
-                self.pending_unstable.pop(case)
         round_record["attempts"].append(attempt)
         previous_target = _round_archive(self.snapshot, round_record, round_record.get("kept_attempt", 0))
         returning = f"returning {len(failures)} reproducible failure(s)/error(s)"
@@ -894,7 +924,7 @@ class _Feedback:
         if not self.environment_dirty and reason is None:
             try:
                 proposed = self.snapshot.capture()
-                reason = self.change_problem(owner, before, proposed)
+                reason = self.change_problem(owner, before, proposed, unstable)
                 if reason is None:
                     target = self.candidate_target(owner, proposed)
                     self.snapshot.restore(target)
@@ -913,7 +943,7 @@ class _Feedback:
                 "discarding and reprovisioning it"
             )
             _restore_round_for_provisioning(self.snapshot, round_record)
-            self.snapshot.discard_environment()
+            _discard_feedback_environment(self.snapshot, self.state)
             round_record["screened"].clear()
             candidate = suite
         elif reason is not None:
@@ -924,6 +954,8 @@ class _Feedback:
             round_record["screened"].clear()
         accepted_reason = "failures decreased" if failures else "unstable tests passed the suite and isolated checks"
         attempt.update(decision="rejected" if reason else "accepted", reason=reason or accepted_reason)
+        for case in unstable:
+            self.pending_unstable.pop(case, None)
         if dirty:
             self.pipeline._checkpoint(self.root)
             candidate.unavailable = self.prepare(round_record)
@@ -952,18 +984,20 @@ class _Feedback:
                 continue
             problem = self.prepare(round_record)
             suite = _Suite(unavailable=problem) if problem else self.run_tests(round_record, f"round {index + 1} suite")
-            handled = {attempt["owner"] for attempt in round_record["attempts"]}
-            handled.update(
+            handled = {attempt["owner"] for attempt in round_record["attempts"] if not attempt.get("interrupted")}
+            # Interrupted work stays ineligible for ordinary failure feedback.
+            # Pending unstable observations can still be returned on resume.
+            interrupted = {
                 attempt["owner"] for recorded in self.state["rounds"]
                 for attempt in recorded["attempts"] if attempt.get("interrupted")
-            )
+            }
             limited = set(round_record.get("cases_outside_isolation_budget", ()))
             unreproduced = set()
             isolation_problem = None
             while not suite.unavailable:
                 pending = {
                     owner: failures for owner, failures in self.owner_groups(suite)
-                    if owner not in handled and owner not in unreproduced
+                    if owner not in handled and owner not in interrupted and owner not in unreproduced
                 }
                 for owner in sorted(self.unstable_groups().keys() - handled):
                     pending.setdefault(owner, [])
@@ -999,13 +1033,15 @@ class _Feedback:
                 if time_exhausted:
                     break
             # A clean suite can still leave evidence for an owner already handled this round.
-            stop = bool(suite.unavailable) or not (self.owner_groups(suite) or self.unstable_groups())
+            stop = bool(suite.unavailable) or not (
+                self.unstable_groups() or any(owner not in interrupted for owner, _ in self.owner_groups(suite))
+            )
             if limited:
                 self.emit(f"{len(limited)} failing case(s) left outside the isolation budget")
             if round_record.get("baseline_saved"):
                 self.snapshot.restore(self.target)
                 if self.environment_dirty:
-                    self.snapshot.discard_environment()
+                    _discard_feedback_environment(self.snapshot, self.state)
                     self.emit("test environment changed; discarded before the next run")
             round_record.update(done=True, stop=stop)
             problem = suite.unavailable or isolation_problem

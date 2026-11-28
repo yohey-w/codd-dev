@@ -6,7 +6,7 @@ import ast
 import json
 import os
 import shutil
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
@@ -105,13 +105,7 @@ class PytestFeedbackAdapter:
     def test_metrics(
         self, path: str, content: bytes, *, callable_assertions: Collection[str],
     ) -> tuple[int, int, int] | None:
-        from codd.vb_marker_authenticity import (
-            PythonTestBlockProfile,
-            _WITH_ASSERT_CONTEXT_CALLEES,
-            _is_py_primitive_assert_node,
-            _py_callee_name,
-            _python_test_function_nodes,
-        )
+        from codd.vb_marker_authenticity import PythonTestBlockProfile, _python_test_function_nodes
 
         if not PythonTestBlockProfile().handles_file(path):
             return None
@@ -125,35 +119,87 @@ class PytestFeedbackAdapter:
             for node in nodes
         )
         functions = _python_test_function_nodes(ast.unparse(tree))
-        # Keep every meaning of an alias in this file. An unrelated import
-        # in another scope must not hide a possible assertion.
-        aliases = defaultdict(set)
-        for node in nodes:
-            if isinstance(node, ast.Import):
-                for name in node.names:
-                    if name.asname:
-                        aliases[name.asname].add(name.name)
-            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-                for name in node.names:
-                    aliases[name.asname or name.name].add(f"{node.module}.{name.name}")
+        assertions = _assertion_nodes(nodes, nodes, callable_assertions)
+        return len(functions), sum(1 for _ in assertions), disabled
 
-        def matches(call, known_assertions):
-            callee = _py_callee_name(call.func)
-            name, dot, member = callee.partition(".")
-            return callee in known_assertions or any(
-                alias + dot + member in known_assertions for alias in aliases.get(name, ())
-            )
+    def preserves_case_assertions(
+        self, path: str, case: str, before: bytes, after: bytes, *, callable_assertions: Collection[str],
+    ) -> bool:
+        """Compare direct assertions for the collected test, ignoring source positions."""
+        from codd.vb_marker_authenticity import PythonTestBlockProfile
 
-        context_calls = {
-            item.context_expr
-            for node in nodes if isinstance(node, (ast.With, ast.AsyncWith))
-            for item in node.items if isinstance(item.context_expr, ast.Call)
-        }
-        assertions = sum(_is_py_primitive_assert_node(node) for node in nodes
-                         if not isinstance(node, (ast.With, ast.AsyncWith)))
-        assertions += sum(matches(call, _WITH_ASSERT_CONTEXT_CALLEES) for call in context_calls)
-        for node in nodes:
-            if (isinstance(node, ast.Call) and node not in context_calls
-                    and len(node.args) >= 2 and matches(node, callable_assertions)):
-                assertions += 1
-        return len(functions), assertions, disabled
+        if not PythonTestBlockProfile().handles_file(path):
+            return True
+        _, delimiter, selection = case.partition("::")
+        names = selection.partition("[")[0].split("::")
+        if not delimiter or not names[-1].startswith("test_") or not all(n.isidentifier() for n in names):
+            return True
+        try:
+            old_tree = ast.parse(before, filename=path)
+            new_tree = ast.parse(after, filename=path)
+        except (SyntaxError, ValueError):
+            return True
+
+        def assertions(tree):
+            body = tree.body
+            kinds_by_name = [ast.ClassDef] * (len(names) - 1) + [(ast.FunctionDef, ast.AsyncFunctionDef)]
+            for name, kinds in zip(names, kinds_by_name):
+                definition = next((node for node in reversed(body) if isinstance(node, kinds) and node.name == name), None)
+                if definition is None:
+                    return Counter()
+                body = definition.body
+            return Counter(ast.dump(node) for node in _assertion_nodes(
+                list(_test_body_nodes(body)), ast.walk(tree), callable_assertions,
+            ))
+
+        return not (assertions(old_tree) - assertions(new_tree))
+
+
+def _test_body_nodes(body):
+    pending = list(body)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        yield node
+        pending.extend(ast.iter_child_nodes(node))
+
+
+def _assertion_nodes(nodes, alias_nodes, callable_assertions):
+    from codd.vb_marker_authenticity import (
+        _WITH_ASSERT_CONTEXT_CALLEES,
+        _is_py_primitive_assert_node,
+        _py_callee_name,
+    )
+
+    # Keep every meaning of an alias in this file. An unrelated import
+    # in another scope must not hide a possible assertion.
+    aliases = defaultdict(set)
+    for node in alias_nodes:
+        if isinstance(node, ast.Import):
+            for name in node.names:
+                if name.asname:
+                    aliases[name.asname].add(name.name)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for name in node.names:
+                aliases[name.asname or name.name].add(f"{node.module}.{name.name}")
+
+    def matches(call, known_assertions):
+        callee = _py_callee_name(call.func)
+        name, dot, member = callee.partition(".")
+        return callee in known_assertions or any(
+            alias + dot + member in known_assertions for alias in aliases.get(name, ())
+        )
+
+    context_calls = {
+        item.context_expr
+        for node in nodes if isinstance(node, (ast.With, ast.AsyncWith))
+        for item in node.items if isinstance(item.context_expr, ast.Call)
+    }
+    for node in nodes:
+        if not isinstance(node, (ast.With, ast.AsyncWith)) and _is_py_primitive_assert_node(node):
+            yield node
+        if isinstance(node, ast.Call) and node not in context_calls and len(node.args) >= 2:
+            if matches(node, callable_assertions):
+                yield node
+    yield from (call for call in context_calls if matches(call, _WITH_ASSERT_CONTEXT_CALLEES))
