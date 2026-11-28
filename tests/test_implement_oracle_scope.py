@@ -28,6 +28,8 @@ Coverage:
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -486,6 +488,49 @@ def test_find_orphan_artifacts_flags_unowned_file(tmp_path: Path) -> None:
     orphans = [o.path for o in find_orphan_artifacts(index, tmp_path)]
     assert "e2e/invented.test.ts" in orphans
     assert "src/index.ts" not in orphans, "an owned file is not an orphan"
+
+
+@pytest.mark.parametrize("env_dir", [".venv", "tools/env"])
+def test_find_orphan_artifacts_skips_virtualenv(tmp_path: Path, env_dir: str) -> None:
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(tmp_path / env_dir)], check=True
+    )
+    _write(tmp_path, f"{env_dir}/lib/site-packages/driver/index.mjs", "export {};\n")
+    _write(tmp_path, f"{env_dir}/lib/site-packages/driver/cli.js", "export {};\n")
+    index = build_path_owner_index([], project_root=tmp_path)
+
+    assert find_orphan_artifacts(index, tmp_path) == []
+
+
+@pytest.mark.parametrize("source_dir", ["scripts", ".venv"])
+def test_find_orphan_artifacts_scans_dirs_without_virtualenv_marker(
+    tmp_path: Path, source_dir: str
+) -> None:
+    unowned = f"{source_dir}/unowned.js"
+    _write(tmp_path, unowned, "export {};\n")
+    index = build_path_owner_index([], project_root=tmp_path)
+
+    assert [orphan.path for orphan in find_orphan_artifacts(index, tmp_path)] == [unowned]
+
+
+@pytest.mark.parametrize("missing", ["python", "config", "home"])
+def test_find_orphan_artifacts_scans_incomplete_virtualenv(tmp_path: Path, missing: str) -> None:
+    source_dir = tmp_path / "scripts"
+    if missing == "python":
+        _write(source_dir, "pyvenv.cfg", f"home = {Path(sys.executable).parent}\n")
+    else:
+        subprocess.run(
+            [sys.executable, "-m", "venv", "--without-pip", str(source_dir)], check=True
+        )
+        marker = source_dir / "pyvenv.cfg"
+        if missing == "config":
+            marker.unlink()
+        else:
+            marker.write_text("", encoding="utf-8")
+    _write(source_dir, "frontend.js", "export {};\n")
+    index = build_path_owner_index([], project_root=tmp_path)
+
+    assert [orphan.path for orphan in find_orphan_artifacts(index, tmp_path)] == ["scripts/frontend.js"]
 
 
 def test_find_orphan_artifacts_adopts_dir_owned_helper(tmp_path: Path) -> None:
