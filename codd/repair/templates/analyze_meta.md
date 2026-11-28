@@ -13,7 +13,7 @@ DAG context:
 {dag_context}
 
 Rules:
-- Stay domain-neutral. Do not assume a framework, platform, vendor, or product.
+- Stay domain-neutral. Do not assume a framework, platform, vendor, or product.{auto_scope_rules}
 - Prefer the smallest repair that restores consistency across the affected artifacts.
 - Use "unified_diff" as the default repair_strategy.
 - Use "full_file_replacement" only when a complete file rewrite is clearly safer than a patch.
