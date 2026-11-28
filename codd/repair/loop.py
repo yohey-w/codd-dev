@@ -12,7 +12,7 @@ from typing import Any, Callable, Literal, Mapping
 
 from codd.config import find_codd_dir, load_project_config
 from codd.dag import DAG
-from codd.path_safety import resolve_project_path
+from codd.path_safety import project_relative_path, resolve_project_path
 from codd.repair.approval_repair import (
     RepairApprovalError,
     RepairApprovalMode,
@@ -265,9 +265,10 @@ class RepairLoop:
             rca = None
             proposal = None
             try:
+                auto_scope = self.config.approval_mode == "auto"
                 rca = engine.analyze(current_failure, dag, **_supported_kwargs(
-                    engine.analyze, repair_context=repair_context, record_call=record_call))
-                if self.config.approval_mode == "auto":
+                    engine.analyze, repair_context=repair_context, record_call=record_call, auto_scope=auto_scope))
+                if auto_scope:
                     rca = self._retry_out_of_scope_analysis(
                         engine, rca, current_failure, dag, codd_yaml, repair_context, record_call, evidence,
                     )
@@ -676,9 +677,8 @@ class RepairLoop:
         record_call: Callable[..., None],
         evidence: dict,
     ) -> RootCauseAnalysis:
-        paths = list(filter(None, map(_normalize, self._candidate_paths(rca, dag))))
-        classify = _scope_path_checker(failure, rca, codd_yaml)
-        if not paths or any(classify(path) is None for path in paths):
+        paths = self._candidate_paths(rca, dag)
+        if not any(map(_normalize, paths)) or self._has_in_scope_target(paths, failure, rca, codd_yaml):
             return rca
 
         implementation_paths = self._retry_implementation_paths(rca, failure, dag, codd_yaml)
@@ -691,21 +691,34 @@ class RepairLoop:
             f"Editable implementation paths from the DAG:\n{json.dumps(implementation_paths)}"
         )
         evidence["analysis_retried"] = True
+        missing_before = len(evidence["missing"])
         try:
             retry = engine.analyze(failure, dag, **_supported_kwargs(
-                engine.analyze, repair_context=retry_context, record_call=record_call))
-        except HistoryUnavailableError:
-            raise
+                engine.analyze, repair_context=retry_context, record_call=record_call, auto_scope=True))
         except Exception as exc:  # A failed optional analysis leaves the first answer usable.
             evidence["analysis_retry_error"] = type(exc).__name__
             return rca
 
-        classify = _scope_path_checker(failure, retry, codd_yaml)
-        for raw_path in self._candidate_paths(retry, dag):
-            path = _normalize(raw_path)
-            if path and classify(path) is None:
-                return retry
+        # History records post-call write failures as missing evidence.
+        if len(evidence["missing"]) != missing_before:
+            evidence["analysis_retry_error"] = HistoryUnavailableError.__name__
+            return rca
+
+        if self._has_in_scope_target(self._candidate_paths(retry, dag), failure, retry, codd_yaml):
+            return retry
         return rca
+
+    def _has_in_scope_target(
+        self, paths: list[str], failure: VerificationFailureReport, rca: RootCauseAnalysis,
+        codd_yaml: Mapping[str, Any],
+    ) -> bool:
+        classify = _scope_path_checker(failure, rca, codd_yaml)
+        for raw_path in paths:
+            # Creation patches can target paths that are still absent.
+            path = project_relative_path(self.project_root, raw_path)
+            if path and classify(path) is None:
+                return True
+        return False
 
     def _retry_implementation_paths(
         self, rca: RootCauseAnalysis, failure: VerificationFailureReport, dag: DAG, codd_yaml: Mapping[str, Any],
@@ -716,16 +729,21 @@ class RepairLoop:
             return []
         source_roots = [self._resolve_project_file(str(path)) for path in source_dirs]
         project_root = self.project_root.resolve()
+        evidence_paths = {project_relative_path(self.project_root, raw) for raw in failure.evidence_nodes}
         paths: set[str] = set()
         for node in dag.nodes.values():
+            if node.kind in {"test_file", "verification_test", "design_doc", "deployment_doc"}:
+                continue
+            if node.kind == "common" and "frontmatter" in node.attributes:
+                continue
             raw_path = node.path or node.attributes.get("path")
             resolved = self._resolve_project_file(str(raw_path)) if raw_path else None
             if resolved is None or not resolved.is_file():
                 continue
             if not any(root is not None and resolved.is_relative_to(root) for root in source_roots):
                 continue
-            path = _normalize(resolved.relative_to(project_root).as_posix())
-            if _is_test_file(path):
+            path = resolved.relative_to(project_root).as_posix()
+            if path in evidence_paths or _is_test_file(path) or _is_oracle_artifact(path):
                 continue
             # The retry can name this path explicitly. Check scope with the
             # allowlist that such an answer would produce.
