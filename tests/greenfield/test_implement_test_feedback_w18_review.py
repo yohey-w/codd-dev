@@ -23,6 +23,7 @@ def test_unreproduced_owner_is_rechecked_after_acceptance(project_factory, case_
         @pytest.mark.parametrize("index", range({case_count}))
         def test_a(request, index):
             if len(request.session.items) == 1 and (not test_zother.FIXED or index != 0):
+                request.addfinalizer(lambda: pytest.fail("isolation failed in teardown"))
                 return
             actual = [7][1]
             assert actual == 7
@@ -48,6 +49,7 @@ def test_unreproduced_owner_is_rechecked_after_acceptance(project_factory, case_
     assert [(a["owner"], a["decision"]) for a in record["attempts"]] == [
         ("b", "accepted"), ("a", "accepted"),
     ]
+    assert record["passed_in_isolation"] == 0
     events = trace.read_text().splitlines()
     isolated = f"isolate {TEST_FILE}::test_a[0]"
     before = events.index("feedback b")
@@ -61,8 +63,11 @@ def test_unreproduced_owner_is_rechecked_after_reprovisioning(project_factory):
     first = textwrap.dedent(f"""\
         from pathlib import Path
 
+        import pytest
+
         def test_a(request):
             if len(request.session.items) == 1 and Path({asset!r}).read_text() == "initial":
+                request.addfinalizer(lambda: pytest.fail("isolation failed in teardown"))
                 return
             actual = [7][1]
             assert actual == 7
@@ -90,6 +95,7 @@ def test_unreproduced_owner_is_rechecked_after_reprovisioning(project_factory):
     assert [(a["owner"], a["decision"]) for a in record["attempts"]] == [
         ("b", "rejected"), ("a", "accepted"),
     ]
+    assert record["passed_in_isolation"] == 0
     assert "discarding and reprovisioning" in record["attempts"][0]["reason"]
     assert any(run["purpose"] == "suite after reprovisioning" for run in record["runs"])
 

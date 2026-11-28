@@ -245,7 +245,7 @@ def test_disabled_matches_main_commands_and_artifacts(project_factory):
     assert snapshots[0] == snapshots[1]
 
 
-def test_helper_first_and_only_reproducible_owned_test_failures_are_sent(project_factory):
+def test_helper_first_and_owned_reproducible_and_unstable_tests_are_sent(project_factory):
     tests = """\
 from checks.support import helpers
 from stub_app import subject
@@ -261,6 +261,7 @@ def test_flaky(request):
     assert actual == 1
 
 """ + TESTS
+    fixed_tests = tests.replace(TESTS, FIXED).replace("len(request.session.items)", "1")
     pipeline, root, trace, stdout = project_factory(
         initial={
             "case": {TEST_FILE: tests},
@@ -268,7 +269,7 @@ def test_flaky(request):
             "application": {APP: "def value():\n    return [7][1]\n"},
         },
         fixes={
-            "case": {"files": {TEST_FILE: tests.replace(TESTS, FIXED)}},
+            "case": {"files": {TEST_FILE: fixed_tests}},
             "helper": {"files": {HELPER: "def value():\n    return 7\n"}},
         },
         owned={"case": (TEST_FILE,), "helper": ("checks/support/",), "application": (APP,)},
@@ -286,7 +287,11 @@ def test_flaky(request):
     assert round_record["passed_in_isolation"] == 1
     assert any(run["purpose"] == "suite after helper decision" for run in round_record["runs"])
     assert [item["decision"] for item in round_record["attempts"]] == ["accepted", "accepted"]
-    assert [(item["before"], item["after"]) for item in round_record["attempts"]] == [(1, 0), (3, 2)]
+    assert [(item["before"], item["after"]) for item in round_record["attempts"]] == [(1, 0), (2, 1)]
+    case_prompt = trace.with_name("prompt-case").read_text()
+    reproduced, unstable = case_prompt.split("\n\nUnstable tests\n", 1)
+    assert "test_subject (call" in reproduced
+    assert f"{TEST_FILE}::test_flaky\nPassed in " in unstable
     helper_prompt = trace.with_name("prompt-helper").read_text()
     review = helper_prompt.split("--- REVIEW FEEDBACK", 1)[1].split("--- END REVIEW FEEDBACK", 1)[0]
     assert HELPER in review and "test_helper" in review

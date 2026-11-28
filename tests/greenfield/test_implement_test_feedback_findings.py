@@ -424,15 +424,18 @@ def test_isolation_does_not_import_other_test_modules(project_factory):
     )
     pipeline, root, trace, _ = project_factory(
         initial={"case": {TEST_FILE: primary, other_file: other}},
-        owned={"case": (TEST_FILE, other_file)}, fixes={},
+        owned={"case": (TEST_FILE, other_file)},
+        fixes={"case": {"files": {TEST_FILE: "# The collection dependency remains.\n" + primary}}},
     )
     result = pipeline.run(root)
     assert result.status == "success", result.error
     record = _round(root)
     assert record["runs"][0]["failures_and_errors"] == 1
     assert record["passed_in_isolation"] == 1
-    assert record["attempts"] == []
     assert f"isolate {TEST_FILE}::test_subject" in _trace(trace)
+    [attempt] = record["attempts"]
+    assert attempt["decision"] == "rejected"
+    assert attempt["reason"] == f"unstable test still fails: {TEST_FILE}::test_subject"
 
 
 def test_remaining_failure_is_isolated_after_helper(project_factory):
@@ -452,20 +455,25 @@ def test_remaining_failure_is_isolated_after_helper(project_factory):
             "case": {TEST_FILE: tests},
             "helper": {HELPER: "FIXED = False\ndef value():\n    return [7][1]\n"},
         },
-        fixes={"helper": {"files": {HELPER: "FIXED = True\ndef value():\n    return 7\n"}}},
+        fixes={
+            "helper": {"files": {HELPER: "FIXED = True\ndef value():\n    return 7\n"}},
+            "case": {"files": {TEST_FILE: "# The collection dependency remains.\n" + tests}},
+        },
         owned={"case": (TEST_FILE,), "helper": (HELPER,)},
     )
     result = pipeline.run(root)
     assert result.status == "success", result.error
     record = _round(root)
-    [helper] = record["attempts"]
+    helper, unstable = record["attempts"]
     assert (helper["owner"], helper["decision"]) == ("helper", "accepted")
     events = _trace(trace)
     isolate = f"isolate {TEST_FILE}::test_case_depends_on_collection"
     assert events.count(isolate) == 1
-    assert events.index("feedback helper") < events.index(isolate)
-    assert [run["purpose"] for run in record["runs"][-2:]] == ["suite after helper decision", "isolate"]
+    assert events.index("feedback helper") < events.index(isolate) < events.index("feedback case")
+    assert [run["purpose"] for run in record["runs"][-3:]] == ["suite after helper decision", "isolate", "candidate suite"]
     assert record["passed_in_isolation"] == 1
+    assert (unstable["owner"], unstable["decision"]) == ("case", "rejected")
+    assert unstable["reason"] == f"unstable test still fails: {TEST_FILE}::test_case_depends_on_collection"
 
 
 def test_explicit_null_uses_one_feedback_round(project_factory):

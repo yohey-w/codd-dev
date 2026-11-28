@@ -3639,7 +3639,9 @@ def _test_writing_guidance() -> str:
         "Delayed effects:\n"
         "- When an action's effect appears later or in another process, wait with a timeout for the "
         "expected state before asserting it. A single read immediately after the action may occur "
-        "before the effect appears. Keep the direct assertion and put the wait before it.\n\n"
+        "before the effect appears. Keep the direct assertion and put the wait before it. "
+        "Waiting for a response, request completion, or an action to return does not wait for "
+        "the expected state.\n\n"
     )
 
 

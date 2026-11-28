@@ -81,3 +81,12 @@ def test_y6_delayed_effects_wait_then_assert():
     assert "wait with a timeout for the expected state before asserting it" in bullet
     assert "A single read immediately after the action" in bullet
     assert "Keep the direct assertion and put the wait before it" in bullet
+
+
+def test_y12_delayed_effects_wait_for_state_after_action_returns():
+    prompt = build_prompt(implementer.ImplementSpec(DESIGN, ["checks/report.test.txt"]))
+    delayed_effects = prompt.split("Delayed effects:\n", 1)[1].split("\n\n", 1)[0]
+    assert (
+        "Waiting for a response, request completion, or an action to return does not wait for the expected state."
+        in delayed_effects
+    )

@@ -72,6 +72,8 @@ def test_candidate_isolation_counts_failure_even_if_teardown_replaces_helper(pro
         def test_b(request):
             if len(request.session.items) > 1:
                 assert helpers.extra() == 8
+            elif not helpers.EXTRA_FIXED:
+                request.addfinalizer(lambda: pytest.fail("isolation failed in teardown"))
         """)
     helper = textwrap.dedent("""\
         EXTRA_FIXED = False
