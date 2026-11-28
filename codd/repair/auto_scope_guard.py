@@ -48,6 +48,7 @@ This guard ADDS to the existing valves; it never weakens them.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import PurePosixPath
 import re
 from typing import Any, Iterable, Mapping
@@ -226,36 +227,13 @@ def evaluate_auto_patch_scope(
         # An empty proposal is rejected upstream; nothing to scope-check.
         return AutoScopeDecision(allowed=True, reason="no patch paths to validate")
 
-    failure_class = str(getattr(failure, "failure_class", "") or "")
-    code_addressable = bool(getattr(failure, "code_addressable", False))
-    allowlist = _editable_allowlist(failure, rca)
-    # Stack-contract path provenance from the project's ``stack:`` declaration (so a
-    # ``codd/stack/`` path is fenced only when the project actually declares it as a
-    # contract file — never a blind directory rule that would wrongly fence real CoDD
-    # framework source when CoDD is the SUT). Empty for a non-stack project.
-    declared_stack_paths = _declared_stack_contract_paths(codd_yaml)
-    # Containment is enforced strictly ONLY when the primary failure resolved a
-    # CONCRETE editable path set (B0 attribution of an executed test/typecheck
-    # failure). A purely structural DAG failure carries logical node IDs
-    # (``impl:main``, ``design:x``) that this guard does not expand into file
-    # paths without the DAG; for those the role-based oracle/test protections
-    # below still fully block the false-green vector, while legitimate
-    # source/doc drift repair keeps working (the historical structural path).
-    has_resolved_targets = any(_looks_like_path(item) for item in allowlist)
+    classify = _scope_path_checker(failure, rca, codd_yaml)
 
     offending: list[str] = []
     reasons: list[str] = []
     for patch in patches:
         path = _normalize(patch.file_path)
-        verdict = _classify_path(
-            path,
-            failure_class=failure_class,
-            code_addressable=code_addressable,
-            allowlist=allowlist,
-            enforce_containment=has_resolved_targets,
-            declared_stack_paths=declared_stack_paths,
-            patch_content=getattr(patch, "content", "") or "",
-        )
+        verdict = classify(path, patch_content=getattr(patch, "content", "") or "")
         if verdict is not None:
             offending.append(path)
             reasons.append(verdict)
@@ -274,6 +252,25 @@ def evaluate_auto_patch_scope(
             "to required approval."
         ),
         offending_paths=offending,
+    )
+
+
+def _scope_path_checker(
+    failure: VerificationFailureReport | None,
+    rca: RootCauseAnalysis | None,
+    codd_yaml: Mapping[str, Any] | None,
+) -> partial[str | None]:
+    """Bind the same scope inputs for analysis targets and proposed patches."""
+    allowlist = _editable_allowlist(failure, rca)
+    # Concrete targets activate containment. Structural DAG failures that carry
+    # only logical IDs still get the role checks.
+    return partial(
+        _classify_path,
+        failure_class=str(getattr(failure, "failure_class", "") or ""),
+        code_addressable=bool(getattr(failure, "code_addressable", False)),
+        allowlist=allowlist,
+        enforce_containment=any(_looks_like_path(item) for item in allowlist),
+        declared_stack_paths=_declared_stack_contract_paths(codd_yaml),
     )
 
 
