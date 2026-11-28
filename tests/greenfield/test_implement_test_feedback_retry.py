@@ -236,6 +236,32 @@ def test_pytest_cache_redirect_keeps_project_setting_on_failure_or_disable(tmp_p
         assert not run_cache.exists()
 
 
+def test_pytest_cache_redirect_keeps_distinct_configured_caches_apart(tmp_path, monkeypatch):
+    # A compound test command can run pytest twice with different cache_dir
+    # settings. Each configured cache gets its own private copy.
+    run_cache = tmp_path / "run-cache"
+    monkeypatch.setenv("CODD_TEST_FEEDBACK_CACHE_DIR", str(run_cache))
+    redirected = []
+    for name, value in (("setup-cache", "404"), ("service-cache", "200")):
+        project_cache = tmp_path / name
+        (project_cache / "v").mkdir(parents=True)
+        (project_cache / "v" / "expected").write_text(value)
+        ini = {"cache_dir": name}
+        config = SimpleNamespace(
+            rootpath=tmp_path, getini=ini.__getitem__, _inicache=ini,
+            pluginmanager=SimpleNamespace(hasplugin=lambda plugin: plugin == "cacheprovider"),
+        )
+        probe.pytest_load_initial_conftests(config)
+        copy = Path(config.getini("cache_dir"))
+        assert copy.is_relative_to(run_cache)
+        redirected.append((copy, (copy / "v" / "expected").read_text()))
+        (copy / "v" / "expected").write_text("written by the run")
+        assert (project_cache / "v" / "expected").read_text() == value
+
+    assert redirected[0][0] != redirected[1][0]
+    assert [value for _, value in redirected] == ["404", "200"]
+
+
 def test_retry_omits_regression_output_for_writable_test(project):
     sample = project((REGRESSION, None), (REPAIRED_BOTH, None))
     sample.run(2)

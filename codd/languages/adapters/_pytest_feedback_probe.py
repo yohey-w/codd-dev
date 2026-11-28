@@ -1,6 +1,7 @@
 """Standalone probe loaded by the project's test interpreter."""
 
 import errno
+import hashlib
 import json
 import os
 import re
@@ -46,16 +47,19 @@ def pytest_load_initial_conftests(early_config):
         return
     try:
         project_cache = pytest.Cache.cache_dir_from_config(early_config, _ispytest=True)
-        run_cache = Path(cache_dir)
+        # One private copy per configured cache: a compound command may name several.
+        key = hashlib.sha256(os.fsencode(str(project_cache.resolve()))).hexdigest()[:16]
+        run_cache = Path(cache_dir) / key
         if project_cache.exists() and not run_cache.exists():
             # Publish only a complete copy, including for compound test commands.
-            with tempfile.TemporaryDirectory(dir=run_cache.parent) as staging:
+            with tempfile.TemporaryDirectory(dir=Path(cache_dir).parent) as staging:
                 copied = Path(staging) / "cache"
                 shutil.copytree(project_cache, copied)
+                run_cache.parent.mkdir(exist_ok=True)
                 if not run_cache.exists():
                     copied.rename(run_cache)
         # Pytest has no scalar ini setter. Override after reading user options.
-        early_config._inicache["cache_dir"] = cache_dir
+        early_config._inicache["cache_dir"] = str(run_cache)
     except (AttributeError, OSError, TypeError, ValueError):
         # Keep using the project's cache if copying or redirecting is unavailable.
         pass
