@@ -234,9 +234,11 @@ def test_reprovisioned_dependencies_survive_round_cleanup(project_factory, monke
 @pytest.mark.parametrize("route", ["profile", "legacy"])
 def test_feedback_suite_and_isolation_share_verifier_timeout(project_factory, monkeypatch, route):
     tests = "\n".join(f"def test_case_{i}():\n    actual = {i}\n    assert actual < 0\n" for i in range(3))
+    profile_test = "tests/test_budget.py"
+    outputs = (TEST_FILE, profile_test) if route == "profile" else (TEST_FILE,)
     pipeline, root, _, _ = project_factory(
         initial={"case": {TEST_FILE: tests}},
-        owned={"case": (TEST_FILE,), "ambiguous": ("checks/",)},
+        owned={"case": outputs},
         timeout=29,
     )
     monkeypatch.setattr(verify_executor, "DEFAULT_VERIFY_TIMEOUT_SECONDS", 13)
@@ -248,9 +250,9 @@ def test_feedback_suite_and_isolation_share_verifier_timeout(project_factory, mo
         config = root / "codd/codd.yaml"
         settings = yaml.safe_load(config.read_text(encoding="utf-8"))
         del settings["verify"]["test_command"]
+        settings["scan"]["test_dirs"].append("tests")
         config.write_text(yaml.safe_dump(settings), encoding="utf-8")
-        (root / "tests").mkdir(exist_ok=True)
-        (root / "tests/test_budget.py").write_text(tests, encoding="utf-8")
+        (root / profile_test).write_text(tests, encoding="utf-8")
 
     expected = 13 if route == "profile" else 29
     # Two isolated runs exhaust the aggregate budget without wall-clock sleeps.
@@ -433,7 +435,7 @@ def test_isolation_does_not_import_other_test_modules(project_factory):
     assert f"isolate {TEST_FILE}::test_subject" in _trace(trace)
 
 
-def test_remaining_failure_is_reisolated_after_helper(project_factory):
+def test_remaining_failure_is_isolated_after_helper(project_factory):
     tests = textwrap.dedent("""\
         from checks.support import helpers
 
@@ -460,9 +462,9 @@ def test_remaining_failure_is_reisolated_after_helper(project_factory):
     assert (helper["owner"], helper["decision"]) == ("helper", "accepted")
     events = _trace(trace)
     isolate = f"isolate {TEST_FILE}::test_case_depends_on_collection"
-    assert events.count(isolate) == 2
-    first, second = [index for index, event in enumerate(events) if event == isolate]
-    assert first < events.index("feedback helper") < second
+    assert events.count(isolate) == 1
+    assert events.index("feedback helper") < events.index(isolate)
+    assert [run["purpose"] for run in record["runs"][-2:]] == ["suite after helper decision", "isolate"]
     assert record["passed_in_isolation"] == 1
 
 

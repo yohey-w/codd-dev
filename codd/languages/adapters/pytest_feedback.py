@@ -44,6 +44,9 @@ class PytestFeedbackAdapter:
         return {
             **env,
             "PYTHONPATH": os.pathsep.join(filter(None, (str(scratch), env.get("PYTHONPATH")))),
+            # A snapshot can replace source bytes without changing size or mtime at
+            # Python's cache resolution. Default to a private cache for this run.
+            "PYTHONPYCACHEPREFIX": str(scratch / "pycache"),
             "PYTEST_PLUGINS": ",".join(filter(None, (env.get("PYTEST_PLUGINS"), _PROBE.stem))),
             "CODD_TEST_FEEDBACK_ROOT": str(project_root),
             "CODD_TEST_FEEDBACK_SOURCES": json.dumps(source_dirs),
