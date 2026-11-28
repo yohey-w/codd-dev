@@ -3616,6 +3616,21 @@ def build_mechanical_contract_context(
     )
 
 
+def _elapsed_time_measurement_guidance(
+    declared_outputs: Iterable[str], config: dict[str, Any],
+) -> str:
+    from codd.greenfield.pipeline import _KIND_TEST, _classify_declared_output
+
+    if not any(_classify_declared_output(path, config) == _KIND_TEST for path in declared_outputs):
+        return ""
+    return (
+        "Elapsed-time measurements:\n"
+        "- When a test measures elapsed time, define for each measured target where it starts, completes and fails, "
+        "correlate them on one monotonic clock, check the measuring path against a response whose completion is known "
+        "and one that is cut short, and on failure record which events and times the verdict used.\n\n"
+    )
+
+
 def _build_implementation_prompt(
     *,
     config: dict[str, Any],
@@ -3675,11 +3690,7 @@ def _build_implementation_prompt(
     output_text = ", ".join(spec.output_paths)
     example_output = spec.output_paths[0]
     # Use the same file/directory rule as output creation and completeness.
-    from codd.greenfield.pipeline import (
-        _KIND_TEST,
-        _classify_declared_output,
-        _declared_output_is_file_path,
-    )
+    from codd.greenfield.pipeline import _declared_output_is_file_path
 
     if not _declared_output_is_file_path(example_output):
         example_output = f"{example_output.rstrip('/')}/<filename>{default_extension}"
@@ -3912,12 +3923,7 @@ def _build_implementation_prompt(
             )
 
     declared_outputs = spec.expected_outputs or spec.output_paths
-    if any(_classify_declared_output(path, config) == _KIND_TEST for path in declared_outputs):
-        lines.append(
-            "- When a test measures elapsed time, define for each measured target where it starts, completes and fails, "
-            "correlate them on one monotonic clock, check the measuring path against a response whose completion is known "
-            "and one that is cut short, and on failure record which events and times the verdict used."
-        )
+    lines.extend(_elapsed_time_measurement_guidance(declared_outputs, config).splitlines())
 
     lines.extend([
         "Required output format (repeat this block for each file and output nothing else):",

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import re
 import subprocess
+from types import SimpleNamespace
 
 from click.testing import CliRunner
 import pytest
@@ -18,6 +20,8 @@ from codd.implementer import (
     _build_implementation_prompt,
     _parse_file_payloads,
 )
+from codd.implementer import chunked_runner
+from codd.llm.impl_step_deriver import ImplStep, ImplStepCacheRecord, impl_step_cache_path, write_impl_step_cache
 
 
 def _write_doc(
@@ -447,10 +451,21 @@ def test_implementation_prompt_states_test_framework_for_python():
     assert "import pytest" in prompt
 
 
-MEASUREMENT_RULE = (
+MEASUREMENT_HEADING = "Elapsed-time measurements:"
+MEASUREMENT_GUIDANCE = (
+    f"{MEASUREMENT_HEADING}\n"
     "- When a test measures elapsed time, define for each measured target where it starts, completes and fails, "
     "correlate them on one monotonic clock, check the measuring path against a response whose completion is known "
-    "and one that is cut short, and on failure record which events and times the verdict used.\n"
+    "and one that is cut short, and on failure record which events and times the verdict used.\n\n"
+)
+MEASUREMENT_FRAGMENTS = (
+    "Elapsed-time measurements",
+    "When a test measures elapsed time",
+    "define for each measured target",
+    "one monotonic clock",
+    "check the measuring path against a response",
+    "one that is cut short",
+    "which events and times the verdict used",
 )
 
 
@@ -481,7 +496,8 @@ def test_test_writing_prompt_states_measurement_rule_once(language, output_paths
         coding_principles=None,
     )
 
-    assert prompt.count(MEASUREMENT_RULE) == 1
+    assert prompt.count(MEASUREMENT_GUIDANCE) == 1
+    assert prompt.count(MEASUREMENT_HEADING) == 1
 
 
 @pytest.mark.parametrize(
@@ -522,15 +538,101 @@ def test_non_test_writing_prompt_omits_measurement_rule(
         coding_principles=None,
     )
 
-    for fragment in (
-        "When a test measures elapsed time",
-        "define for each measured target",
-        "one monotonic clock",
-        "check the measuring path against a response",
-        "one that is cut short",
-        "which events and times the verdict used",
-    ):
+    for fragment in MEASUREMENT_FRAGMENTS:
         assert fragment not in prompt
+
+
+@pytest.mark.parametrize(
+    ("output_paths", "step_outputs", "uses_guidance", "main_digests"),
+    [
+        pytest.param(
+            ["tests/test_latency.py"], [["tests/test_latency.py"]], [True],
+            ["a8c1c320282fbcf51178a531af67310266aeb8f05b250daeb8ca94ec6e9a2377"],
+            id="declared-test",
+        ),
+        pytest.param(
+            ["src", "checks"], [["checks/reporting.py", "checks/helpers.py"], ["src/auth.py"]],
+            [True, False],
+            ["bdf5b898845fe8887cd3261fdb8c8a0cc7c10474f4129cf3c61f5431e5aa6535",
+             "86dd8f71646f4d344a0e37cb983e2feb1251146cd8208807673fdad932b1cc98"],
+            id="test-chunk-and-source-chunk",
+        ),
+        pytest.param(
+            ["tests/test_latency.py", "src"], [["src/auth.py"]], [False],
+            ["3416c130dcd6a7e26a944585ce1f5fa19121535ce559079174b5485dff8650ed"],
+            id="source-declaration-with-broader-routing",
+        ),
+        pytest.param(
+            ["tests/"], [["tests/"]], [False],
+            ["cceef9f3fc59d734e097a591845cc7707c6cf6fea826058ff8bd0815fdffe4b9"],
+            id="directory-only",
+        ),
+        pytest.param(
+            ["tests/test_latency.py"], [[]], [True],
+            ["5bbb6009bd9aba4c345157853932822f6245d4252fbb30a773e1ab9ee7af3858"],
+            id="configured-test-output",
+        ),
+        pytest.param(
+            ["src"], [[]], [False],
+            ["3f78e3ee7eb97df01ace609e68379feed9714da560a16894087c6d36ca5df224"],
+            id="test-hint-only",
+        ),
+    ],
+)
+def test_chunked_run_scopes_measurement_guidance(
+    tmp_path, monkeypatch, output_paths, step_outputs, uses_guidance, main_digests,
+):
+    project = _setup_project(tmp_path, language="python")
+    task = "docs/design/auth.md"
+    config_path = project / "codd/codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["scan"]["test_dirs"].append("checks/")
+    config["implement"]["default_output_paths"][task] = output_paths
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    steps = [
+        ImplStep.from_dict({
+            "id": f"step_{index}",
+            "kind": "edit",
+            "rationale": "Build the declared files.",
+            "source_design_section": "Auth Design",
+            "expected_outputs": outputs,
+            "target_path_hint": "tests/test_latency.py" if not outputs else None,
+            "approved": True,
+        })
+        for index, outputs in enumerate(step_outputs)
+    ]
+    write_impl_step_cache(
+        impl_step_cache_path(task, {"project_root": project}),
+        ImplStepCacheRecord("fake", "key", task, "doc", "template", "now", [task], steps),
+    )
+    prompts = []
+
+    def invoke(_self, command, prompt, _project_root):
+        assert command == "mock-ai --print"
+        prompts.append(prompt)
+        return "Done.", 0
+
+    monkeypatch.setattr(chunked_runner.ChunkedRunner, "_invoke", invoke)
+    monkeypatch.setattr(chunked_runner, "time", SimpleNamespace(monotonic=lambda: 0.0))
+    result = CliRunner().invoke(main, [
+        "implement", "run", "--path", str(project), "--task", task, "--chunk-size", "1",
+    ], catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    assert len(prompts) == len(uses_guidance)
+    for prompt, expected, main_digest in zip(prompts, uses_guidance, main_digests, strict=True):
+        if expected:
+            assert prompt.count(MEASUREMENT_GUIDANCE) == 1
+            assert prompt.count(MEASUREMENT_HEADING) == 1
+            assert yaml.safe_load(prompt)[MEASUREMENT_HEADING.rstrip(":")] == [
+                MEASUREMENT_GUIDANCE.splitlines()[1].removeprefix("- "),
+            ]
+            prompt = prompt.replace(MEASUREMENT_GUIDANCE, "", 1)
+        else:
+            for fragment in MEASUREMENT_FRAGMENTS:
+                assert fragment not in prompt
+        # Full prompts captured on main 63adbee with the same inputs.
+        assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == main_digest
 
 
 def test_implementation_prompt_omits_test_framework_when_spec_is_not_test_related():

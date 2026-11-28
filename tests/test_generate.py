@@ -1289,6 +1289,7 @@ def test_generation_prompt_omits_measurement_rule(node_id, output, modality):
     )
 
     for fragment in (
+        "Elapsed-time measurements",
         "When a test measures elapsed time",
         "define for each measured target",
         "one monotonic clock",

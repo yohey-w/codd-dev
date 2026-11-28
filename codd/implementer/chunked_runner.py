@@ -18,6 +18,7 @@ import yaml
 
 from codd.ai_invoke import file_block_paths
 from codd.claude_cli import with_default_claude_permission_bypass
+from codd.implementer import _elapsed_time_measurement_guidance
 from codd.requirement_appendix import (
     RequirementAppendixWriteError,
     implementation_step_outputs,
@@ -93,6 +94,8 @@ class ChunkedRunner:
         chunk_size: int = 5,
         timeout_per_chunk: int = 600,
         progress_callback: Callable[[int, int], None] | None = None,
+        *,
+        config: dict[str, Any] | None = None,
     ) -> None:
         if chunk_size < 1:
             raise ValueError("chunk_size must be at least 1")
@@ -101,6 +104,7 @@ class ChunkedRunner:
         self.chunk_size = chunk_size
         self.timeout_per_chunk = timeout_per_chunk
         self.progress_callback = progress_callback
+        self.config = config or {}
 
     def run_steps(
         self,
@@ -170,6 +174,7 @@ class ChunkedRunner:
                     completed_chunks=completed,
                     chunk_index=chunk_index,
                     total_chunks=total_chunks,
+                    config=self.config,
                 )
                 prompt = with_requirement_appendix(prompt, project_root)
                 started = time.monotonic()
@@ -311,13 +316,16 @@ def _render_chunk_prompt(
     completed_chunks: list[ChunkedExecution],
     chunk_index: int,
     total_chunks: int,
+    config: dict[str, Any],
 ) -> str:
+    task_payload = _task_payload(task)
+    steps = [_step_payload(step) for step in chunk]
     payload = {
-        "task": _task_payload(task),
+        "task": task_payload,
         "chunk": {
             "index": chunk_index,
             "count": total_chunks,
-            "steps": [_step_payload(step) for step in chunk],
+            "steps": steps,
         },
         "completed_chunks": [completed.to_dict() for completed in completed_chunks],
         "instructions": [
@@ -326,7 +334,17 @@ def _render_chunk_prompt(
             "Return a concise result summary.",
         ],
     }
-    return yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
+    step_outputs = [
+        path for step in steps
+        if isinstance(outputs := step.get("expected_outputs"), (list, tuple))
+        for path in outputs
+    ]
+    declared_outputs = step_outputs or task_payload.get("expected_outputs") or task_payload.get("output_paths")
+    prompt = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
+    if isinstance(declared_outputs, (list, tuple)):
+        # The shared heading and bullet form a YAML section without reflowing the sentence.
+        prompt += _elapsed_time_measurement_guidance(declared_outputs, config)
+    return prompt
 
 
 def _task_payload(task: Any) -> dict[str, Any]:
