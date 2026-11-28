@@ -14,6 +14,7 @@ import codd.generator as generator_module
 from codd.cli import main
 from codd.design_consistency import DesignConsistencyError
 from codd.generator import generate_wave
+from codd.project_types import ProjectCapabilities
 from codd.scanner import _extract_frontmatter
 
 
@@ -107,6 +108,23 @@ RECONCILIATION_PEER = "docs/design/system_design.md"
 RECONCILIATION_REPORTER = "docs/plan/implementation_plan.md"
 RECONCILIATION_LOG = ".codd/audit/design-reconciliations.jsonl"
 ACCEPTANCE_CRITERIA = "docs/test/acceptance_criteria.md"
+CERTIFICATE_SENTENCE = (
+    "A test-only TLS certificate that tests expect to be valid (for a local HTTPS or mail server the tests start) "
+    "MUST become valid well before it is issued (for example, a day earlier) and stay valid beyond the run, "
+    "so a system clock adjusted during the run cannot make it not yet valid; "
+    "certificates whose validity a test deliberately limits or breaks (invalid, expired, short-lived or rotated) are exempt."
+)
+CERTIFICATE_FRAGMENTS = (
+    "Test-only certificates",
+    "A test-only TLS certificate",
+    "become valid well before it is issued",
+    "stay valid beyond the run",
+    "a system clock adjusted during the run",
+    "cannot make it not yet valid",
+    "certificates a test deliberately makes invalid or expired are exempt",
+    "certificates whose validity a test deliberately limits or breaks",
+    "The readiness check connects with the same trust",
+)
 DISPUTED_POLICY = "The system design does not follow the approved import size limit."
 UNRESTRICTED_IMPORT = "Validation accepts files of any size."
 BOUNDED_IMPORT = "Validation rejects files larger than 100 bytes."
@@ -463,6 +481,7 @@ def test_unmanaged_generation_prompts_match_legacy_bytes(tmp_path, mock_ai_cli):
         "- The readiness check MUST prove that the server answering is the one this run started "
         "(for example, a per-run token the server reports, or the address the started process itself reports), "
         "not merely that some server answers on that address.\n",
+        f"- {CERTIFICATE_SENTENCE}\n",
     ):
         assert prompts[0].count(added) == 1
         prompts[0] = prompts[0].replace(added, "", 1)
@@ -1262,3 +1281,106 @@ operation_flow:
     assert operation["id"] == "assign_item"
     assert operation["actor"] == "operator"
     assert operation["expected_outcomes"] == ["assignment persists"]
+
+
+@pytest.mark.parametrize(
+    ("node_id", "output", "modality"),
+    [
+        pytest.param("design:system", "docs/design/system_design.md", "browser", id="design"),
+        pytest.param("test:test-strategy", "docs/test/test_strategy.md", "browser", id="browser"),
+        pytest.param("test:test-strategy", "docs/test/test_strategy.md", "cli", id="cli"),
+        pytest.param("test:test-strategy", "docs/test/test_strategy.md", "device", id="device"),
+        pytest.param("test:e2e", "tests/e2e/test_reporter.py", "none", id="direct-test-code"),
+    ],
+)
+def test_generation_prompt_omits_measurement_rule(node_id, output, modality):
+    artifact = generator_module.WaveArtifact(
+        wave=1,
+        node_id=node_id,
+        output=output,
+        title="Reporter",
+        depends_on=[],
+        conventions=[],
+    )
+    prompt = generator_module._build_generation_prompt(
+        artifact, [], [], capabilities=ProjectCapabilities(e2e_modality=modality),
+    )
+
+    for fragment in (
+        "Elapsed-time measurements",
+        "When a test measures elapsed time",
+        "define for each measured target",
+        "where it starts, completes and fails",
+        "one monotonic clock",
+        "check the measuring path against a response",
+        "one that is cut short",
+        "which events and times the verdict used",
+    ):
+        assert fragment not in prompt
+
+
+@pytest.mark.parametrize("condition", ["expired", "invalid"])
+def test_browser_strategy_prompt_allows_rejecting_an_untrusted_certificate(condition):
+    requirement = (
+        "Wait for the server to report readiness over its startup channel. "
+        f"The only HTTPS test server presents a deliberately {condition} certificate. "
+        "Verify that the client rejects the certificate on its first TLS connection."
+    )
+    dependency = generator_module.DependencyDocument(
+        "req:tls", Path("docs/requirements/tls.md"), requirement,
+    )
+    artifact = generator_module.WaveArtifact(
+        wave=1,
+        node_id="test:test-strategy",
+        output="docs/test/test_strategy.md",
+        title="Test Strategy",
+        depends_on=[{"id": dependency.node_id, "relation": "validates"}],
+        conventions=[],
+    )
+    prompt = generator_module._build_generation_prompt(artifact, [dependency], [])
+
+    heading = "E2E Runtime Environment rules:"
+    runtime_section = prompt.split(f"{heading}\n", 1)[1].split("\n\n", 1)[0]
+    rule = f"\n- {CERTIFICATE_SENTENCE}"
+    assert prompt.count(heading) == 1
+    assert prompt.count(CERTIFICATE_SENTENCE) == 1
+    assert runtime_section.endswith(rule)
+    assert requirement in prompt
+    assert "(invalid, expired, short-lived or rotated) are exempt." in runtime_section
+    assert "The readiness check connects with the same trust" not in prompt
+
+
+def test_python_http_strategy_rules_include_the_certificate_sentence_once():
+    lines = generator_module._python_http_e2e_doc_lines()
+
+    assert lines.count(f"- {CERTIFICATE_SENTENCE}") == 1
+    text = "\n".join(lines)
+    assert text.count(CERTIFICATE_SENTENCE) == 1
+    assert "The readiness check connects with the same trust" not in text
+
+
+@pytest.mark.parametrize(
+    ("node_id", "output", "modality"),
+    [
+        pytest.param("design:system", "docs/design/system_design.md", "browser", id="design"),
+        pytest.param("test:test-strategy", "docs/test/test_strategy.md", "cli", id="cli"),
+        pytest.param("test:test-strategy", "docs/test/test_strategy.md", "device", id="device"),
+        pytest.param("test:test-strategy", "docs/test/test_strategy.md", "none", id="integration-only"),
+        pytest.param("test:e2e", "tests/e2e/reporter.spec.ts", "browser", id="direct-test-code"),
+    ],
+)
+def test_other_generation_prompts_omit_the_certificate_rule(node_id, output, modality):
+    artifact = generator_module.WaveArtifact(
+        wave=1,
+        node_id=node_id,
+        output=output,
+        title="Reporter",
+        depends_on=[],
+        conventions=[],
+    )
+    prompt = generator_module._build_generation_prompt(
+        artifact, [], [], capabilities=ProjectCapabilities(e2e_modality=modality),
+    )
+
+    for fragment in CERTIFICATE_FRAGMENTS:
+        assert fragment not in prompt
