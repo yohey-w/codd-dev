@@ -410,7 +410,7 @@ TEST_CERTIFICATE_RULE = (
     "- A test-only TLS certificate that tests expect to be valid (for a local HTTPS or mail server the tests start) "
     "MUST become valid well before it is issued (for example, a day earlier) and stay valid beyond the run, "
     "so a system clock adjusted during the run cannot make it not yet valid; "
-    "certificates a test deliberately makes invalid or expired are exempt."
+    "certificates whose validity a test deliberately limits or breaks (invalid, expired, short-lived or rotated) are exempt."
 )
 
 

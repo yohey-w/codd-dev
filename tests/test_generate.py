@@ -112,7 +112,7 @@ CERTIFICATE_SENTENCE = (
     "A test-only TLS certificate that tests expect to be valid (for a local HTTPS or mail server the tests start) "
     "MUST become valid well before it is issued (for example, a day earlier) and stay valid beyond the run, "
     "so a system clock adjusted during the run cannot make it not yet valid; "
-    "certificates a test deliberately makes invalid or expired are exempt."
+    "certificates whose validity a test deliberately limits or breaks (invalid, expired, short-lived or rotated) are exempt."
 )
 CERTIFICATE_FRAGMENTS = (
     "Test-only certificates",
@@ -120,7 +120,9 @@ CERTIFICATE_FRAGMENTS = (
     "become valid well before it is issued",
     "stay valid beyond the run",
     "a system clock adjusted during the run",
+    "cannot make it not yet valid",
     "certificates a test deliberately makes invalid or expired are exempt",
+    "certificates whose validity a test deliberately limits or breaks",
     "The readiness check connects with the same trust",
 )
 DISPUTED_POLICY = "The system design does not follow the approved import size limit."
@@ -1308,6 +1310,7 @@ def test_generation_prompt_omits_measurement_rule(node_id, output, modality):
         "Elapsed-time measurements",
         "When a test measures elapsed time",
         "define for each measured target",
+        "where it starts, completes and fails",
         "one monotonic clock",
         "check the measuring path against a response",
         "one that is cut short",
@@ -1343,7 +1346,7 @@ def test_browser_strategy_prompt_allows_rejecting_an_untrusted_certificate(condi
     assert prompt.count(CERTIFICATE_SENTENCE) == 1
     assert runtime_section.endswith(rule)
     assert requirement in prompt
-    assert "certificates a test deliberately makes invalid or expired are exempt." in runtime_section
+    assert "(invalid, expired, short-lived or rotated) are exempt." in runtime_section
     assert "The readiness check connects with the same trust" not in prompt
 
 
