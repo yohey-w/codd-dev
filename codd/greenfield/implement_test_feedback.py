@@ -548,8 +548,11 @@ class _Feedback:
 
         case_ids = list(dict.fromkeys(f["case"] for f in failures))
         try:
+            # prepare() provisioned the round's environment before snapshotting
+            # it. Judge the candidate in that same environment.
             self.pipeline._enforce_implement_oracle_gate(
                 self.root, self.tasks, self.options, verdict_only=True,
+                reuse_test_environment=True,
             )
             _enforce_stage_coverage_gate(
                 self.root, coverage_gate=True, echo=self.pipeline.echo, rerun=None, rerun_oracle=None,

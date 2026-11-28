@@ -98,8 +98,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import partial
 import json
+import os
 from pathlib import Path, PurePosixPath
 import shlex
+import shutil
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -1777,10 +1779,8 @@ class GreenfieldPipeline:
         # (a per-unit tsc would false-fail on an import of a not-yet-generated
         # unit). On failure it normalizes diagnostics to evidence categories and
         # re-runs implementation with that feedback (bounded), so implement does
-        # not "succeed" until the oracle passes — or fails HONESTLY. A NO-OP for
-        # stacks with no declared oracle (Python today): see
-        # codd.project_types.ImplementOracleSpec. Runs BEFORE the VB coverage gate
-        # — code that does not even typecheck cannot have meaningful VB coverage.
+        # not "succeed" until the oracle passes — or fails HONESTLY. Runs BEFORE
+        # the VB coverage gate so it checks code and test coherence first.
         self._enforce_implement_oracle_gate(project_root, tasks, options)
 
         # Project-wide VB coverage + marker-authenticity gate — ONCE, after every
@@ -2573,6 +2573,31 @@ class GreenfieldPipeline:
         if result.action == "provisioned":
             self.echo(f"[greenfield] verify: provisioned test environment — {result.detail}")
 
+    def _prepare_oracle_test_executable(
+        self, project_root: Path, config: dict[str, Any], executable: str, *,
+        reuse_test_environment: bool,
+    ) -> str | None:
+        """Select the interpreter from the same PATH prepend as verification."""
+        from codd.repair.verify_runner import VerifyRunner
+
+        try:
+            if not reuse_test_environment:
+                self._provision_env(project_root)
+            prepend = VerifyRunner(project_root, config)._exec_path_prepend()
+            interpreter = shutil.which(executable, path=os.pathsep.join(prepend)) if prepend else None
+            if interpreter is None:
+                raise ValueError(f"{executable!r} is missing from the provisioned test environment")
+        except Exception as exc:
+            # Provisioning is advisory at implement time, even when verify would stop.
+            reason = " ".join(str(exc).splitlines()).strip() or type(exc).__name__
+            self.echo(
+                f"[greenfield] implement-oracle: project test environment unavailable ({reason}); "
+                "collecting with CoDD's interpreter"
+            )
+            return None
+        self.echo(f"[greenfield] implement-oracle: collecting with project test environment ({interpreter!r})")
+        return interpreter
+
     def _enforce_implement_oracle_gate(
         self,
         project_root: Path,
@@ -2580,6 +2605,7 @@ class GreenfieldPipeline:
         options: dict[str, Any],
         *,
         verdict_only: bool = False,
+        reuse_test_environment: bool = False,
     ) -> None:
         """Run the implement-time native-oracle gate (see _stage_implement).
 
@@ -2689,6 +2715,10 @@ class GreenfieldPipeline:
                 echo=self.echo,
                 scope_index=scope_index,
                 manifest_paths=manifest_paths,
+                prepare_test_executable=partial(
+                    self._prepare_oracle_test_executable, project_root, config,
+                    reuse_test_environment=reuse_test_environment,
+                ),
             )
         except OracleScopeError as exc:
             raise StageError(str(exc)) from exc

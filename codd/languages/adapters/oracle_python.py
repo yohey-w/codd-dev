@@ -1083,6 +1083,7 @@ def _run_python_pytest_collect_layer(
     config: Mapping[str, Any] | None,
     *,
     profile: LanguageProfile | None = None,
+    interpreter: str | None = None,
 ) -> PythonToolRun:
     """``python -m pytest <test_root> --collect-only -q`` — test importability.
 
@@ -1097,7 +1098,7 @@ def _run_python_pytest_collect_layer(
     """
     timeout = _python_collect_timeout_seconds(config)
     test_root_rel = _py_norm(test_root) or "."
-    launcher = pytest_launcher(profile, interpreter=sys.executable)
+    launcher = pytest_launcher(profile, interpreter=interpreter or sys.executable)
     command = shlex.join([
         *launcher, test_root_rel, "--collect-only", "-q", "-p", "no:cacheprovider",
     ])
@@ -1648,6 +1649,9 @@ class PythonCompositeOracleAdapter:
         (``ctx.language_profile.layout`` + ``ctx.package_name``) — Cut A.3: NO legacy
         ``LayoutProfile.source_root`` read.
         """
+        interpreter = None
+        if ctx.prepare_test_executable is not None:
+            interpreter = ctx.prepare_test_executable(pytest_launcher(ctx.language_profile)[0])
         source_root, package_root, test_root = _py_layout_from_layout_spec(ctx)
         project_root = ctx.project_root
         config = ctx.config
@@ -1660,7 +1664,7 @@ class PythonCompositeOracleAdapter:
             ),
             _run_python_pytest_collect_layer(
                 project_root, source_root, package_root, test_root, scope, config,
-                profile=ctx.language_profile,
+                profile=ctx.language_profile, interpreter=interpreter,
             ),
         ]
         lint_mode = _python_lint_mode(config)

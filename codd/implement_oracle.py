@@ -88,6 +88,7 @@ from __future__ import annotations
 import json
 import subprocess
 from collections.abc import Callable, Mapping
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -1281,6 +1282,7 @@ def _run_contract_oracle(
     *,
     package_name: str | None = None,
     layout_profile: "LayoutProfile | None" = None,
+    prepare_test_executable: Callable[[str], str | None] | None = None,
 ) -> ImplementOracleResult:
     """Run a modeled oracle on the contract path (certify already done by caller).
 
@@ -1322,6 +1324,7 @@ def _run_contract_oracle(
         oracle=oracle_decl,
         config=config,
         package_name=package_name,
+        prepare_test_executable=prepare_test_executable,
     )
     # BELT: the tree the oracle will observe MUST equal the generation-routed tree
     # (Option A makes them agree by construction; this hard-fails on any future drift).
@@ -1383,6 +1386,8 @@ def _run_oracle_command(
     profile: LayoutProfile,
     spec: ImplementOracleSpec,  # noqa: ARG001 — kept for the stable gate signature.
     config: Mapping[str, Any] | None,
+    *,
+    prepare_test_executable: Callable[[str], str | None] | None = None,
 ) -> ImplementOracleResult:
     """Run the native oracle ONCE on the Contract-Kernel contract path.
 
@@ -1441,6 +1446,7 @@ def _run_oracle_command(
         project_root, lang_profile, oracle_decl, adapter, config,
         package_name=getattr(profile, "package_name", None),
         layout_profile=profile,
+        prepare_test_executable=prepare_test_executable,
     )
 
 
@@ -1626,17 +1632,18 @@ def run_implement_oracle_gate(
     scope_index: Any = None,
     structured_source: Any = None,
     manifest_paths: Any = None,
+    prepare_test_executable: Callable[[str], str | None] | None = None,
 ) -> ImplementOracleResult:
     """Run the implement-time native-oracle gate (stage-level, once).
 
     Sequence:
-      1. Resolve the stack's oracle spec. No oracle declared → a passing NO-OP
-         (Python, bash, …) — the verify-stage gates stay the backstop.
+      1. Resolve the stack's oracle spec, handling absent and unsupported stacks.
       2. (node) Run the BLOCKING dependency install so ``tsc`` + deps exist; an
          install failure is an honest ``environment_build_error`` (no retry).
       3. CERTIFY the oracle scope covers source + tests (raises
          :class:`OracleScopeError` on an uncertifiable scope — anti-false-green).
-      4. Run the oracle. On failure, derive a SCOPED rerun and re-invoke
+      4. Run the oracle, with the optional test-executable hook available to the
+         adapter on each evaluation. On failure, derive a SCOPED rerun and re-invoke
          implementation through ``rerun(feedback, scope)`` up to a bounded cap,
          re-running the oracle each time. Returns the FINAL result.
 
@@ -1758,7 +1765,10 @@ def run_implement_oracle_gate(
 
     # 3. Run + bounded retry-with-feedback, escalating the rerun scope.
     max_attempts = _oracle_max_attempts(config)
-    result = _run_oracle_command(root, profile, spec, config)
+    evaluate = partial(_run_oracle_command, root, profile, spec, config)
+    if prepare_test_executable is not None:
+        evaluate = partial(evaluate, prepare_test_executable=prepare_test_executable)
+    result = evaluate()
     # NOTE(v3.22.1): no import-topology gate runs here. v3.22.0's Increment 1 proved
     # source imports against the owning doc's transitive `depends_on` closure and was
     # reverted: frontmatter `depends_on` is an OPEN-WORLD ordering/context declaration
@@ -1868,6 +1878,7 @@ def run_implement_oracle_gate(
                 structured_source=structured_source,
                 manifest_paths=manifest_paths,
                 echo=echo,
+                recheck=evaluate,
             )
             attempt += 1
             continue
@@ -1884,7 +1895,7 @@ def run_implement_oracle_gate(
         feedback = build_contract_feedback(result, project_root=root, scope=scope)
         _invoke_rerun(rerun, feedback, scope)
         attempt += 1
-        result = _run_oracle_command(root, profile, spec, config)
+        result = evaluate()
 
     if result.passed:
         echo(f"[greenfield] implement-oracle: {result.detail}")
@@ -2146,6 +2157,7 @@ def _execute_broad_campaign(
     structured_source: Any,
     manifest_paths: Any,
     echo: Callable[[str], None],
+    recheck: Callable[[], ImplementOracleResult] | None = None,
 ) -> ImplementOracleResult:
     """Run the budgeted residual-coherence campaign for a wide-fan-out broad rung.
 
@@ -2176,6 +2188,8 @@ def _execute_broad_campaign(
     if plan is None:  # defensive: no plan ⇒ nothing to run, honest-fail unchanged
         return result
 
+    if recheck is None:
+        recheck = partial(_run_oracle_command, project_root, profile, spec, config)
     budget = _oracle_broad_wall_clock_seconds(config)
     max_rechecks = _oracle_broad_max_rechecks(config)
     residual_chunk_size = _oracle_residual_chunk_size(config)
@@ -2295,7 +2309,7 @@ def _execute_broad_campaign(
             completed_phases.append(phase)
 
         # ALWAYS re-run the WHOLE-PROJECT oracle — the only green authority.
-        result = _run_oracle_command(project_root, profile, spec, config)
+        result = recheck()
         rechecks += 1
         after_signature = _diagnostic_signature(result)
         phase_elapsed = time.monotonic() - phase_started
