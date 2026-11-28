@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass, replace
 from datetime import datetime, timezone
 import inspect
+import json
 from pathlib import Path
 import subprocess
-from typing import Any, Callable, Literal, Mapping
+from typing import Any, Callable, Iterable, Literal, Mapping
 
 from codd.config import find_codd_dir, load_project_config
 from codd.dag import DAG
@@ -19,9 +20,12 @@ from codd.repair.approval_repair import (
 )
 from codd.repair.auto_scope_guard import (
     evaluate_auto_patch_scope,
+    _classify_path,
+    _declared_stack_contract_paths,
     _is_oracle_artifact,
     _is_stack_contract_artifact,
     _is_test_file,
+    _looks_like_path,
 )
 from codd.repair.design_context import classify_terminal_reason, design_closure_node_ids
 from codd.repair.engine import get_repair_engine
@@ -36,6 +40,7 @@ from codd.repair.schema import (
     RootCauseAnalysis,
     VerificationFailureReport,
 )
+from codd.verifiable_behavior_audit import is_test_related_implement
 
 
 RepairLoopStatus = Literal[
@@ -243,7 +248,8 @@ class RepairLoop:
 
             current_failure = self._pick_primary_violation(classification.repairable, dag)
             failure_key = _violation_key(current_failure)
-            self._evidence_paths.update(self._declared_evidence_paths(current_failure, dag, codd_yaml))
+            declared_paths = self._declared_evidence_paths(current_failure, dag, codd_yaml)
+            self._evidence_paths.update(declared_paths)
             candidate = capture_candidate(self.project_root, self._evidence_paths, self._evidence_config)
             evidence = self._active_evidence = {
                 "stage": "analyze", "status": "unfinished", "original_context": original,
@@ -264,9 +270,40 @@ class RepairLoop:
             try:
                 rca = engine.analyze(current_failure, dag, **_supported_kwargs(
                     engine.analyze, repair_context=repair_context, record_call=record_call))
+                is_editable = self._editable_path_policy(current_failure, dag, declared_paths, codd_yaml)
+                target_paths = self._candidate_paths(rca.affected_nodes, dag, is_editable=is_editable)
+                scope_rca = rca
+                if not target_paths:
+                    implementation_paths = self._editable_implementation_paths(
+                        dag, codd_yaml, lambda path: is_editable(path, True),
+                    )
+                    retry_context = (
+                        f"{repair_context}\n\n"
+                        "Previous affected_nodes selected no editable files. Any files resolved from "
+                        "those nodes are read-only. Analyze again and select the implementation that "
+                        "produces the behavior observed by the failing check.\n"
+                        f"Previous affected_nodes: {json.dumps(rca.affected_nodes)}\n"
+                        f"Editable implementation paths from the DAG:\n{json.dumps(implementation_paths)}"
+                    )
+                    evidence["analysis_retried"] = True
+                    self.history.update_evidence(session_dir, attempt_n, evidence)
+                    rca = engine.analyze(current_failure, dag, **_supported_kwargs(
+                        engine.analyze, repair_context=retry_context, record_call=record_call))
+                    target_paths = self._candidate_paths(rca.affected_nodes, dag, is_editable=is_editable)
+                    if not target_paths:
+                        reason = "no editable files after repair analysis retry"
+                        evidence.update(status="failed", error=reason)
+                        attempts.append(self._record_attempt(
+                            session_dir, attempt_n, current_failure, rca, None,
+                            ApplyResult(False, [], [], reason), None,
+                        ))
+                        continue
+                    # The scope guard accepts paths, while analysis can also name
+                    # DAG ids. Keep the original analysis in the repair record.
+                    scope_rca = replace(rca, affected_nodes=target_paths)
                 evidence["stage"] = "propose"
                 self.history.update_evidence(session_dir, attempt_n, evidence)
-                file_contents = self._load_affected_file_contents(rca, dag)
+                file_contents = self._load_affected_file_contents(rca, dag, target_paths=target_paths)
                 proposal = self._propose_fix(engine, rca, file_contents, current_failure,
                                              repair_context=repair_context, record_call=record_call)
             except HistoryUnavailableError:
@@ -394,7 +431,7 @@ class RepairLoop:
             # primary failure + RCA, that every patch path is in the editable
             # candidate set and role-appropriate. An out-of-scope edit is an
             # honest rejection (REPAIR_FAILED) in non-interactive auto mode.
-            scope = self._auto_scope_decision(codd_yaml, proposal, current_failure, rca)
+            scope = self._auto_scope_decision(codd_yaml, proposal, current_failure, scope_rca)
             evidence["stage"] = "scope"
             if scope is not None and not scope.allowed:
                 apply_result = ApplyResult(False, [], _proposal_files(proposal), scope.reason)
@@ -433,7 +470,7 @@ class RepairLoop:
             apply_exception = False
             # Only approved, scope-checked targets join the snapshot. A proposal
             # never grants read access to a secret or an out-of-project file.
-            for path in self._candidate_paths(rca, dag):
+            for path in target_paths:
                 self._evidence_paths.setdefault(path, "target")
             evidence["candidate_before"] = capture_candidate(self.project_root, self._evidence_paths, self._evidence_config)
             evidence["stage"] = "apply"
@@ -731,7 +768,11 @@ class RepairLoop:
                 paths[str(raw)] = "canonical_design"
         config_dir = find_codd_dir(self.project_root)
         if config_dir is not None:
-            paths[str(config_dir / "codd.yaml")] = "immutable_config"
+            paths[(config_dir / "codd.yaml").relative_to(self.project_root).as_posix()] = "immutable_config"
+        repair = config.get("repair") if isinstance(config, Mapping) else None
+        context_path = repair.get("context_path") if isinstance(repair, Mapping) else None
+        if isinstance(context_path, str) and context_path.strip():
+            paths[context_path] = "canonical_design"
         # Existing profile descriptors own manifest/lock naming; no language
         # table, directory traversal or new project setting in repair core.
         from codd.languages.contract import resolve_language_contract
@@ -746,9 +787,13 @@ class RepairLoop:
             pass  # missing profile is unknown, not a new verification gate
         return paths
 
-    def _load_affected_file_contents(self, rca: RootCauseAnalysis, dag: DAG) -> dict[str, str]:
+    def _load_affected_file_contents(
+        self, rca: RootCauseAnalysis, dag: DAG, *, target_paths: list[str] | None = None,
+    ) -> dict[str, str]:
         contents: dict[str, str] = {}
-        for raw_path in self._candidate_paths(rca, dag):
+        if target_paths is None:
+            target_paths = self._candidate_paths(rca.affected_nodes, dag)
+        for raw_path in target_paths:
             resolved = self._resolve_project_file(raw_path)
             if resolved is None or not resolved.is_file():
                 continue
@@ -770,17 +815,76 @@ class RepairLoop:
             contents[str(relative)] = resolved.read_text(encoding="utf-8")
         return contents
 
-    def _candidate_paths(self, rca: RootCauseAnalysis, dag: DAG) -> list[str]:
-        paths: list[str] = []
-        for item in rca.affected_nodes:
+    def _candidate_paths(
+        self, affected_nodes: Iterable[str], dag: DAG, *, is_editable: Callable[[str], bool] | None = None,
+    ) -> list[str]:
+        paths: dict[str, None] = {}
+        for item in affected_nodes:
             node = dag.nodes.get(item)
-            if node is not None:
-                path = node.path or node.attributes.get("path")
-                if path:
-                    paths.append(str(path))
-                    continue
-            paths.append(item)
-        return paths
+            declared = (node.path or node.attributes.get("path")) if node is not None else None
+            raw = declared or item
+            resolved = self._resolve_project_file(str(raw))
+            if resolved is None or resolved.is_dir():
+                continue
+            # A declared file can be missing (e.g. a node-completeness repair).
+            if not declared and (node is not None or not _looks_like_path(item)) and not resolved.is_file():
+                continue
+            path = resolved.relative_to(self.project_root.resolve()).as_posix()
+            if is_editable is None or is_editable(path):
+                paths[path] = None
+        return list(paths)
+
+    def _editable_path_policy(
+        self, failure: VerificationFailureReport, dag: DAG, declared_paths: dict[str, str],
+        config: Mapping[str, Any],
+    ) -> Callable[..., bool]:
+        def relative(raw: str) -> str | None:
+            resolved = self._resolve_project_file(raw)
+            return resolved.relative_to(self.project_root.resolve()).as_posix() if resolved is not None else None
+
+        read_only = {relative(path) for path, role in declared_paths.items() if role != "target"}
+        attributed = {relative(path) for path, role in declared_paths.items() if role == "target"}
+        dag_tests = set()
+        for node in dag.nodes.values():
+            raw = node.path or node.attributes.get("path")
+            if not raw:
+                continue
+            if node.kind == "design_doc":
+                read_only.add(relative(str(raw)))
+            elif node.kind in {"test_file", "test_doc", "verification_test"}:
+                dag_tests.add(relative(str(raw)))
+        stack_contract_paths = _declared_stack_contract_paths(config)
+        settings = dict(config)
+
+        def is_editable(path: str, implementation_only: bool = False) -> bool:
+            if path in read_only:
+                return False
+            failure_class = "" if implementation_only else failure.failure_class
+            if path in dag_tests or is_test_related_implement(settings, design_node=None, output_paths=[path]):
+                if failure_class != "harness_contract_violation" or path not in attributed:
+                    return False
+            return _classify_path(
+                path, failure_class=failure_class, code_addressable=implementation_only or failure.code_addressable,
+                allowlist=attributed, enforce_containment=False, declared_stack_paths=stack_contract_paths,
+            ) is None
+
+        return is_editable
+
+    def _editable_implementation_paths(
+        self, dag: DAG, config: Mapping[str, Any], is_editable: Callable[[str], bool],
+    ) -> list[str]:
+        scan = config.get("scan")
+        source_dirs = scan.get("source_dirs", ["src/"]) if isinstance(scan, Mapping) else ["src/"]
+        if not isinstance(source_dirs, (list, tuple)):
+            return []
+        source_roots = [self._resolve_project_file(str(path)) for path in source_dirs]
+        project_root = self.project_root.resolve()
+        paths = []
+        for path in self._candidate_paths(dag.nodes, dag, is_editable=is_editable):
+            resolved = project_root / path
+            if resolved.is_file() and any(root is not None and resolved.is_relative_to(root) for root in source_roots):
+                paths.append(path)
+        return sorted(paths)
 
     def _resolve_project_file(self, raw_path: str) -> Path | None:
         """Resolve an RCA file path inside the project (unified path-escape jail).

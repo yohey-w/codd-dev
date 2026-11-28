@@ -14,6 +14,9 @@ DAG context:
 
 Rules:
 - Stay domain-neutral. Do not assume a framework, platform, vendor, or product.
+- In `affected_nodes`, list the files the repair would change. Failure evidence, canonical design documents, and immutable configuration are read-only and must stay out of `affected_nodes`.
+- Tests are read-only for implementation failures. A test scaffold explicitly attributed as a broken harness contract is editable.
+- When the failure is visible only through a test, use the DAG to identify the implementation nodes that produce the behavior observed by the failing check.
 - Prefer the smallest repair that restores consistency across the affected artifacts.
 - Use "unified_diff" as the default repair_strategy.
 - Use "full_file_replacement" only when a complete file rewrite is clearly safer than a patch.
