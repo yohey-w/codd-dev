@@ -23,18 +23,15 @@ class PytestFeedbackAdapter:
             return command
         from codd.repair.verify_runner import _SHELL_ASSIGNMENT, _shell_word_end
         # Leading shell assignments take precedence over the spawn environment.
+        # Prepend without evaluating or re-quoting the user's original value.
         pieces = []
         end = 0
         while assignment := _SHELL_ASSIGNMENT.match(command, end):
             value = assignment.end()
             name = assignment.group().strip()[:-1]
             next_end = _shell_word_end(command, value)
-            word = command[value:next_end]
-            if name == "PYTHONPATH":
-                word = quote(str(scratch) + os.pathsep) + word
-            elif name == "PYTHONPYCACHEPREFIX":
-                word = quote(str(scratch / "pycache"))
-            pieces.extend((command[end:value], word))
+            prefix = quote(str(scratch) + os.pathsep) if name == "PYTHONPATH" else ""
+            pieces.extend((command[end:value], prefix, command[value:next_end]))
             end = next_end
         return "".join((*pieces, command[end:]))
 
@@ -48,7 +45,7 @@ class PytestFeedbackAdapter:
             **env,
             "PYTHONPATH": os.pathsep.join(filter(None, (str(scratch), env.get("PYTHONPATH")))),
             # A snapshot can replace source bytes without changing size or mtime at
-            # Python's cache resolution. Keep compiled code private to this run.
+            # Python's cache resolution. Default to a private cache for this run.
             "PYTHONPYCACHEPREFIX": str(scratch / "pycache"),
             "PYTEST_PLUGINS": ",".join(filter(None, (env.get("PYTEST_PLUGINS"), _PROBE.stem))),
             "CODD_TEST_FEEDBACK_ROOT": str(project_root),
