@@ -6064,7 +6064,6 @@ def _run_chunked_implementation(
         chunk_size=chunk_size,
         timeout_per_chunk=timeout_per_chunk,
         progress_callback=progress,
-        config=config,
     )
     if history is None:
         return runner.run_steps(task_item, steps, resolved_ai_command, project_root)

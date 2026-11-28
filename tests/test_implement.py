@@ -452,12 +452,12 @@ def test_implementation_prompt_states_test_framework_for_python():
 
 
 MEASUREMENT_HEADING = "Elapsed-time measurements:"
-MEASUREMENT_GUIDANCE = (
-    f"{MEASUREMENT_HEADING}\n"
-    "- When a test measures elapsed time, define for each measured target where it starts, completes and fails, "
+MEASUREMENT_SENTENCE = (
+    "When a test measures elapsed time, define for each measured target where it starts, completes and fails, "
     "correlate them on one monotonic clock, check the measuring path against a response whose completion is known "
-    "and one that is cut short, and on failure record which events and times the verdict used.\n\n"
+    "and one that is cut short, and on failure record which events and times the verdict used."
 )
+MEASUREMENT_GUIDANCE = f"{MEASUREMENT_HEADING}\n- {MEASUREMENT_SENTENCE}\n\n"
 MEASUREMENT_FRAGMENTS = (
     "Elapsed-time measurements",
     "When a test measures elapsed time",
@@ -498,6 +498,7 @@ def test_test_writing_prompt_states_measurement_rule_once(language, output_paths
 
     assert prompt.count(MEASUREMENT_GUIDANCE) == 1
     assert prompt.count(MEASUREMENT_HEADING) == 1
+    assert prompt.count(MEASUREMENT_SENTENCE) == 1
 
 
 @pytest.mark.parametrize(
@@ -543,44 +544,43 @@ def test_non_test_writing_prompt_omits_measurement_rule(
 
 
 @pytest.mark.parametrize(
-    ("output_paths", "step_outputs", "uses_guidance", "main_digests"),
+    ("output_paths", "step_outputs", "main_digests"),
     [
         pytest.param(
-            ["tests/test_latency.py"], [["tests/test_latency.py"]], [True],
+            ["tests/test_latency.py"], [["tests/test_latency.py"]],
             ["a8c1c320282fbcf51178a531af67310266aeb8f05b250daeb8ca94ec6e9a2377"],
             id="declared-test",
         ),
         pytest.param(
             ["src", "checks"], [["checks/reporting.py", "checks/helpers.py"], ["src/auth.py"]],
-            [True, False],
             ["bdf5b898845fe8887cd3261fdb8c8a0cc7c10474f4129cf3c61f5431e5aa6535",
              "86dd8f71646f4d344a0e37cb983e2feb1251146cd8208807673fdad932b1cc98"],
             id="test-chunk-and-source-chunk",
         ),
         pytest.param(
-            ["tests/test_latency.py", "src"], [["src/auth.py"]], [False],
+            ["tests/test_latency.py", "src"], [["src/auth.py"]],
             ["3416c130dcd6a7e26a944585ce1f5fa19121535ce559079174b5485dff8650ed"],
             id="source-declaration-with-broader-routing",
         ),
         pytest.param(
-            ["tests/"], [["tests/"]], [False],
+            ["tests/"], [["tests/"]],
             ["cceef9f3fc59d734e097a591845cc7707c6cf6fea826058ff8bd0815fdffe4b9"],
             id="directory-only",
         ),
         pytest.param(
-            ["tests/test_latency.py"], [[]], [True],
+            ["tests/test_latency.py"], [[]],
             ["5bbb6009bd9aba4c345157853932822f6245d4252fbb30a773e1ab9ee7af3858"],
             id="configured-test-output",
         ),
         pytest.param(
-            ["src"], [[]], [False],
+            ["src"], [[]],
             ["3f78e3ee7eb97df01ace609e68379feed9714da560a16894087c6d36ca5df224"],
             id="test-hint-only",
         ),
     ],
 )
-def test_chunked_run_scopes_measurement_guidance(
-    tmp_path, monkeypatch, output_paths, step_outputs, uses_guidance, main_digests,
+def test_chunked_run_prompts_match_main(
+    tmp_path, monkeypatch, output_paths, step_outputs, main_digests,
 ):
     project = _setup_project(tmp_path, language="python")
     task = "docs/design/auth.md"
@@ -619,18 +619,10 @@ def test_chunked_run_scopes_measurement_guidance(
     ], catch_exceptions=False)
 
     assert result.exit_code == 0, result.output
-    assert len(prompts) == len(uses_guidance)
-    for prompt, expected, main_digest in zip(prompts, uses_guidance, main_digests, strict=True):
-        if expected:
-            assert prompt.count(MEASUREMENT_GUIDANCE) == 1
-            assert prompt.count(MEASUREMENT_HEADING) == 1
-            assert yaml.safe_load(prompt)[MEASUREMENT_HEADING.rstrip(":")] == [
-                MEASUREMENT_GUIDANCE.splitlines()[1].removeprefix("- "),
-            ]
-            prompt = prompt.replace(MEASUREMENT_GUIDANCE, "", 1)
-        else:
-            for fragment in MEASUREMENT_FRAGMENTS:
-                assert fragment not in prompt
+    assert len(prompts) == len(main_digests)
+    for prompt, main_digest in zip(prompts, main_digests, strict=True):
+        for fragment in MEASUREMENT_FRAGMENTS:
+            assert fragment not in prompt
         # Full prompts captured on main 63adbee with the same inputs.
         assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == main_digest
 
