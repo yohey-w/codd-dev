@@ -555,29 +555,29 @@ def test_test_writing_prompt_allows_rejecting_an_untrusted_certificate(condition
 
 
 @pytest.mark.parametrize(
-    ("design_node", "design_path", "output_paths", "expected_outputs"),
+    ("design_node", "design_path", "output_paths", "expected_outputs", "includes_guidance"),
     [
         pytest.param(
-            "design:system", "docs/design/system_design.md", ["src/reporter.py"], [],
+            "design:system", "docs/design/system_design.md", ["src/reporter.py"], [], False,
             id="source-only",
         ),
         pytest.param(
-            "test:test-strategy", "docs/test/test_strategy.md", ["src/reporter.py"], [],
+            "test:test-strategy", "docs/test/test_strategy.md", ["src/reporter.py"], [], True,
             id="source-from-test-strategy",
         ),
         pytest.param(
             "test:test-strategy", "docs/test/test_strategy.md",
-            ["src/reporter.py", "tests/test_reporter.py"], ["src/reporter.py"],
+            ["src/reporter.py", "tests/test_reporter.py"], ["src/reporter.py"], True,
             id="declared-source-with-broader-routing",
         ),
         pytest.param(
-            "test:test-strategy", "docs/test/test_strategy.md", ["tests"], [],
+            "test:test-strategy", "docs/test/test_strategy.md", ["tests"], [], True,
             id="directory-only",
         ),
     ],
 )
-def test_non_test_writing_prompt_omits_measurement_rule(
-    design_node, design_path, output_paths, expected_outputs,
+def test_test_writing_prompt_uses_shared_test_targeting(
+    design_node, design_path, output_paths, expected_outputs, includes_guidance,
 ):
     prompt = _build_implementation_prompt(
         config={"project": {"language": "python"}},
@@ -592,8 +592,12 @@ def test_non_test_writing_prompt_omits_measurement_rule(
         coding_principles=None,
     )
 
-    for fragment in (*MEASUREMENT_FRAGMENTS, *CERTIFICATE_FRAGMENTS):
-        assert fragment not in prompt
+    if includes_guidance:
+        assert prompt.count(MEASUREMENT_GUIDANCE) == 1
+        assert prompt.count(CERTIFICATE_GUIDANCE) == 1
+    else:
+        for fragment in (*MEASUREMENT_FRAGMENTS, *CERTIFICATE_FRAGMENTS):
+            assert fragment not in prompt
 
 
 @pytest.mark.parametrize(
