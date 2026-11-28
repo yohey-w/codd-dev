@@ -35,7 +35,7 @@ def test_runner_report_does_not_reject_fix_and_is_restored(project_factory):
     assert report.read_bytes() == original
 
 
-def test_remaining_case_is_reisolated_after_own_test_fix(project_factory):
+def test_remaining_case_is_isolated_after_own_test_fix(project_factory):
     other = "checks/test_zdependent.py"
     dependent = textwrap.dedent("""\
         from checks import test_subject
@@ -54,8 +54,9 @@ def test_remaining_case_is_reisolated_after_own_test_fix(project_factory):
     assert attempt["suite_after"] == 1
     assert record["passed_in_isolation"] == 1
     timeline = trace.read_text().splitlines()
-    before, after = [i for i, event in enumerate(timeline) if event == f"isolate {other}::test_dependent"]
-    assert before < timeline.index("feedback case") < after
+    isolate = f"isolate {other}::test_dependent"
+    assert timeline.count(isolate) == 1
+    assert timeline.index("feedback case") < timeline.index(isolate)
     assert "feedback dependent" not in timeline
 
 

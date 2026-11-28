@@ -88,7 +88,7 @@ def test_test_execution_discards_changed_environment(project_factory, during_can
     assert "[7][1]" in (root / TEST_FILE).read_text()
 
 
-def test_reprovision_refreshes_isolations_before_next_owner(project_factory):
+def test_reprovision_precedes_isolation_for_next_owner(project_factory):
     second = "checks/test_zsecond.py"
     asset = ".venv/runtime.txt"
     second_case = textwrap.dedent(f"""\
@@ -119,8 +119,9 @@ def test_reprovision_refreshes_isolations_before_next_owner(project_factory):
     assert "test environment changed" in attempt["reason"]
     lines = trace.read_text().splitlines()
     case = f"isolate {second}::test_second"
-    first, repeated = [index for index, event in enumerate(lines) if event == case]
-    assert first < lines.index("feedback case") < repeated
+    assert lines.count(case) == 1
+    assert lines.index("feedback case") < lines.index(case)
+    assert [run["purpose"] for run in record["runs"][-2:]] == ["suite after reprovisioning", "isolate"]
     assert "feedback second" not in lines
     assert record["passed_in_isolation"] == 1
 

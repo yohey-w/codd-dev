@@ -433,73 +433,47 @@ class _Feedback:
             owners.add(matches[0])
         return next(iter(owners)) if len(owners) == 1 else None
 
-    def screen(self, round_record, suite) -> str | None:
-        screened = round_record["screened"]
-        by_case = defaultdict(list)
+    def owner_groups(self, suite):
+        grouped = defaultdict(list)
         for failure in suite.failures:
-            by_case[failure["case"]].append(failure)
-        for case, failures in by_case.items():
-            signature = sorted({(f["origin"], f["phase"]) for f in failures})
-            signature = [list(pair) for pair in signature]
-            if case in screened and signature == screened[case][0]:
-                continue
+            owner = self.owner(failure)
+            if owner is not None:
+                grouped[owner].append(failure)
+        return sorted(grouped.items(), key=lambda item: (not self.has_helper(item[1]), item[0]))
+
+    def screen(self, round_record, owner, failures, limited) -> tuple[list[dict], str | None]:
+        screened = round_record["screened"]
+        isolated_by_owner = round_record.setdefault("isolated_by_owner", {})
+        by_case = defaultdict(set)
+        for failure in failures:
+            by_case[failure["case"]].add((failure["origin"], failure["phase"]))
+        reproduced_for_owner = []
+        for case, signature in by_case.items():
             remaining = self.timeout - round_record["isolated_seconds"]
-            if round_record["isolated"] >= _MAX_ISOLATED_CASES or remaining <= 0:
+            count = isolated_by_owner.get(owner, 0)
+            if count >= _MAX_ISOLATED_CASES or remaining <= 0:
+                limited.add(case)
                 continue
+            isolated_by_owner[owner] = count + 1
             round_record["isolated"] += 1
             isolated = self.run_tests(round_record, "isolate", case, remaining)
             collection_failed = (
                 isolated.unavailable == _MISSING_SELECTED_CASE and isolated.collection_errors
             )
             if isolated.unavailable and not collection_failed and (not isolated.timed_out or self.environment_dirty):
-                return isolated.unavailable
+                return [], isolated.unavailable
             reproduced = [] if isolated.unavailable else [
                 {**f, "detail": _command_output_tail(f["detail"], None)}
-                for f in isolated.failures if [f["origin"], f["phase"]] in signature
+                for f in isolated.failures if (f["origin"], f["phase"]) in signature
             ]
-            screened[case] = [signature, reproduced]
+            screened[case] = [[list(pair) for pair in sorted(signature)], reproduced]
+            reproduced_for_owner.extend(item for item in reproduced if self.owner(item) == owner)
             passed = round_record.setdefault("passed_cases", [])
             if isolated.cases.get(case) == "passed" and case not in passed:
                 passed.append(case)
                 round_record["passed_in_isolation"] += 1
                 self.emit(f"{case} passed in isolation ({round_record['passed_in_isolation']} so far)")
-        return None
-
-    def candidates(self, round_record, suite):
-        screened = round_record["screened"]
-        grouped = defaultdict(list)
-        limited = set()
-        seen = set()
-        interrupted = {
-            attempt["owner"] for recorded in self.state["rounds"]
-            for attempt in recorded["attempts"] if attempt.get("interrupted")
-        }
-        for failure in suite.failures:
-            case = failure["case"]
-            if case not in screened:
-                limited.add(case)
-                continue
-            signature, reproduced = screened[case]
-            if [failure["origin"], failure["phase"]] not in signature:
-                limited.add(case)
-                continue
-            owner = self.owner(failure)
-            if owner is None or owner in interrupted:
-                continue
-            key = (case, owner, failure["origin"], failure["phase"])
-            if key in seen:
-                continue
-            seen.add(key)
-            for item in reproduced:
-                if (
-                    item["origin"] == failure["origin"] and item["phase"] == failure["phase"]
-                    and self.owner(item) == owner
-                ):
-                    grouped[owner].append(item)
-        round_record["over_isolation_budget"] = len(limited)
-        if limited:
-            self.emit(f"{len(limited)} failing case(s) left outside the isolation budget")
-        return sorted(grouped.items(), key=lambda item: not self.has_helper(item[1]))
+        return reproduced_for_owner, None
 
     @staticmethod
     def has_helper(failures) -> bool:
@@ -721,31 +695,53 @@ class _Feedback:
                 continue
             problem = self.prepare(round_record)
             suite = _Suite(unavailable=problem) if problem else self.run_tests(round_record, f"round {index + 1} suite")
+            handled = {attempt["owner"] for attempt in round_record["attempts"]}
+            handled.update(
+                attempt["owner"] for recorded in self.state["rounds"]
+                for attempt in recorded["attempts"] if attempt.get("interrupted")
+            )
+            limited = set(round_record.get("cases_outside_isolation_budget", ()))
             groups = []
+            isolation_problem = None
             while not suite.unavailable and suite.failures:
-                suite.unavailable = self.screen(round_record, suite)
-                if suite.unavailable:
+                groups = self.owner_groups(suite)
+                pending = [(owner, failures) for owner, failures in groups if owner not in handled]
+                if not pending:
                     break
-                groups = self.candidates(round_record, suite)
-                attempted = {attempt["owner"] for attempt in round_record["attempts"]}
-                next_group = next((group for group in groups if group[0] not in attempted), None)
-                if next_group is None:
+                owner, owned_failures = pending[0]
+                failures, isolation_problem = self.screen(round_record, owner, owned_failures, limited)
+                time_exhausted = round_record["isolated_seconds"] >= self.timeout
+                if time_exhausted:
+                    limited.update(f["case"] for _, failures in pending[1:] for f in failures)
+                round_record["over_isolation_budget"] = len(limited)
+                if limited:
+                    round_record["cases_outside_isolation_budget"] = sorted(limited)
+                if time_exhausted:
+                    round_record["isolation_time_exhausted"] = True
+                    self.emit("isolation time budget exhausted")
+                if isolation_problem or time_exhausted:
                     break
-                owner, failures = next_group
+                handled.add(owner)
+                if not failures:
+                    continue
                 suite, reprovisioned = self.attempt(round_record, tasks[owner], failures, suite)
                 if not suite.unavailable and (reprovisioned or self.has_helper(failures)):
                     round_record["screened"].clear()
                     purpose = "suite after reprovisioning" if reprovisioned else "suite after helper decision"
                     suite = self.run_tests(round_record, purpose)
+            # Use ownership in the full suite to decide whether to end feedback.
             stop = bool(suite.unavailable) or not suite.failures or not groups
+            if limited:
+                self.emit(f"{len(limited)} failing case(s) left outside the isolation budget")
             if round_record.get("baseline_saved"):
                 self.snapshot.restore(self.target)
                 if self.environment_dirty:
                     self.snapshot.discard_environment()
                     self.emit("test environment changed; discarded before the next run")
             round_record.update(done=True, stop=stop)
-            if suite.unavailable:
-                round_record["skipped"] = _command_output_tail(suite.unavailable, None)
+            problem = suite.unavailable or isolation_problem
+            if problem:
+                round_record["skipped"] = _command_output_tail(problem, None)
                 self.emit(f"round {index + 1} skipped · {round_record['skipped']}")
             self.emit(
                 f"round {index + 1}: {len(suite.failures)} failure(s)/error(s) remain · "
