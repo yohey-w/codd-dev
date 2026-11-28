@@ -45,6 +45,7 @@ default_artifacts:
   - id: "design:screen_transitions"
     title: "Screen Transitions (Edge Data)"
     depends_on: ["design:screen_flow_design"]
+    ordered_after: ["design:api_design"]
     scope: "Concrete transition edges with from/to/trigger/guard metadata for validation and E2E generation"
     condition: "requirements mention navigation transitions, redirects, or multi-step user flows"
   - id: "design:non_functional_requirements"

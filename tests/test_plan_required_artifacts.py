@@ -785,7 +785,10 @@ def test_web_ordering_moves_only_required_waves(tmp_path, monkeypatch, dependenc
     assert [entry["node_id"] for entry in waves["7"]] == [consumer]
     assert [entry["node_id"] for entry in waves["8"]] == [later]
     reports = [line for line in result.output.splitlines() if "ordered_after" in line]
-    assert len(reports) == 1 and API_ROW in reports[0] and FLOW_ROW in reports[0]
+    # The web catalog chains screen flow -> API -> screen transitions; both rules report.
+    assert len(reports) == 2
+    assert API_ROW in reports[0] and FLOW_ROW in reports[0]
+    assert transitions in reports[1] and API_ROW in reports[1]
 
 
 @pytest.mark.parametrize("has_dependency", [False, True])
@@ -1040,3 +1043,18 @@ def test_saved_selection_ignores_an_unreadable_current_catalog(tmp_path, monkeyp
 
     assert result.exit_code == 0, result.output
     assert len(prompts) == 1
+
+
+def test_web_catalog_orders_flow_api_and_transitions_in_one_chain():
+    # Screen flow decides where an action leads, the API realizes it in its responses,
+    # and screen transitions record the concrete edges per response: no two of these
+    # describe the same outcome from the same wave.
+    from codd.required_artifacts_deriver import RequiredArtifactsDeriver
+
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "codd/required_artifacts/defaults/web.yaml"
+    rows = {row["id"]: row for row in yaml.safe_load(path.read_text(encoding="utf-8"))["default_artifacts"]}
+    assert rows["design:api_design"]["ordered_after"] == ["design:screen_flow_design"]
+    assert rows["design:screen_transitions"]["ordered_after"] == ["design:api_design"]
+    assert RequiredArtifactsDeriver  # the catalog loads through the same deriver
