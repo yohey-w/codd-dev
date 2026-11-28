@@ -338,8 +338,10 @@ class VerifyRunner:
         *,
         language_registry: "LanguageRegistry | None" = None,
         adapter_registry: "AdapterRegistry | None" = None,
+        exec_env_root: Path | None = None,
     ):
         self.project_root = Path(project_root).resolve()
+        self._exec_env_root = self.project_root if exec_env_root is None else exec_env_root
         self.codd_yaml = dict(codd_yaml or {})
         self.runtime_skip = frozenset(str(item) for item in (runtime_skip or ()))
         # Contract-Kernel registries. ``None`` ⇒ the process-wide defaults
@@ -1029,7 +1031,7 @@ class VerifyRunner:
         artifact pointing at a non-existent dir is dropped here (existence check),
         so it can never silently redirect a spawn.
         """
-        state_file = self.project_root / _EXEC_ENV_STATE_RELPATH
+        state_file = self._exec_env_root / _EXEC_ENV_STATE_RELPATH
         try:
             raw = json.loads(state_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):

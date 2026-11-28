@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Protocol, runtime_checkable
+from typing import Any, Callable, ContextManager, Mapping, Protocol, runtime_checkable
 
 from codd.implement_oracle_types import ImplementOracleFinding, ImplementOracleResult
 from codd.languages.profile import (
@@ -38,6 +38,12 @@ from codd.languages.profile import (
     LanguageProfile,
     LayoutSpec,
 )
+
+
+@dataclass(frozen=True)
+class PreparedTestExecutable:
+    interpreter: str
+    isolated: bool = False
 
 
 @dataclass(frozen=True)
@@ -78,6 +84,9 @@ class OracleContext:
     #: an absent ``{package_name}`` is a HARD FAIL, never a silent ``src`` fallback
     #: (a wrong package_root is a false-green — Cut A.3 nuance).
     package_name: str | None = None
+    #: Optional greenfield hook for an adapter that collects project tests. Called
+    #: once per evaluation to prepare the environment and keep it live for collection.
+    prepare_test_executable: Callable[[str], ContextManager[PreparedTestExecutable | str | None]] | None = None
 
 
 @dataclass(frozen=True)

@@ -26,6 +26,8 @@ def get_ai_command(
     config: Mapping[str, Any] | None,
     project_root: Path | str | None = None,
     command_override: str | None = None,
+    *,
+    fallback_after_invoke: bool = True,
 ) -> AiCommand:
     """Return the configured AI command adapter, falling back to subprocess by default."""
 
@@ -73,7 +75,7 @@ def get_ai_command(
 
     if isinstance(adapter, CodexAppServerAiCommand):
         adapter.config = config
-        adapter.fallback = fallback
+        adapter.fallback = fallback if fallback_after_invoke else "error"
         adapter.fallback_command = _subprocess(config, project_root, command_override)
     return adapter
 
