@@ -113,6 +113,7 @@ from codd.path_safety import has_plausible_file_extension, is_glob_decl, resolve
 from codd.requirement_appendix import UnreadableRequirementAppendix
 
 if TYPE_CHECKING:
+    from codd.greenfield.implement_test_feedback import DeclaredOutputs
     from codd.languages.adapters.implement_oracle import PreparedTestExecutable
     from codd.planner import PlanInitResult
 
@@ -3057,9 +3058,12 @@ class GreenfieldPipeline:
         config: dict[str, Any],
         *,
         feedback_rows: Any = None,
-        feedback_output_paths: tuple[str, ...] = (),
+        feedback_output_paths: DeclaredOutputs | None = None,
     ) -> dict[str, float]:
         """Re-run ``implement_tasks`` for each given task carrying ``feedback``.
+
+        ``feedback_output_paths`` is the test feedback scope. It carries exclusions
+        for competing claims even when a directory is listed in the prompt.
 
         ``feedback_rows`` (a ``list[VBAuditRow]``, optional): when the caller
         has the raw uncovered rows behind ``feedback`` — only the VB coverage
@@ -3127,7 +3131,7 @@ class GreenfieldPipeline:
         for task in tasks:
             # Oracle/VB repair may include gate tasks that author nothing.
             # Test feedback has already located a real output for each task it returns.
-            if not feedback_output_paths and _task_declares_no_authored_artifact(task, config):
+            if feedback_output_paths is None and _task_declares_no_authored_artifact(task, config):
                 self.echo(
                     f"[greenfield] re-implement {task.task_id}: skip — verification/gate "
                     "or non-codebase task (no authored artifact; nothing to repair)."
@@ -3148,9 +3152,13 @@ class GreenfieldPipeline:
                     continue
                 task_feedback = format_gap_feedback(scoped_rows)
 
-            declared_paths = feedback_output_paths or task.output_paths
-            output_paths = list(declared_paths) if declared_paths else _output_paths_for_task(config, task)
-            expected_outputs = list(feedback_output_paths or task.expected_outputs)
+            if feedback_output_paths is not None:
+                output_paths = expected_outputs = list(feedback_output_paths.names)
+                feedback_options = {"_single_attempt": True, "_feedback_outputs": feedback_output_paths}
+            else:
+                output_paths = list(task.output_paths) if task.output_paths else _output_paths_for_task(config, task)
+                expected_outputs = list(task.expected_outputs)
+                feedback_options = {}
             started = time.monotonic()
             try:
                 implement_tasks(
@@ -3163,10 +3171,10 @@ class GreenfieldPipeline:
                     ai_command=self.ai_command,
                     use_derived_steps=True,
                     feedback=task_feedback,
-                    **({"_single_attempt": True} if feedback_output_paths else {}),
+                    **feedback_options,
                 )
             except CoddCLIError as exc:
-                if feedback_output_paths:
+                if feedback_output_paths is not None:
                     raise
                 failed_task_ids.append(task.task_id)
                 self.echo(

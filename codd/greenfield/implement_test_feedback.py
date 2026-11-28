@@ -15,6 +15,7 @@ import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
+from functools import cache
 from io import BytesIO
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
@@ -27,7 +28,7 @@ from codd.greenfield.pipeline import (
     _declared_output_is_file_path,
     _is_glob_decl,
 )
-from codd.implementer import COMMENT_PREFIX_BY_SUFFIX
+from codd.implementer import COMMENT_PREFIX_BY_SUFFIX, _resolve_design_path
 from codd.languages.builtin_adapters import ensure_builtin_adapters_registered
 from codd.languages.contract import resolve_language_profile
 from codd.languages.registry import UnknownLanguageError, default_adapter_registry
@@ -35,6 +36,7 @@ from codd.operational_e2e_audit import _COVER_MARKER_RE
 from codd.path_safety import iter_project_glob
 from codd.reference_resolution import AUDIT_RELATIVE_PATH
 from codd.repair.verify_runner import VerifyRunner, _command_output_tail
+from codd.scanner import build_document_reference_index
 from codd.verifiable_behavior_audit import coverage_gate_enabled
 from codd.vb_marker_authenticity import _scan_cover_markers_with_lines
 
@@ -51,22 +53,23 @@ _ADVICE = (
 
 
 class DeclaredOutputs:
-    """File and directory scopes with globs expanded to existing files."""
+    """File and directory scopes, optionally narrowed by competing claims."""
 
     def __init__(self, root: Path, outputs, *, expand_globs: bool = True):
         self.root = root
         self.paths: dict[Path, bool] = {}
+        self.excluded: dict[Path, bool] = {}
         for raw in outputs:
             name = raw.strip().replace("\\", "/")
             path = Path(name)
-            if not name or not path.parts or path.is_absolute() or ".." in path.parts:
-                continue
-            if ":" in name:
-                continue
-            if expand_globs and _is_glob_decl(name):
+            absolute = path.is_absolute()
+            relative = bool(path.parts) and not absolute and ".." not in path.parts and ":" not in name
+            if expand_globs and (absolute or relative) and _is_glob_decl(name):
                 for match in iter_project_glob(root, name, follow_symlinks=False):
                     if match.is_file():
                         self.paths[match.relative_to(root)] = False
+                continue
+            if not relative:
                 continue
             target = root / path
             if target.resolve() != target:
@@ -85,13 +88,23 @@ class DeclaredOutputs:
         return self.matches(path)
 
     def matches(self, path: Path) -> bool:
-        return any(path == output or (directory and output in path.parents)
-                   for output, directory in self.paths.items())
+        return self._contains(path, self.paths) and not self.excludes(path)
+
+    def exclude_claims(self, other: DeclaredOutputs) -> None:
+        for path, directory in other.paths.items():
+            self.excluded[path] = directory or self.excluded.get(path, False)
+
+    def excludes(self, path: Path) -> bool:
+        return self._contains(path, self.excluded)
+
+    @staticmethod
+    def _contains(path: Path, paths: dict[Path, bool]) -> bool:
+        return path in paths or any(paths.get(parent, False) for parent in path.parents)
 
     @property
     def names(self) -> tuple[str, ...]:
         return tuple(path.as_posix() + ("/" if directory else "")
-                     for path, directory in self.paths.items())
+                     for path, directory in self.paths.items() if not self.excludes(path))
 
 
 def _traceability_design(root: Path, path: Path, content: bytes) -> str | None:
@@ -377,18 +390,39 @@ class _Feedback:
 
     def round_outputs(self) -> dict[str, DeclaredOutputs]:
         outputs = {task.task_id: DeclaredOutputs(self.root, task.expected_outputs) for task in self.tasks}
+        self.add_provenance_claims(outputs)
+        for owner, scope in outputs.items():
+            for other, claims in outputs.items():
+                if other != owner:
+                    scope.exclude_claims(claims)
+        return outputs
+
+    def add_provenance_claims(self, outputs: dict[str, DeclaredOutputs]) -> None:
+        banners = []
+        for rel, entry in sorted(self.target.items()):
+            path = Path(rel)
+            if stat.S_ISREG(entry.mode) and (design := _traceability_design(self.root, path, entry.data)):
+                banners.append((path, design))
+        if not banners:
+            return
+
+        index = build_document_reference_index(self.root, self.config)
+
+        @cache
+        def resolve(reference: str) -> Path | None:
+            try:
+                return _resolve_design_path(self.root, self.config, reference, index=index).resolve()
+            except FileNotFoundError:
+                return None
+
         by_design = defaultdict(list)
         for task in self.tasks:
-            by_design[task.design_node.strip()].append(task.task_id)
-        for rel, entry in sorted(self.target.items()):
-            if not stat.S_ISREG(entry.mode):
-                continue
-            path = Path(rel)
-            design = _traceability_design(self.root, path, entry.data)
-            owners = by_design.get(design, ())
-            if len(owners) == 1 and not any(declared.matches(path) for declared in outputs.values()):
+            if (design := resolve(task.design_node)) is not None:
+                by_design[design].append(task.task_id)
+        for path, reference in banners:
+            owners = by_design.get(resolve(reference), ())
+            if len(owners) == 1 and not outputs[owners[0]].matches(path):
                 outputs[owners[0]].paths[path] = False
-        return outputs
 
     def emit(self, message: str) -> None:
         self.pipeline.echo(f"[implement test feedback] {message}")
@@ -672,8 +706,12 @@ class _Feedback:
     def allowed_change(self, path, outputs, old, new) -> bool:
         if outputs.allows(path):
             return True
+        if outputs.excludes(path):
+            return False
         if old is None and new is not None and stat.S_ISDIR(new.mode):
-            return any(path in allowed.parents for allowed in (*outputs.paths, *self.logs))
+            return any(path in allowed.parents for allowed in outputs.paths if outputs.matches(allowed)) or any(
+                path in log.parents for log in self.logs
+            )
         # The shared implementation entry point appends its own diagnostics.
         return (
             path in self.logs and new is not None and stat.S_ISREG(new.mode)
@@ -730,7 +768,7 @@ class _Feedback:
         reason, candidate = None, suite
         try:
             self.pipeline._reimplement_tasks(
-                self.root, [task], feedback, self.config, feedback_output_paths=self.outputs[owner].names,
+                self.root, [task], feedback, self.config, feedback_output_paths=self.outputs[owner],
             )
         except Exception as exc:
             reason = f"could not evaluate the candidate: {exc}"

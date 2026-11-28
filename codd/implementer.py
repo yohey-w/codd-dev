@@ -42,7 +42,9 @@ import unicodedata
 
 
 if TYPE_CHECKING:
+    from codd.greenfield.implement_test_feedback import DeclaredOutputs
     from codd.greenfield.pipeline import ImplementTaskRef
+    from codd.scanner import DocumentReferenceIndex
 
 
 LOGGER = logging.getLogger(__name__)
@@ -904,6 +906,7 @@ class Implementer:
         sleep: Callable[[float], None] = time.sleep,
         _from_verification: bool = False,
         _single_attempt: bool = False,
+        _feedback_outputs: DeclaredOutputs | None = None,
     ) -> None:
         self.project_root = Path(project_root).resolve()
         self.config = config if config is not None else _load_project_config(self.project_root)
@@ -911,6 +914,7 @@ class Implementer:
         self.use_derived_steps = _use_derived_steps_enabled(self.config, use_derived_steps)
         self._from_verification = _from_verification
         self._single_attempt = _single_attempt
+        self._feedback_outputs = _feedback_outputs
         # Injectable backoff between no-usable-output retries (tests stub it to
         # avoid real sleeps); mirrors ai_invoke._invoke_with_recovery's ``sleep``.
         self._sleep = sleep
@@ -1277,10 +1281,14 @@ class Implementer:
         if select_command is not None and dependency_coverage is not None:
             resolved_ai_command, one_shot = select_command(existing_output_coverage, dependency_coverage)
         invocation_options: dict[str, Any] = {}
+        write_options: dict[str, Any] = {}
         if self._single_attempt:
-            from codd.greenfield.implement_test_feedback import STATE_DIRECTORY
+            from codd.greenfield.implement_test_feedback import STATE_DIRECTORY, DeclaredOutputs
 
             invocation_options = {"recover": False, "file_capture_exclusions": (STATE_DIRECTORY,)}
+            write_options["strict_outputs"] = self._feedback_outputs or DeclaredOutputs(
+                self.project_root, spec.expected_outputs, expand_globs=False,
+            )
         try:
             with preserve_requirement_appendix(self.project_root):
                 raw_output = generator_module._invoke_ai_command(
@@ -1321,7 +1329,7 @@ class Implementer:
                 test_root=_test_root_from_config(self.config),
                 existing_output_coverage=existing_output_coverage,
                 one_shot_prompt=prompt if one_shot and not self._from_verification else None,
-                **({"strict_outputs": True} if self._single_attempt else {}),
+                **write_options,
             )
         except (ImplementSyntaxGateError, _IncompleteExistingOutputError):
             # These write-time rejections have their own retry limits.
@@ -1357,6 +1365,7 @@ def implement_tasks(
     feedback: str | None = None,
     _from_verification: bool = False,
     _single_attempt: bool = False,
+    _feedback_outputs: DeclaredOutputs | None = None,
     **_ignored: Any,
 ) -> list[ImplementationResult]:
     project_root = Path(project_root).resolve()
@@ -1393,7 +1402,7 @@ def implement_tasks(
         ai_command=ai_command,
         use_derived_steps=use_derived_steps,
         _from_verification=_from_verification,
-        **({"_single_attempt": True} if _single_attempt else {}),
+        **({"_single_attempt": True, "_feedback_outputs": _feedback_outputs} if _single_attempt else {}),
     ).run_implement(spec, feedback=feedback)
     return [result]
 
@@ -1904,7 +1913,9 @@ def _load_design_context(project_root: Path, config: dict[str, Any], design_node
     )
 
 
-def _resolve_design_path(project_root: Path, config: dict[str, Any], design_node: str) -> Path:
+def _resolve_design_path(
+    project_root: Path, config: dict[str, Any], design_node: str, *, index: DocumentReferenceIndex | None = None,
+) -> Path:
     """Resolve a ``source_design_doc`` reference to its canonical file path.
 
     Uses the shared deterministic reference resolver (ACG axis-1). Recovery of a
@@ -1922,7 +1933,8 @@ def _resolve_design_path(project_root: Path, config: dict[str, Any], design_node
     )
     from codd.scanner import build_document_reference_index
 
-    index = build_document_reference_index(project_root, config)
+    if index is None:
+        index = build_document_reference_index(project_root, config)
     try:
         binding = resolve_document_ref(
             design_node,
@@ -4146,18 +4158,15 @@ def _write_generated_files(
     test_root: str | None = None,
     existing_output_coverage: _ExistingOutputCoverage | None = None,
     one_shot_prompt: str | None = None,
-    strict_outputs: bool = False,
+    strict_outputs: DeclaredOutputs | None = None,
 ) -> list[Path]:
-    if strict_outputs:
+    if strict_outputs is not None:
         from codd.ai_invoke import _CapturedFileOutput
-        from codd.greenfield.implement_test_feedback import DeclaredOutputs
 
-        # Feedback supplies already-expanded paths, including banner-owned files.
-        declared = DeclaredOutputs(project_root, spec.expected_outputs, expand_globs=False)
         changed = raw_output.changed_paths if isinstance(raw_output, _CapturedFileOutput) else ()
         headers = file_block_paths(raw_output)
         for path in [*headers, *changed]:
-            if not declared.allows(path):
+            if not strict_outputs.allows(path):
                 raise ValueError(f"write outside declared outputs: {path}")
         if not headers:
             from codd.repair.verify_runner import _command_output_tail
@@ -4172,9 +4181,9 @@ def _write_generated_files(
         root_artifact_patterns=root_artifact_patterns,
         test_root=test_root,
     )
-    if strict_outputs:
+    if strict_outputs is not None:
         for path, _ in file_payloads:
-            if not declared.allows(Path(path)):
+            if not strict_outputs.allows(Path(path)):
                 raise ValueError(f"write outside declared outputs: {path}")
     from codd.ai_invoke import _CapturedFileOutput
 
