@@ -65,8 +65,8 @@ _UNSTABLE_ADVICE = (
     "and failure output as quoted evidence. Make each test deterministic. For each assertion, "
     "wait with a timeout for the expected state. Waiting for a response, request completion, "
     "or an action to return does not wait for that state. Do not depend on test order or state "
-    "left by other tests. Preserve the assertions without broadening the values they accept. "
-    "Each test must pass in the full suite and in "
+    "left by other tests. Preserve the assertions without broadening the values they accept, "
+    "and do not skip, guard or catch an assertion. Each test must pass in the full suite and in "
     "three consecutive isolated runs."
 )
 
