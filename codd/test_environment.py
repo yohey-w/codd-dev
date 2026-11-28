@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import shlex
 import subprocess
-import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -26,16 +25,6 @@ from codd.verifiable_behavior_audit import (
 
 _FENCE = "codd-test-environment"
 _FENCE_BYTES = _FENCE.encode("ascii")
-
-
-def bounded_environment_timeout(deadline: float | None, limit: float) -> float:
-    """Cap the next preparation operation at the shared monotonic deadline."""
-    if deadline is None:
-        return limit
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        raise TimeoutError("project test environment preparation deadline reached")
-    return min(limit, remaining)
 
 
 @dataclass(frozen=True)
@@ -382,21 +371,15 @@ class AssetCheck:
 
 def check_test_asset(
     project_root: Path, name: str, spec: TestAssetSpec, *, env: dict[str, str],
-    acquire: bool, install_timeout: float, deadline: float | None = None,
+    acquire: bool, install_timeout: float,
 ) -> AssetCheck:
-    failure, _ = _run_asset_command(
-        spec.check, project_root, env, bounded_environment_timeout(deadline, spec.check_timeout_seconds),
-    )
+    failure, _ = _run_asset_command(spec.check, project_root, env, spec.check_timeout_seconds)
     if failure is None:
         return AssetCheck()
     if acquire:
-        acquisition_failure, output = _run_asset_command(
-            spec.acquire, project_root, env, bounded_environment_timeout(deadline, install_timeout),
-        )
+        acquisition_failure, output = _run_asset_command(spec.acquire, project_root, env, install_timeout)
         if acquisition_failure is None:
-            failure, location = _run_asset_command(
-                spec.check, project_root, env, bounded_environment_timeout(deadline, spec.check_timeout_seconds),
-            )
+            failure, location = _run_asset_command(spec.check, project_root, env, spec.check_timeout_seconds)
             if failure is None:
                 return AssetCheck(notice=f"acquired test asset {name!r} at {location or output}")
         else:

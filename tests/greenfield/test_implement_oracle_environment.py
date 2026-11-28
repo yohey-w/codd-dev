@@ -19,9 +19,9 @@ from codd.greenfield.pipeline import (
     GreenfieldPipeline,
     ImplementTaskRef,
     StageError,
-    _OracleWriteFence,
 )
 from codd.implement_oracle_scope import (
+    PHASE_CHUNKED_BROAD,
     PHASE_SUPPLIER_FIRST,
     BroadRepairPlan,
     OracleRepairPhase,
@@ -516,7 +516,7 @@ def test_broad_campaign_charges_provisioning_to_its_wall_clock(
     monkeypatch.setattr(time, "monotonic", lambda: clock)
     monkeypatch.setattr(pipeline, "_provision_env", provision)
     monkeypatch.setattr(pipeline, "_reimplement_tasks", reimplement)
-    exhausted = first_seconds + second_seconds >= 100
+    exhausted = expected_reruns == 0
     if exhausted:
         with pytest.raises(StageError, match="native-oracle gate failed"):
             pipeline._enforce_implement_oracle_gate(root, [task], {})
@@ -530,64 +530,6 @@ def test_broad_campaign_charges_provisioning_to_its_wall_clock(
     assert len(collections) == (1 if exhausted else 2)
     assert clock == first_seconds + expected_reruns * (1 + second_seconds)
     assert any("wall-clock budget (100s) exhausted" in message for message in messages) == exhausted
-
-
-@pytest.mark.parametrize("rollback", [False, True], ids=["enforce", "rollback"])
-def test_rerun_fence_does_not_read_or_restore_environment(python_project, monkeypatch, rollback):
-    root, _ = python_project
-    env = root / ".venv"
-    environment_file = env / "lib/site-packages/example/module_000.py"
-    for number in range(256):
-        _write(env, f"lib/site-packages/example/module_{number:03}.py", "#" * 32768)
-    outside = root / "src/app/outside.py"
-    outside.write_text("original", encoding="utf-8")
-    reads = []
-    inside_capture = False
-    real_read_bytes = Path.read_bytes
-    real_capture = _OracleWriteFence._capture
-
-    def read_bytes(path):
-        if inside_capture:
-            reads.append(path)
-        return real_read_bytes(path)
-
-    def capture(fence):
-        nonlocal inside_capture
-        inside_capture = True
-        try:
-            return real_capture(fence)
-        finally:
-            inside_capture = False
-
-    monkeypatch.setattr(Path, "read_bytes", read_bytes)
-    monkeypatch.setattr(_OracleWriteFence, "_capture", capture)
-    test_path = "tests/test_api.py"
-    task = ImplementTaskRef("api", "docs/design/api.md", (test_path,), expected_outputs=(test_path,))
-    scope = OracleRerunScope("narrow", (task.task_id,), (test_path,))
-    pipeline = GreenfieldPipeline(echo=lambda _: None)
-
-    def reimplement(*_args, **_kwargs):
-        outside.write_text("changed", encoding="utf-8")
-        environment_file.write_text("new environment content", encoding="utf-8")
-
-    if rollback:
-        from codd.greenfield.pipeline import _feedback_environment_paths
-
-        config, language, *_ = pipeline._layout_inputs(root)
-        with _OracleWriteFence(
-            root, allowed_paths=(test_path,), echo=lambda _: None,
-            environment_paths=_feedback_environment_paths(config, language),
-        ) as fence:
-            reimplement()
-            fence.rollback()
-    else:
-        monkeypatch.setattr(pipeline, "_reimplement_tasks", reimplement)
-        pipeline._rerun_tasks_with_feedback(root, [task], "fix the test", {}, scope=scope)
-
-    assert reads.count(outside) == 2
-    assert sum(path.is_relative_to(env) for path in reads) == 0
-    assert outside.read_text(encoding="utf-8") == "original"
-    assert environment_file.read_text(encoding="utf-8") == "new environment content"
 
 
 @pytest.mark.parametrize("variable", ["PYTHONPATH", "PYTEST_ADDOPTS"])
@@ -613,8 +555,7 @@ def test_disposable_collection_ignores_ambient_import_paths(
     assert not collections[-1].findings
 
 
-@pytest.mark.parametrize("rerun_seconds", [1, 100], ids=["cap-each-operation", "already-expired"])
-def test_broad_recheck_bounds_provisioning_subprocesses(python_project, monkeypatch, rerun_seconds):
+def test_broad_recheck_uses_normal_provisioning_timeouts(python_project, monkeypatch):
     root, _ = python_project
     _write(root, "codd/codd.yaml", (
         "project: {name: app, language: python}\n"
@@ -640,9 +581,8 @@ def test_broad_recheck_bounds_provisioning_subprocesses(python_project, monkeypa
             operation = command[2]
             preparations.append((operation, kwargs["timeout"]))
             if len(preparations) == 1:
-                elapsed = 1 if rerun_seconds == 1 else 0
-                clock += elapsed
-                raise subprocess.TimeoutExpired(command, elapsed)
+                clock += 1
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
             if operation == "venv":
                 clock += 2
                 return subprocess.CompletedProcess(command, 0, "", "")
@@ -652,53 +592,83 @@ def test_broad_recheck_bounds_provisioning_subprocesses(python_project, monkeypa
 
     def rerun(*_args, **_kwargs):
         nonlocal clock
-        clock += rerun_seconds
+        clock += 1
         _write(root, test_path, _TEST)
 
     pipeline = GreenfieldPipeline(echo=lambda _: None)
     monkeypatch.setattr(time, "monotonic", lambda: clock)
     monkeypatch.setattr(subprocess, "run", offline_run)
     monkeypatch.setattr(pipeline, "_reimplement_tasks", rerun)
+    pipeline._enforce_implement_oracle_gate(root, [task], {})
+
+    assert clock == 904.0
+    assert preparations == [("venv", 900.0), ("venv", 900.0), ("pip", 900.0)]
+    records = (root / ".codd/oracle_repair/campaign.jsonl").read_text(encoding="utf-8").splitlines()
+    assert json.loads(records[-1])["status"] == "passed"
+
+
+def test_broad_recheck_reuses_dependency_reply_and_skips_preparation_after_budget(
+    python_project, monkeypatch, collections,
+):
+    root, _ = python_project
+    _write(root, "codd/codd.yaml", (
+        "project: {name: app, language: python}\n"
+        "implement: {python_name_lint: 'off', oracle_broad_wall_clock_seconds: 100}\n"
+    ))
+    test_path = "tests/test_api.py"
+    _write(root, "docs/design/api.md", "# API\n")
+    _write(root, "src/app/feature.py", f"import {_DEP}\n")
+    _write(root, test_path, _TEST.replace("import value", "import missing"))
+    task = ImplementTaskRef("api", "docs/design/api.md", (test_path,), expected_outputs=(test_path,))
+    phase_scope = OracleRerunScope("narrow", (task.task_id,), (test_path,))
+    phases = tuple(OracleRepairPhase(name, phase_scope) for name in (PHASE_SUPPLIER_FIRST, PHASE_CHUNKED_BROAD))
+    plan = BroadRepairPlan((test_path,), (task.task_id,), (), phases)
+    scope = replace(phase_scope, rung="broad", repair_plan=plan)
+    monkeypatch.setattr(implement_oracle, "_derive_scope_for_rung", lambda **_: (scope, True))
+    clock = 0.0
+    preparations = []
+    requests = []
+    reruns = []
+
+    def build(_project, _profile, manifest, imports, *, environment_root):
+        assert manifest == _PYPROJECT and _DEP in imports
+        preparations.append((clock, environment_root))
+        return EnvProvisionResult(False, "failed", "missing dependency", undeclared_imports=(_DEP,))
+
+    def repair(_command, prompt, **kwargs):
+        assert kwargs["recover"] is False and "timeout" not in kwargs
+        requests.append(prompt)
+        return "[]"
+
+    def rerun(project, tasks, *_args, **_kwargs):
+        nonlocal clock
+        assert tasks == [task]
+        reruns.append(clock)
+        if len(reruns) == 1:
+            clock += 1
+        else:
+            clock += 99
+            _write(project, test_path, _TEST)
+
+    pipeline = GreenfieldPipeline(echo=lambda _: None)
+    monkeypatch.setattr(time, "monotonic", lambda: clock)
+    monkeypatch.setattr(env_python, "_build_python_env", build)
+    monkeypatch.setattr("codd.ai_invoke.invoke_read_only", repair)
+    monkeypatch.setattr(pipeline, "_reimplement_tasks", rerun)
+
     with pytest.raises(StageError, match="native-oracle gate failed"):
         pipeline._enforce_implement_oracle_gate(root, [task], {})
-    assert clock == 100.0
-    expected = [("venv", 900.0)]
-    if rerun_seconds == 1:
-        expected.extend([("venv", 98.0), ("pip", 96.0)])
-    assert preparations == expected
+
+    assert reruns == [0.0, 1.0] and clock == 100.0
+    assert [started for started, _ in preparations] == [0.0, 1.0]
+    assert len({directory for _, directory in preparations}) == 2
+    assert len(requests) == 1
+    assert len(collections) == 2
     records = (root / ".codd/oracle_repair/campaign.jsonl").read_text(encoding="utf-8").splitlines()
-    assert json.loads(records[-1])["status"] == "budget_exhausted"
+    assert [json.loads(line)["status"] for line in records] == ["stuck", "budget_exhausted"]
 
 
-def test_dependency_repair_timeout_includes_app_server_startup(monkeypatch, tmp_path):
-    import asyncio
-
-    from codd.ai_invoke import invoke_read_only
-    from codd.deployment.providers.ai_command import CodexAppServerAiCommand
-    from codd.deployment.providers.codex_app_server import CodexAppServerTimeout
-
-    class OfflineClient:
-        async def start_thread(self, *args):
-            await asyncio.sleep(0.1)
-            return "fixture-thread"
-
-        async def send_turn(self, *args, **kwargs):
-            pytest.fail("the preparation deadline should expire during startup")
-
-    adapter = CodexAppServerAiCommand(OfflineClient(), fallback="error")
-    monkeypatch.setattr("codd.deployment.providers.ai_command_factory.get_ai_command", lambda *args, **kwargs: adapter)
-    try:
-        with pytest.raises(CodexAppServerTimeout, match="call timed out"):
-            invoke_read_only(
-                "fixture-ai", "repair dependencies", project_root=tmp_path, config={}, stage="fixture",
-                recover=False, timeout=0.01,
-            )
-    finally:
-        if adapter._loop is not None:
-            adapter._loop.close()
-
-
-@pytest.mark.parametrize("location", ["symlink", "source-tree", "configured-file"])
+@pytest.mark.parametrize("location", ["existing-venv", "symlink", "source-tree", "configured-file"])
 def test_rerun_fence_restores_project_files_at_overlapping_environment_location(
     tmp_path, monkeypatch, location,
 ):
@@ -710,9 +680,11 @@ def test_rerun_fence_restores_project_files_at_overlapping_environment_location(
     elif location == "source-tree":
         source = tmp_path / ".venv/src/app"
         config["scan"] = {"source_dirs": [".venv/src"]}
-    else:
+    elif location == "configured-file":
         source = tmp_path / ".venv/config"
         config["scan"] = {"config_files": [".venv/config/settings.json"]}
+    else:
+        source = tmp_path / ".venv/lib/site-packages/example"
     name = "settings.json" if location == "configured-file" else "records.py"
     _write(source, name, "original\n")
     _write(tmp_path, "codd/codd.yaml", json.dumps(config))
@@ -736,39 +708,35 @@ def test_failed_provisioning_and_cleanup_still_collect_with_codd(
     import errno
     import tempfile
 
+    from codd.greenfield import pipeline as pipeline_module
+
     root, _ = python_project
     scratch = tmp_path / "scratch"
     scratch.mkdir()
-    blocked = []
-    real_chmod = os.chmod
+
+    # Make the removal itself fail, independent of the user's privileges
+    # (permission bits do not stop a privileged user from deleting files).
+    class UnremovableTemporaryDirectory(tempfile.TemporaryDirectory):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._finalizer.detach()
+
+        def cleanup(self):
+            raise PermissionError(errno.EPERM, "fixture filesystem rejects removal", self.name)
 
     def provision(_root, *, environment_root, **_):
-        child = environment_root / ".venv/locked"
-        _write(child, "leftover", "fixture")
-        child.chmod(0)
-        blocked.append(child)
+        _write(environment_root / ".venv/partial", "leftover", "fixture")
         raise EnvironmentProvisionError("partial installation failed", "Use the fallback.")
-
-    def chmod(path, mode, *args, **kwargs):
-        if isinstance(path, (str, os.PathLike)) and Path(path) in blocked:
-            raise PermissionError(errno.EPERM, "fixture filesystem rejects chmod", str(path))
-        return real_chmod(path, mode, *args, **kwargs)
 
     messages = []
     pipeline = GreenfieldPipeline(echo=messages.append)
     monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    monkeypatch.setattr(pipeline_module, "TemporaryDirectory", UnremovableTemporaryDirectory)
     monkeypatch.setattr(pipeline, "_provision_env", provision)
-    try:
-        with monkeypatch.context() as patch:
-            patch.setattr(os, "chmod", chmod)
-            pipeline._enforce_implement_oracle_gate(root, [], {}, verdict_only=True)
-        [leftover] = scratch.iterdir()
-        [log] = _environment_logs(messages)
-        assert "partial installation failed" in log
-        assert "collecting with CoDD's interpreter" in log
-        assert "fixture filesystem rejects chmod" in log and str(leftover) in log
-        assert len(collections) == 1 and not collections[0].findings
-    finally:
-        for child in blocked:
-            if child.exists():
-                real_chmod(child, 0o700)
+    pipeline._enforce_implement_oracle_gate(root, [], {}, verdict_only=True)
+    [leftover] = scratch.iterdir()
+    [log] = _environment_logs(messages)
+    assert "partial installation failed" in log
+    assert "collecting with CoDD's interpreter" in log
+    assert "fixture filesystem rejects removal" in log and str(leftover) in log
+    assert len(collections) == 1 and not collections[0].findings

@@ -103,7 +103,6 @@ import os
 from pathlib import Path, PurePosixPath
 import shlex
 import shutil
-import stat
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
@@ -2524,11 +2523,10 @@ class GreenfieldPipeline:
     def _provision_env(
         self, project_root: Path, *, environment_root: Path | None = None,
         repair_replies: dict[tuple[str, str], str | Exception] | None = None,
-        deadline: float | None = None,
     ) -> None:
         """Provision and, where supported, repair the stack's test environment."""
         from codd.project_types import provision_project_env
-        from codd.test_environment import bounded_environment_timeout, read_test_environment
+        from codd.test_environment import read_test_environment
 
         config, language, source_dirs, test_dirs = self._layout_inputs(project_root)
         project_name = self._layout_project_name(project_root, config)
@@ -2544,7 +2542,7 @@ class GreenfieldPipeline:
 
         def propose_dependencies(prompt: str) -> str:
             nonlocal repair_key
-            from codd.ai_invoke import invoke_read_only, resolve_ai_call_timeout, resolve_ai_command
+            from codd.ai_invoke import invoke_read_only, resolve_ai_command
             from codd.elicit.engine import _collect_requirements
 
             requirements = _collect_requirements(project_root, max_chars=40000)
@@ -2557,13 +2555,9 @@ class GreenfieldPipeline:
                     raise previous
                 return previous
             self.echo("[greenfield] verify: attempting to repair missing dependency declarations")
-            timeout_options = {}
-            if deadline is not None:
-                timeout_options["timeout"] = bounded_environment_timeout(deadline, resolve_ai_call_timeout(config))
             reply = invoke_read_only(
                 command, request, project_root=project_root, config=config, stage="greenfield verify",
                 **({"recover": False} if repair_replies is not None else {}),
-                **timeout_options,
             )
             if repair_replies is not None:
                 repair_replies[repair_key] = reply
@@ -2585,7 +2579,6 @@ class GreenfieldPipeline:
                 config=config,
                 propose_dependencies=propose_dependencies,
                 **environment_options,
-                **({"deadline": deadline} if deadline is not None else {}),
                 **({"test_environment": declaration} if declaration is not None else {}),
             )
         except OSError as exc:
@@ -2614,7 +2607,6 @@ class GreenfieldPipeline:
         self, project_root: Path, config: dict[str, Any], executable: str, *,
         reuse_test_environment: bool,
         repair_replies: dict[tuple[str, str], str | Exception],
-        deadline: float | None = None,
     ) -> Iterator[PreparedTestExecutable | None]:
         """Select the interpreter from the same PATH prepend as verification."""
         from codd.languages.adapters.implement_oracle import PreparedTestExecutable
@@ -2641,7 +2633,6 @@ class GreenfieldPipeline:
                 environment_root = Path(temporary.name)
                 self._provision_env(
                     project_root, environment_root=environment_root, repair_replies=repair_replies,
-                    **({"deadline": deadline} if deadline is not None else {}),
                 )
             prepend = VerifyRunner(project_root, config, exec_env_root=environment_root)._exec_path_prepend()
             interpreter = shutil.which(executable, path=os.pathsep.join(prepend)) if prepend else None
@@ -3054,17 +3045,7 @@ class GreenfieldPipeline:
         scoped_tasks = repairable
 
         allowed = tuple(getattr(scope, "allowed_paths", ()) or ())
-        language = resolve_verify_language(config, language=getattr(self, "language", None))
-        environment_paths = _feedback_environment_paths(config, language)
-        project_paths = ()
-        if environment_paths:
-            project_paths = _feedback_fence_project_paths(config, language) + tuple(
-                path for task in tasks for path in (task.output_paths or task.expected_outputs)
-            )
-        with _OracleWriteFence(
-            project_root, allowed_paths=allowed, echo=self.echo,
-            environment_paths=environment_paths, project_paths=project_paths,
-        ) as fence:
+        with _OracleWriteFence(project_root, allowed_paths=allowed, echo=self.echo) as fence:
             self._reimplement_tasks(project_root, scoped_tasks, feedback, config, feedback_rows=feedback_rows)
             fence.enforce()
 
@@ -3923,42 +3904,6 @@ _FENCE_TRACKED_SUFFIXES = frozenset(
 )
 
 
-def _feedback_language_profile(config: dict[str, Any], language: str | None):
-    from codd.languages.contract import resolve_language_profile
-    from codd.languages.registry import UnknownLanguageError
-
-    project = config.get("project")
-    settings = {**config, "project": {**(project if isinstance(project, dict) else {}), "language": language}}
-    try:
-        return resolve_language_profile(settings)
-    except UnknownLanguageError:
-        return None
-
-
-def _feedback_environment_paths(config: dict[str, Any], language: str | None) -> tuple[str, ...]:
-    profile = _feedback_language_profile(config, language)
-    return profile.tests.feedback_environment_paths if profile and profile.tests else ()
-
-
-def _feedback_fence_project_paths(config: dict[str, Any], language: str | None) -> tuple[str, ...]:
-    from codd.config import CODD_DIR_CANDIDATES
-
-    paths = [f"{directory}/codd.yaml" for directory in CODD_DIR_CANDIDATES]
-    profile = _feedback_language_profile(config, language)
-    if profile is not None:
-        paths.extend(entry.root for entry in (*profile.layout.source_sets, *profile.layout.test_sets))
-        if profile.toolchain:
-            paths.append(profile.toolchain.manifest.path)
-            paths.extend(entry.path for entry in profile.toolchain.dependency_integrity_files)
-    scan = config.get("scan")
-    if isinstance(scan, dict):
-        for key in ("source_dirs", "test_dirs", "config_files"):
-            entries = scan.get(key)
-            if isinstance(entries, (list, tuple)):
-                paths.extend(entry for entry in entries if isinstance(entry, str))
-    return tuple(paths)
-
-
 class _OracleWriteFence:
     """Restrict a SCOPED oracle rerun's writes to the scope's ``allowed_paths``.
 
@@ -3976,20 +3921,10 @@ class _OracleWriteFence:
     construct a fence in that case.
     """
 
-    def __init__(
-        self, project_root: Path, *, allowed_paths: tuple[str, ...],
-        echo: Callable[[str], None], environment_paths: tuple[str, ...] = (),
-        project_paths: tuple[str, ...] = (),
-    ):
+    def __init__(self, project_root: Path, *, allowed_paths: tuple[str, ...], echo: Callable[[str], str]):
         self._root = Path(project_root).resolve()
         self._allowed_files, self._allowed_dirs = self._split_allowed(allowed_paths)
         self._echo = echo
-        self._environment_candidates = tuple(
-            self._root / path for raw in environment_paths
-            if (path := Path(raw)).parts and not path.is_absolute() and ".." not in path.parts
-        )
-        self._project_paths = (*project_paths, *allowed_paths)
-        self._environment_paths: set[Path] = set()
         self._snapshot: dict[str, bytes] = {}
 
     def __enter__(self) -> "_OracleWriteFence":
@@ -4097,7 +4032,6 @@ class _OracleWriteFence:
         return False
 
     def _capture(self) -> dict[str, bytes]:
-        self._environment_paths = self._real_environment_paths()
         out: dict[str, bytes] = {}
         for path in self._iter_tracked_files():
             try:
@@ -4106,63 +4040,18 @@ class _OracleWriteFence:
                 continue
         return out
 
-    def _real_environment_paths(self) -> set[Path]:
-        if not self._environment_candidates:
-            return set()
-        project_paths = set()
-        for relative in self._project_paths:
-            path = self._root / relative
-            try:
-                project_paths.update((path, path.resolve()))
-            except (OSError, RuntimeError):
-                project_paths.add(path)
-        project_paths.discard(self._root)
-
-        candidates = set()
-        for path in self._environment_candidates:
-            if any(path.is_relative_to(other) or other.is_relative_to(path) for other in project_paths):
-                continue
-            try:
-                if path.resolve(strict=True) != path or not path.is_dir():
-                    continue
-                # A junction/reparse point can look like a directory to is_dir().
-                if any(
-                    getattr(parent.lstat(), "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
-                    for parent in (path, *path.parents) if parent != self._root and parent.is_relative_to(self._root)
-                ):
-                    continue
-            except (OSError, RuntimeError):
-                continue
-            candidates.add(path)
-        return candidates
-
     def _iter_tracked_files(self):
-        for dirpath, dirnames, filenames in os.walk(self._root):
-            directory = Path(dirpath)
-            dirnames[:] = [
-                name for name in dirnames
-                if name not in _FENCE_EXCLUDE_DIRS and directory / name not in self._environment_paths
-            ]
-            for name in filenames:
-                path = directory / name
-                if path.suffix in _FENCE_TRACKED_SUFFIXES:
-                    yield path
+        import os
 
-    def _has_environment_parent(self, path: Path) -> bool:
-        if not self._environment_paths:
-            return False
-        try:
-            parent = path.parent.resolve()
-        except (OSError, RuntimeError):
-            return False
-        return any(parent.is_relative_to(env) for env in self._environment_paths)
+        for dirpath, dirnames, filenames in os.walk(self._root):
+            dirnames[:] = [d for d in dirnames if d not in _FENCE_EXCLUDE_DIRS]
+            for name in filenames:
+                if PurePosixPath(name).suffix in _FENCE_TRACKED_SUFFIXES:
+                    yield Path(dirpath) / name
 
     def _restore(self, rel: str, content: bytes) -> None:
         target = self._root / rel
         try:
-            # A rerun can replace a formerly tracked parent with a symlink.
-            if self._has_environment_parent(target):
-                return
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
         except OSError as exc:
@@ -4171,8 +4060,6 @@ class _OracleWriteFence:
     def _remove(self, rel: str) -> None:
         target = self._root / rel
         try:
-            if self._has_environment_parent(target):
-                return
             target.unlink()
         except OSError as exc:
             self._echo(f"[greenfield] implement-oracle: write-fence could not remove {rel} ({exc}).")

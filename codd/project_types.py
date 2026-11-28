@@ -1961,7 +1961,6 @@ def provision_project_env(
     propose_dependencies: Callable[[str], str] | None = None,
     test_environment: TestEnvironmentDeclaration | None = None,
     environment_root: Path | None = None,
-    deadline: float | None = None,
 ) -> EnvProvisionResult:
     """Realize the stack's test-execution environment, or a NO-OP if unsupported.
 
@@ -2009,8 +2008,6 @@ def provision_project_env(
             detail=f"no layout profile resolved for language {language!r}",
         )
     environment_options = {"environment_root": environment_root} if environment_root is not None else {}
-    if deadline is not None:
-        environment_options["deadline"] = deadline
     if test_environment is None:
         return provisioner.provision(
             root, profile=profile, propose_dependencies=propose_dependencies, **environment_options,

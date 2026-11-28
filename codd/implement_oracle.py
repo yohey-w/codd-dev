@@ -1632,7 +1632,7 @@ class _OraclePreparation:
 
 
 class _OracleBroadDeadlineReached(Exception):
-    """A broad campaign ran out of time while preparing its recheck."""
+    """A broad campaign ran out of time before preparing its recheck."""
 
 
 def run_implement_oracle_gate(
@@ -1649,7 +1649,7 @@ def run_implement_oracle_gate(
     scope_index: Any = None,
     structured_source: Any = None,
     manifest_paths: Any = None,
-    prepare_test_executable: Callable[..., ContextManager[PreparedTestExecutable | str | None]] | None = None,
+    prepare_test_executable: Callable[[str], ContextManager[PreparedTestExecutable | str | None]] | None = None,
 ) -> ImplementOracleResult:
     """Run the implement-time native-oracle gate (stage-level, once).
 
@@ -1789,14 +1789,11 @@ def run_implement_oracle_gate(
         def timed_preparation(executable):
             started = time.monotonic()
             deadline = preparation.broad_deadline
+            # Check at the boundary and let preparation use its usual timeouts.
             if deadline is not None and started >= deadline:
                 raise _OracleBroadDeadlineReached
-            options = {"deadline": deadline} if deadline is not None else {}
-            with prepare_test_executable(executable, **options) as interpreter:
-                now = time.monotonic()
-                preparation.seconds += now - started
-                if deadline is not None and now >= deadline:
-                    raise _OracleBroadDeadlineReached
+            with prepare_test_executable(executable) as interpreter:
+                preparation.seconds += time.monotonic() - started
                 yield interpreter
 
         evaluate = partial(evaluate, prepare_test_executable=timed_preparation)
@@ -2344,12 +2341,10 @@ def _execute_broad_campaign(
             completed_phases.append(phase)
 
         # ALWAYS re-run the WHOLE-PROJECT oracle — the only green authority.
-        if preparation is not None and preparation.seconds > 0 and _elapsed() >= budget:
-            return _out_of_budget(result)
         if preparation is not None:
             preparation.broad_deadline = started + budget
         try:
-            rechecked = recheck()
+            result = recheck()
         except _OracleBroadDeadlineReached:
             if preparation is not None:
                 preparation.broad_budget_exhausted = True
@@ -2357,9 +2352,6 @@ def _execute_broad_campaign(
         finally:
             if preparation is not None:
                 preparation.broad_deadline = None
-        if preparation is not None and preparation.seconds > 0 and _elapsed() >= budget:
-            return _out_of_budget(result)
-        result = rechecked
         rechecks += 1
         after_signature = _diagnostic_signature(result)
         phase_elapsed = time.monotonic() - phase_started
