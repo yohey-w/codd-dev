@@ -29,6 +29,16 @@ LOGGER = logging.getLogger(__name__)
 TEMPLATE_DIR = Path(__file__).with_name("templates")
 DEFAULT_MAX_STRATEGY_ATTEMPTS = 2
 
+AUTO_SCOPE_ANALYSIS_RULES = (
+    "\n- In `affected_nodes`, list the files the repair would change. Omit stack contract artifacts and "
+    "keep design documents and gate-control configuration read-only for code-addressable failures, "
+    "subject to the harness exception below."
+    "\n- Tests are read-only unless the failure is a harness contract violation. For that failure class, "
+    "name the affected test or scaffold in `affected_nodes` if it is the broken artifact that needs repair."
+    "\n- When the failure is visible only through a test, use the DAG to identify the implementation nodes "
+    "that produce the behavior observed by the failing check."
+)
+
 #: Prompt rule for the F3 read-only failure-evidence block. Mirrors the Inc3
 #: PART-A ``DESIGN_CONTEXT_RULE``: the evidence is context to localize the bug,
 #: never an edit target.
@@ -81,7 +91,8 @@ class LlmRepairEngine(RepairEngine):
         self._design_context_cache: str = ""
 
     def analyze(self, failure: VerificationFailureReport, dag: Any, *,
-                repair_context: str = "", record_call: Callable | None = None) -> RootCauseAnalysis:
+                repair_context: str = "", record_call: Callable | None = None,
+                auto_scope: bool = False) -> RootCauseAnalysis:
         """Analyze a verification failure and return a structured root cause."""
 
         self._design_context_cache = render_design_context(
@@ -89,6 +100,7 @@ class LlmRepairEngine(RepairEngine):
         )
         prompt = _render_template(
             TEMPLATE_DIR / "analyze_meta.md",
+            auto_scope_rules=AUTO_SCOPE_ANALYSIS_RULES if auto_scope else "",
             failure_report=_json_dumps(_to_plain_data(failure)),
             dag_context=_json_dumps(_dag_to_plain_data(dag)),
             project_context=self._composed_project_context(),
