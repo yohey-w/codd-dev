@@ -14,8 +14,8 @@ DAG context:
 
 Rules:
 - Stay domain-neutral. Do not assume a framework, platform, vendor, or product.
-- In `affected_nodes`, list the files the repair would change. Failure evidence, canonical design documents, and immutable configuration are read-only and must stay out of `affected_nodes`.
-- Tests are read-only for implementation failures. A test scaffold explicitly attributed as a broken harness contract is editable.
+- In `affected_nodes`, list the files the repair would change. Omit stack contract artifacts and keep design documents and gate-control configuration read-only for code-addressable failures, subject to the harness exception below.
+- Tests are read-only unless the failure is a harness contract violation. For that failure class, name the affected test or scaffold in `affected_nodes` if it is the broken artifact that needs repair.
 - When the failure is visible only through a test, use the DAG to identify the implementation nodes that produce the behavior observed by the failing check.
 - Prefer the smallest repair that restores consistency across the affected artifacts.
 - Use "unified_diff" as the default repair_strategy.

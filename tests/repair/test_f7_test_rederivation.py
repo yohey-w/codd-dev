@@ -41,7 +41,6 @@ def isolated_repair_registry(monkeypatch):
 
 _TEST_A = "tests/evaluator.test.js"
 _TEST_B = "tests/tokenizer.test.js"
-_SOURCE = "src/evaluator.js"
 
 
 def _contract_failure() -> VerificationFailureReport:
@@ -71,7 +70,6 @@ def _dag() -> DAG:
     dag = DAG()
     dag.add_node(Node("test:evaluator", "test_doc", _TEST_A, {}))
     dag.add_node(Node("test:tokenizer", "test_doc", _TEST_B, {}))
-    dag.add_node(Node("impl:evaluator", "impl_file", _SOURCE, {}))
     return dag
 
 
@@ -97,9 +95,6 @@ def _register(name: str, *, proposal: RepairProposal, rca: RootCauseAnalysis) ->
 
 
 def _run_auto(tmp_path: Path, name: str, proposal: RepairProposal, rca: RootCauseAnalysis):
-    source = tmp_path / _SOURCE
-    source.parent.mkdir()
-    source.write_text("export const evaluate = () => 0;\n", encoding="utf-8")
     _register(name, proposal=proposal, rca=rca)
     config = RepairLoopConfig(
         max_attempts=2, approval_mode="auto", engine_name=name, codd_yaml=_auto_codd_yaml()
@@ -123,7 +118,7 @@ def test_t1_all_test_offenders_thread_blocked_test_paths(tmp_path: Path):
         [FilePatch(_TEST_A, "full_file_replacement", "x\n"), FilePatch(_TEST_B, "full_file_replacement", "y\n")],
         "patch the tests", 0.8, "t", "t",
     )
-    outcome = _run_auto(tmp_path, "t1", proposal, _rca([_SOURCE, _TEST_A, _TEST_B]))
+    outcome = _run_auto(tmp_path, "t1", proposal, _rca([_TEST_A, _TEST_B]))
 
     assert outcome.status == "REPAIR_FAILED"
     assert sorted(outcome.blocked_test_paths) == sorted([_TEST_A, _TEST_B])
@@ -137,7 +132,7 @@ def test_t1_mixed_offenders_do_not_qualify(tmp_path: Path):
         [FilePatch(_TEST_A, "full_file_replacement", "x\n"), FilePatch("codd.yaml", "full_file_replacement", "z\n")],
         "patch a test and the oracle", 0.8, "t", "t",
     )
-    outcome = _run_auto(tmp_path, "t1mixed", proposal, _rca([_SOURCE, _TEST_A]))
+    outcome = _run_auto(tmp_path, "t1mixed", proposal, _rca([_TEST_A]))
 
     assert outcome.status == "REPAIR_FAILED"
     assert outcome.blocked_test_paths == []
@@ -152,7 +147,7 @@ def test_t2_claim_only_proposal_round_trips_to_final_status(tmp_path: Path):
     does NOT treat it as an F2 engine-failure strike."""
     claim = [{"file": _TEST_A, "assertion": "expect(false).toBe(true)", "reason": "tautology"}]
     proposal = RepairProposal([], "the test is unsatisfiable", 0.9, "t", "t", test_defect_claim=claim)
-    outcome = _run_auto(tmp_path, "t2", proposal, _rca([_SOURCE, _TEST_A]))
+    outcome = _run_auto(tmp_path, "t2", proposal, _rca([_TEST_A]))
 
     assert outcome.status == "REPAIR_FAILED"
     assert outcome.reason == "TEST_DEFECT_CLAIM"
