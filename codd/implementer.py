@@ -3616,7 +3616,7 @@ def build_mechanical_contract_context(
     )
 
 
-def _elapsed_time_measurement_guidance(
+def _test_writing_guidance(
     declared_outputs: Iterable[str], config: dict[str, Any],
 ) -> str:
     from codd.greenfield.pipeline import _KIND_TEST, _classify_declared_output
@@ -3628,6 +3628,8 @@ def _elapsed_time_measurement_guidance(
         "- When a test measures elapsed time, define for each measured target where it starts, completes and fails, "
         "correlate them on one monotonic clock, check the measuring path against a response whose completion is known "
         "and one that is cut short, and on failure record which events and times the verdict used.\n\n"
+        "Test-only certificates:\n"
+        f"{generator_module.TEST_CERTIFICATE_RULE}\n\n"
     )
 
 
@@ -3923,7 +3925,7 @@ def _build_implementation_prompt(
             )
 
     declared_outputs = spec.expected_outputs or spec.output_paths
-    lines.extend(_elapsed_time_measurement_guidance(declared_outputs, config).splitlines())
+    lines.extend(_test_writing_guidance(declared_outputs, config).splitlines())
 
     lines.extend([
         "Required output format (repeat this block for each file and output nothing else):",

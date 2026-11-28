@@ -467,6 +467,23 @@ MEASUREMENT_FRAGMENTS = (
     "one that is cut short",
     "which events and times the verdict used",
 )
+CERTIFICATE_HEADING = "Test-only certificates:"
+CERTIFICATE_SENTENCE = (
+    "A test-only TLS certificate that tests expect to be valid (for a local HTTPS or mail server the tests start) "
+    "MUST become valid well before it is issued (for example, a day earlier) and stay valid beyond the run, "
+    "so a system clock adjusted during the run cannot make it not yet valid; "
+    "certificates a test deliberately makes invalid or expired are exempt."
+)
+CERTIFICATE_GUIDANCE = f"{CERTIFICATE_HEADING}\n- {CERTIFICATE_SENTENCE}\n\n"
+CERTIFICATE_FRAGMENTS = (
+    "Test-only certificates",
+    "A test-only TLS certificate",
+    "become valid well before it is issued",
+    "stay valid beyond the run",
+    "a system clock adjusted during the run",
+    "certificates a test deliberately makes invalid or expired are exempt",
+    "The readiness check connects with the same trust",
+)
 
 
 @pytest.mark.parametrize(
@@ -499,6 +516,39 @@ def test_test_writing_prompt_states_measurement_rule_once(language, output_paths
     assert prompt.count(MEASUREMENT_GUIDANCE) == 1
     assert prompt.count(MEASUREMENT_HEADING) == 1
     assert prompt.count(MEASUREMENT_SENTENCE) == 1
+    assert prompt.count(CERTIFICATE_GUIDANCE) == 1
+    assert prompt.count(CERTIFICATE_HEADING) == 1
+    assert prompt.count(CERTIFICATE_SENTENCE) == 1
+    assert "The readiness check connects with the same trust" not in prompt
+
+
+@pytest.mark.parametrize("condition", ["expired", "invalid"])
+def test_test_writing_prompt_allows_rejecting_an_untrusted_certificate(condition):
+    requirement = (
+        "Wait for the server to report readiness over its startup channel. "
+        f"The only HTTPS test server presents a deliberately {condition} certificate. "
+        "Verify that the client rejects the certificate on its first TLS connection."
+    )
+    dependency = implementer_module.DependencyDocument(
+        "req:tls", Path("docs/requirements/tls.md"), requirement,
+    )
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "python"}},
+        design_context=DesignContext(
+            node_id="test:test-strategy",
+            path=Path("docs/test/test_strategy.md"),
+            content="# Test Strategy\n",
+        ),
+        spec=ImplementSpec("test:test-strategy", ["tests/test_tls.py"]),
+        dependency_documents=[dependency],
+        conventions=[],
+        coding_principles=None,
+    )
+
+    assert requirement in prompt
+    assert CERTIFICATE_GUIDANCE in prompt
+    assert "certificates a test deliberately makes invalid or expired are exempt." in prompt
+    assert "The readiness check connects with the same trust" not in prompt
 
 
 @pytest.mark.parametrize(
@@ -539,7 +589,7 @@ def test_non_test_writing_prompt_omits_measurement_rule(
         coding_principles=None,
     )
 
-    for fragment in MEASUREMENT_FRAGMENTS:
+    for fragment in (*MEASUREMENT_FRAGMENTS, *CERTIFICATE_FRAGMENTS):
         assert fragment not in prompt
 
 
@@ -621,7 +671,7 @@ def test_chunked_run_prompts_match_main(
     assert result.exit_code == 0, result.output
     assert len(prompts) == len(main_digests)
     for prompt, main_digest in zip(prompts, main_digests, strict=True):
-        for fragment in MEASUREMENT_FRAGMENTS:
+        for fragment in (*MEASUREMENT_FRAGMENTS, *CERTIFICATE_FRAGMENTS):
             assert fragment not in prompt
         # Full prompts captured on main 63adbee with the same inputs.
         assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == main_digest
