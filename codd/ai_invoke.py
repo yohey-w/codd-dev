@@ -863,8 +863,8 @@ def invoke_ai(
             transport (and its fallback chain) is honored. ``None`` keeps the
             direct subprocess path.
         stage: Optional usage label; otherwise the Click subcommand path or empty.
-        recover: Enable the shared transport and output-ceiling recovery. A
-            caller that budgets a single invocation can disable these retries.
+        recover: Enable transport retries, output-ceiling recovery and a fallback
+            after an App Server invocation fails.
         file_capture_exclusions: Project-relative harness files excluded from
             staging and capture by the file-writing command path.
 
@@ -896,7 +896,10 @@ def invoke_ai(
             if config is not None:
                 from codd.deployment.providers.ai_command_factory import get_ai_command
 
-                adapter = get_ai_command(config, project_root=effective_root, command_override=command_str)
+                adapter = get_ai_command(
+                    config, project_root=effective_root, command_override=command_str,
+                    **({"fallback_after_invoke": False} if not recover else {}),
+                )
 
                 # The deployment adapter owns its own subprocess env, so the
                 # output-ceiling env-raise cannot be threaded per-call. Recovery
@@ -952,8 +955,12 @@ def invoke_read_only(
     project_root: Path,
     config: Mapping[str, Any],
     stage: str,
+    recover: bool = True,
 ) -> str:
-    """Request a plain-text response from outside the project workspace."""
+    """Request a plain-text response from outside the project workspace.
+
+    Pass `recover=False` when this request may be attempted only once.
+    """
     return invoke_ai(
         ai_command,
         prompt,
@@ -962,6 +969,7 @@ def invoke_read_only(
         stage=stage,
         harden_read_only=True,
         force_print_on_claude=True,
+        recover=recover,
     )
 
 

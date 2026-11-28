@@ -92,14 +92,18 @@ CLI string works unchanged.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import partial
 import json
+import os
 from pathlib import Path, PurePosixPath
 import shlex
+import shutil
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -109,6 +113,7 @@ from codd.path_safety import has_plausible_file_extension, is_glob_decl, resolve
 from codd.requirement_appendix import UnreadableRequirementAppendix
 
 if TYPE_CHECKING:
+    from codd.languages.adapters.implement_oracle import PreparedTestExecutable
     from codd.planner import PlanInitResult
 
 
@@ -1777,10 +1782,8 @@ class GreenfieldPipeline:
         # (a per-unit tsc would false-fail on an import of a not-yet-generated
         # unit). On failure it normalizes diagnostics to evidence categories and
         # re-runs implementation with that feedback (bounded), so implement does
-        # not "succeed" until the oracle passes — or fails HONESTLY. A NO-OP for
-        # stacks with no declared oracle (Python today): see
-        # codd.project_types.ImplementOracleSpec. Runs BEFORE the VB coverage gate
-        # — code that does not even typecheck cannot have meaningful VB coverage.
+        # not "succeed" until the oracle passes — or fails HONESTLY. Runs BEFORE
+        # the VB coverage gate so it checks code and test coherence first.
         self._enforce_implement_oracle_gate(project_root, tasks, options)
 
         # Project-wide VB coverage + marker-authenticity gate — ONCE, after every
@@ -2517,7 +2520,10 @@ class GreenfieldPipeline:
                 "manifest set), not a code defect."
             )
 
-    def _provision_env(self, project_root: Path) -> None:
+    def _provision_env(
+        self, project_root: Path, *, environment_root: Path | None = None,
+        repair_replies: dict[tuple[str, str], str | Exception] | None = None,
+    ) -> None:
         """Provision and, where supported, repair the stack's test environment."""
         from codd.project_types import provision_project_env
         from codd.test_environment import read_test_environment
@@ -2532,20 +2538,37 @@ class GreenfieldPipeline:
                 "Correct the test environment declaration in the test strategy.",
             ) from exc
 
+        repair_key = None
+
         def propose_dependencies(prompt: str) -> str:
+            nonlocal repair_key
             from codd.ai_invoke import invoke_read_only, resolve_ai_command
             from codd.elicit.engine import _collect_requirements
 
-            self.echo("[greenfield] verify: attempting to repair missing dependency declarations")
             requirements = _collect_requirements(project_root, max_chars=40000)
-            return invoke_read_only(
-                resolve_ai_command(config, self.ai_command, command_name="implement"),
-                f"{prompt}\n\nProject requirements:\n{requirements}",
-                project_root=project_root,
-                config=config,
-                stage="greenfield verify",
+            command = resolve_ai_command(config, self.ai_command, command_name="implement")
+            request = f"{prompt}\n\nProject requirements:\n{requirements}"
+            repair_key = (command, request)
+            if repair_replies is not None and repair_key in repair_replies:
+                previous = repair_replies[repair_key]
+                if isinstance(previous, Exception):
+                    raise previous
+                return previous
+            self.echo("[greenfield] verify: attempting to repair missing dependency declarations")
+            reply = invoke_read_only(
+                command, request, project_root=project_root, config=config, stage="greenfield verify",
+                **({"recover": False} if repair_replies is not None else {}),
             )
+            if repair_replies is not None:
+                repair_replies[repair_key] = reply
+            return reply
 
+        def remember_failed_repair(detail: str) -> None:
+            if repair_replies is not None and repair_key is not None:
+                if not isinstance(repair_replies.get(repair_key), Exception):
+                    repair_replies[repair_key] = ValueError(detail)
+
+        environment_options = {"environment_root": environment_root} if environment_root is not None else {}
         try:
             result = provision_project_env(
                 project_root,
@@ -2555,16 +2578,22 @@ class GreenfieldPipeline:
                 test_dirs=test_dirs,
                 config=config,
                 propose_dependencies=propose_dependencies,
+                **environment_options,
                 **({"test_environment": declaration} if declaration is not None else {}),
             )
         except OSError as exc:
+            remember_failed_repair(str(exc))
             raise EnvironmentProvisionError(
                 f"test-execution environment provisioning failed before verify: {exc}",
                 "Check read and write access to the project and its test-environment state.",
             ) from exc
+        except Exception as exc:
+            remember_failed_repair(str(exc))
+            raise
         for notice in result.notices:
             self.echo(f"[greenfield] verify: {notice}")
         if not result.ok:
+            remember_failed_repair(result.detail)
             raise EnvironmentProvisionError(
                 "test-execution environment provisioning failed before verify: "
                 f"{result.detail}",
@@ -2573,6 +2602,60 @@ class GreenfieldPipeline:
         if result.action == "provisioned":
             self.echo(f"[greenfield] verify: provisioned test environment — {result.detail}")
 
+    @contextmanager
+    def _prepare_oracle_test_executable(
+        self, project_root: Path, config: dict[str, Any], executable: str, *,
+        reuse_test_environment: bool,
+        repair_replies: dict[tuple[str, str], str | Exception],
+    ) -> Iterator[PreparedTestExecutable | None]:
+        """Select the interpreter from the same PATH prepend as verification."""
+        from codd.languages.adapters.implement_oracle import PreparedTestExecutable
+        from codd.repair.verify_runner import VerifyRunner
+
+        temporary = None
+
+        def cleanup() -> str:
+            if temporary is None:
+                return ""
+            try:
+                temporary.cleanup()
+            except Exception as exc:
+                reason = " ".join(str(exc).splitlines()).strip() or type(exc).__name__
+                return f"could not remove temporary environment {temporary.name!r} ({reason})"
+            return ""
+
+        environment_root = None
+        try:
+            if not reuse_test_environment:
+                # Keep every evaluation independent of user environments and of
+                # the state artifact owned by C and verify.
+                temporary = TemporaryDirectory(prefix="codd-oracle-")
+                environment_root = Path(temporary.name)
+                self._provision_env(
+                    project_root, environment_root=environment_root, repair_replies=repair_replies,
+                )
+            prepend = VerifyRunner(project_root, config, exec_env_root=environment_root)._exec_path_prepend()
+            interpreter = shutil.which(executable, path=os.pathsep.join(prepend)) if prepend else None
+            if interpreter is None:
+                raise ValueError(f"{executable!r} is missing from the provisioned test environment")
+        except Exception as exc:
+            # Provisioning is advisory at implement time, even when verify would stop.
+            reason = " ".join(str(exc).splitlines()).strip() or type(exc).__name__
+            cleanup_issue = cleanup()
+            self.echo(
+                f"[greenfield] implement-oracle: project test environment unavailable ({reason}); "
+                "collecting with CoDD's interpreter"
+                + (f"; {cleanup_issue}" if cleanup_issue else "")
+            )
+            yield None
+        else:
+            try:
+                self.echo(f"[greenfield] implement-oracle: collecting with project test environment ({interpreter!r})")
+                yield PreparedTestExecutable(interpreter, isolated=environment_root is not None)
+            finally:
+                if cleanup_issue := cleanup():
+                    self.echo(f"[greenfield] implement-oracle: {cleanup_issue}")
+
     def _enforce_implement_oracle_gate(
         self,
         project_root: Path,
@@ -2580,6 +2663,7 @@ class GreenfieldPipeline:
         options: dict[str, Any],
         *,
         verdict_only: bool = False,
+        reuse_test_environment: bool = False,
     ) -> None:
         """Run the implement-time native-oracle gate (see _stage_implement).
 
@@ -2689,6 +2773,11 @@ class GreenfieldPipeline:
                 echo=self.echo,
                 scope_index=scope_index,
                 manifest_paths=manifest_paths,
+                prepare_test_executable=partial(
+                    self._prepare_oracle_test_executable, project_root, config,
+                    reuse_test_environment=reuse_test_environment,
+                    repair_replies={},
+                ),
             )
         except OracleScopeError as exc:
             raise StageError(str(exc)) from exc

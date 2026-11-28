@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -313,29 +314,39 @@ def provision_python_env(
     declaration: TestEnvironmentDeclaration | None = None,
     asset_specs: Mapping[str, TestAssetSpec] | None = None,
     config: Mapping | None = None,
+    environment_root: Path | None = None,
 ) -> EnvProvisionResult:
+    # Isolated callers provide an empty, disposable directory for this evaluation.
+    if environment_root is not None and (environment_root.is_symlink() or any(environment_root.iterdir())):
+        return _env_build_error(
+            f"isolated environment directory is not empty or is a symlink: {environment_root}",
+            "Create a fresh directory for the isolated test environment.",
+        )
+    environment_options = {"environment_root": environment_root} if environment_root is not None else {}
     if declaration is None:
-        return _provision_python_base_env(project_root, profile, propose_dependencies)
+        return _provision_python_base_env(project_root, profile, propose_dependencies, **environment_options)
     if failure := validate_test_packages(declaration):
         return failure
 
-    state_path = project_root / _ENV_PROVISION_STATE_RELPATH
+    state_path = (environment_root or project_root) / _ENV_PROVISION_STATE_RELPATH
     try:
         previous = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         previous = {}
     cached = previous.get("test_environment") if isinstance(previous, dict) else None
-    base = _provision_python_base_env(project_root, profile, propose_dependencies)
+    base = _provision_python_base_env(project_root, profile, propose_dependencies, **environment_options)
     if not base.ok:
         return base
     return _prepare_declared_environment(
         project_root, state_path, declaration, asset_specs or {}, dict(config or {}), base, cached,
+        **environment_options,
     )
 
 
 def _prepare_declared_environment(
     project_root: Path, state_path: Path, declaration: TestEnvironmentDeclaration,
     asset_specs: Mapping[str, TestAssetSpec], config: dict, base: EnvProvisionResult, cached: object,
+    *, environment_root: Path | None = None,
 ) -> EnvProvisionResult:
     summary = {"packages": list(declaration.packages), "assets": list(declaration.assets)}
     reusable = (
@@ -354,7 +365,8 @@ def _prepare_declared_environment(
     notices = []
     try:
         if declaration.packages and not reusable:
-            installed = _install_test_packages(project_root, declaration)
+            environment_options = {"environment_root": environment_root} if environment_root is not None else {}
+            installed = _install_test_packages(project_root, declaration, **environment_options)
             if not installed.ok:
                 return installed
             base = replace(base, action="provisioned", detail=f"{base.detail}; {installed.detail}")
@@ -363,7 +375,7 @@ def _prepare_declared_environment(
             from codd.repair.verify_runner import VerifyRunner
 
             try:
-                env = VerifyRunner(project_root, config).test_command_environment(config)
+                env = VerifyRunner(project_root, config, exec_env_root=environment_root).test_command_environment(config)
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 return _env_build_error(
                     f"{declaration.location}: could not prepare the test command environment: {exc}",
@@ -392,8 +404,9 @@ def _prepare_declared_environment(
 
 def _install_test_packages(
     project_root: Path, declaration: TestEnvironmentDeclaration,
+    *, environment_root: Path | None = None,
 ) -> EnvProvisionResult:
-    interpreter = _venv_interpreter(project_root / ".venv")
+    interpreter = _venv_interpreter((environment_root or project_root) / ".venv")
     argv = _pip_install_argv(
         interpreter, _PYTHON_TEST_TOOLCHAIN_PIN, "--", *(package.strip() for package in declaration.packages),
     )
@@ -421,6 +434,7 @@ def _install_test_packages(
 
 def _provision_python_base_env(
     project_root: Path, profile: LayoutProfile, propose_dependencies: Callable[[str], str] | None,
+    *, environment_root: Path | None = None,
 ) -> EnvProvisionResult:
     """Build from the manifest and try one scoped declaration repair if needed."""
     from codd.path_safety import resolve_project_path
@@ -434,7 +448,8 @@ def _provision_python_base_env(
     except (OSError, UnicodeError) as exc:
         return _env_build_error(f"could not read the dependency manifest: {exc}", inspect_manifest)
     imports = _python_runtime_imports(project_root, profile)
-    result = _build_python_env(project_root, profile, original, imports)
+    environment_options = {"environment_root": environment_root} if environment_root is not None else {}
+    result = _build_python_env(project_root, profile, original, imports, **environment_options)
     if not result.undeclared_imports or propose_dependencies is None:
         return result
 
@@ -457,7 +472,13 @@ def _provision_python_base_env(
         )
     repaired = None
     try:
-        repaired = _build_python_env(project_root, profile, updated, imports)
+        if environment_root is not None:
+            # A new resolution can drop transitives from the first install.
+            # Rebuild only the disposable venv owned by this oracle evaluation.
+            venv_dir = environment_root / ".venv"
+            if venv_dir.exists():
+                shutil.rmtree(venv_dir)
+        repaired = _build_python_env(project_root, profile, updated, imports, **environment_options)
     finally:
         if repaired is None or not repaired.ok:
             _replace_manifest(manifest, updated, original)
@@ -471,11 +492,13 @@ def _provision_python_base_env(
 
 def _build_python_env(
     project_root: Path, profile: LayoutProfile, manifest: str, imports: dict[str, str],
+    *, environment_root: Path | None = None,
 ) -> EnvProvisionResult:
     """Install the test toolchain and editable project, then prove the result."""
     from codd.path_safety import require_project_path
 
-    venv_dir = project_root / ".venv"
+    state_root = environment_root or project_root
+    venv_dir = state_root / ".venv"
     interpreter = _venv_interpreter(venv_dir)
     source_root = require_project_path(project_root, project_root / profile.source_root)
     package_name = profile.package_name
@@ -484,7 +507,7 @@ def _build_python_env(
     distribution = str(metadata.get("name") or package_name)
     digest = ""
     cached_digest = ""
-    state_path = project_root / _ENV_PROVISION_STATE_RELPATH
+    state_path = state_root / _ENV_PROVISION_STATE_RELPATH
     dynamic = metadata.get("dynamic")
     declares_dependencies = bool(metadata.get("dependencies")) or (
         isinstance(dynamic, list) and "dependencies" in dynamic
@@ -505,7 +528,7 @@ def _build_python_env(
         interpreter, profile, distribution, source_root, imports, trust_declarations=current_manifest,
     ).ok:
         return _record_env_provision_state(
-            project_root, venv_dir, action="up_to_date",
+            state_root, venv_dir, action="up_to_date",
             detail="existing venv already imports the package + pytest",
             manifest_digest=digest if current_manifest else "",
         )
@@ -558,7 +581,7 @@ def _build_python_env(
     if not probe.ok:
         return probe
     return _record_env_provision_state(
-        project_root, venv_dir, action="provisioned",
+        state_root, venv_dir, action="provisioned",
         detail=f"provisioned .venv (editable install + pinned pytest) for {package_name}",
         manifest_digest=digest,
     )

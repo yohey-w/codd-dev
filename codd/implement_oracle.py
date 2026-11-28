@@ -87,9 +87,16 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, ContextManager
+
+if TYPE_CHECKING:
+    from codd.languages.adapters.implement_oracle import PreparedTestExecutable
 
 from codd.project_types import (
     ImplementOracleSpec,
@@ -1281,6 +1288,7 @@ def _run_contract_oracle(
     *,
     package_name: str | None = None,
     layout_profile: "LayoutProfile | None" = None,
+    prepare_test_executable: Callable[[str], ContextManager[PreparedTestExecutable | str | None]] | None = None,
 ) -> ImplementOracleResult:
     """Run a modeled oracle on the contract path (certify already done by caller).
 
@@ -1322,6 +1330,7 @@ def _run_contract_oracle(
         oracle=oracle_decl,
         config=config,
         package_name=package_name,
+        prepare_test_executable=prepare_test_executable,
     )
     # BELT: the tree the oracle will observe MUST equal the generation-routed tree
     # (Option A makes them agree by construction; this hard-fails on any future drift).
@@ -1383,6 +1392,8 @@ def _run_oracle_command(
     profile: LayoutProfile,
     spec: ImplementOracleSpec,  # noqa: ARG001 — kept for the stable gate signature.
     config: Mapping[str, Any] | None,
+    *,
+    prepare_test_executable: Callable[[str], ContextManager[PreparedTestExecutable | str | None]] | None = None,
 ) -> ImplementOracleResult:
     """Run the native oracle ONCE on the Contract-Kernel contract path.
 
@@ -1441,6 +1452,7 @@ def _run_oracle_command(
         project_root, lang_profile, oracle_decl, adapter, config,
         package_name=getattr(profile, "package_name", None),
         layout_profile=profile,
+        prepare_test_executable=prepare_test_executable,
     )
 
 
@@ -1612,6 +1624,17 @@ def _with_implement_oracle(
 OracleRerunCallback = Callable[[str, "Any"], None]
 
 
+@dataclass
+class _OraclePreparation:
+    seconds: float = 0.0
+    broad_budget_exhausted: bool = False
+    broad_deadline: float | None = None
+
+
+class _OracleBroadDeadlineReached(Exception):
+    """A broad campaign ran out of time before preparing its recheck."""
+
+
 def run_implement_oracle_gate(
     project_root: Path | str,
     *,
@@ -1626,17 +1649,18 @@ def run_implement_oracle_gate(
     scope_index: Any = None,
     structured_source: Any = None,
     manifest_paths: Any = None,
+    prepare_test_executable: Callable[[str], ContextManager[PreparedTestExecutable | str | None]] | None = None,
 ) -> ImplementOracleResult:
     """Run the implement-time native-oracle gate (stage-level, once).
 
     Sequence:
-      1. Resolve the stack's oracle spec. No oracle declared → a passing NO-OP
-         (Python, bash, …) — the verify-stage gates stay the backstop.
+      1. Resolve the stack's oracle spec, handling absent and unsupported stacks.
       2. (node) Run the BLOCKING dependency install so ``tsc`` + deps exist; an
          install failure is an honest ``environment_build_error`` (no retry).
       3. CERTIFY the oracle scope covers source + tests (raises
          :class:`OracleScopeError` on an uncertifiable scope — anti-false-green).
-      4. Run the oracle. On failure, derive a SCOPED rerun and re-invoke
+      4. Run the oracle, with the optional test-executable hook available to the
+         adapter on each evaluation. On failure, derive a SCOPED rerun and re-invoke
          implementation through ``rerun(feedback, scope)`` up to a bounded cap,
          re-running the oracle each time. Returns the FINAL result.
 
@@ -1758,7 +1782,22 @@ def run_implement_oracle_gate(
 
     # 3. Run + bounded retry-with-feedback, escalating the rerun scope.
     max_attempts = _oracle_max_attempts(config)
-    result = _run_oracle_command(root, profile, spec, config)
+    evaluate = partial(_run_oracle_command, root, profile, spec, config)
+    preparation = _OraclePreparation()
+    if prepare_test_executable is not None:
+        @contextmanager
+        def timed_preparation(executable):
+            started = time.monotonic()
+            deadline = preparation.broad_deadline
+            # Check at the boundary and let preparation use its usual timeouts.
+            if deadline is not None and started >= deadline:
+                raise _OracleBroadDeadlineReached
+            with prepare_test_executable(executable) as interpreter:
+                preparation.seconds += time.monotonic() - started
+                yield interpreter
+
+        evaluate = partial(evaluate, prepare_test_executable=timed_preparation)
+    result = evaluate()
     # NOTE(v3.22.1): no import-topology gate runs here. v3.22.0's Increment 1 proved
     # source imports against the owning doc's transitive `depends_on` closure and was
     # reverted: frontmatter `depends_on` is an OPEN-WORLD ordering/context declaration
@@ -1868,8 +1907,12 @@ def run_implement_oracle_gate(
                 structured_source=structured_source,
                 manifest_paths=manifest_paths,
                 echo=echo,
+                recheck=evaluate,
+                preparation=preparation,
             )
             attempt += 1
+            if preparation.broad_budget_exhausted:
+                break
             continue
 
         scope_label = (
@@ -1884,7 +1927,7 @@ def run_implement_oracle_gate(
         feedback = build_contract_feedback(result, project_root=root, scope=scope)
         _invoke_rerun(rerun, feedback, scope)
         attempt += 1
-        result = _run_oracle_command(root, profile, spec, config)
+        result = evaluate()
 
     if result.passed:
         echo(f"[greenfield] implement-oracle: {result.detail}")
@@ -2146,6 +2189,8 @@ def _execute_broad_campaign(
     structured_source: Any,
     manifest_paths: Any,
     echo: Callable[[str], None],
+    recheck: Callable[[], ImplementOracleResult] | None = None,
+    preparation: _OraclePreparation | None = None,
 ) -> ImplementOracleResult:
     """Run the budgeted residual-coherence campaign for a wide-fan-out broad rung.
 
@@ -2171,15 +2216,16 @@ def _execute_broad_campaign(
     state is appended to ``.codd/oracle_repair/campaign.jsonl`` per phase (used ONLY
     for resume-efficiency + the human audit, NEVER for the green decision).
     """
-    import time
-
     if plan is None:  # defensive: no plan ⇒ nothing to run, honest-fail unchanged
         return result
 
+    if recheck is None:
+        recheck = partial(_run_oracle_command, project_root, profile, spec, config)
     budget = _oracle_broad_wall_clock_seconds(config)
     max_rechecks = _oracle_broad_max_rechecks(config)
     residual_chunk_size = _oracle_residual_chunk_size(config)
-    started = time.monotonic()
+    # Preparations during the campaign are already in its elapsed wall clock.
+    started = time.monotonic() - (preparation.seconds if preparation is not None else 0)
     rechecks = 0
     completed_phases: list[str] = []
     #: (signature, phase, frozenset(task_ids)) tuples already EXECUTED — the
@@ -2191,35 +2237,35 @@ def _execute_broad_campaign(
     def _elapsed() -> float:
         return time.monotonic() - started
 
-    def _budget_left_for_phase() -> bool:
-        remaining = budget - _elapsed()
-        return remaining >= (_BROAD_MIN_CALL_BUDGET_SECONDS + _BROAD_ORACLE_RECHECK_RESERVE_SECONDS)
+    def _out_of_budget(residual: ImplementOracleResult) -> ImplementOracleResult:
+        if preparation is not None and preparation.seconds > 0:
+            preparation.broad_budget_exhausted = True
+        signature = _diagnostic_signature(residual)
+        _append_campaign_record(
+            project_root,
+            event="oracle_broad_budget_exhausted",
+            phase="(none)",
+            focus_paths=tuple(getattr(plan, "focus_paths", ()) or ()),
+            task_ids=(),
+            before_signature=signature,
+            after_signature=signature,
+            elapsed=_elapsed(),
+            status="budget_exhausted",
+            echo=echo,
+        )
+        echo(
+            f"[greenfield] implement-oracle: broad campaign wall-clock budget "
+            f"({budget:g}s) exhausted with residual diagnostics — honest failure "
+            f"(no green; partial progress kept for resume)."
+        )
+        return residual
 
     supplier_ids = tuple(getattr(plan, "supplier_task_ids", ()) or ())
 
     while not result.passed and rechecks < max_rechecks:
-        # Budget gate BEFORE the next AI phase: if too little wall-clock remains to
-        # run a phase AND its verifying recheck, stop now and honest-fail (the
-        # workspace changes persist for resume; never green).
-        if not _budget_left_for_phase():
-            _append_campaign_record(
-                project_root,
-                event="oracle_broad_budget_exhausted",
-                phase="(none)",
-                focus_paths=tuple(getattr(plan, "focus_paths", ()) or ()),
-                task_ids=(),
-                before_signature=_diagnostic_signature(result),
-                after_signature=_diagnostic_signature(result),
-                elapsed=_elapsed(),
-                status="budget_exhausted",
-                echo=echo,
-            )
-            echo(
-                f"[greenfield] implement-oracle: broad campaign wall-clock budget "
-                f"({budget:g}s) exhausted with residual diagnostics — honest failure "
-                f"(no green; partial progress kept for resume)."
-            )
-            return result
+        # Reserve time for both the AI phase and its whole-project recheck.
+        if budget - _elapsed() < _BROAD_MIN_CALL_BUDGET_SECONDS + _BROAD_ORACLE_RECHECK_RESERVE_SECONDS:
+            return _out_of_budget(result)
 
         before_signature = _diagnostic_signature(result)
         phase, phase_scope = _next_campaign_phase(
@@ -2295,7 +2341,17 @@ def _execute_broad_campaign(
             completed_phases.append(phase)
 
         # ALWAYS re-run the WHOLE-PROJECT oracle — the only green authority.
-        result = _run_oracle_command(project_root, profile, spec, config)
+        if preparation is not None:
+            preparation.broad_deadline = started + budget
+        try:
+            result = recheck()
+        except _OracleBroadDeadlineReached:
+            if preparation is not None:
+                preparation.broad_budget_exhausted = True
+            return _out_of_budget(result)
+        finally:
+            if preparation is not None:
+                preparation.broad_deadline = None
         rechecks += 1
         after_signature = _diagnostic_signature(result)
         phase_elapsed = time.monotonic() - phase_started
