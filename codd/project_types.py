@@ -1960,6 +1960,7 @@ def provision_project_env(
     config: Any = None,
     propose_dependencies: Callable[[str], str] | None = None,
     test_environment: TestEnvironmentDeclaration | None = None,
+    environment_root: Path | None = None,
 ) -> EnvProvisionResult:
     """Realize the stack's test-execution environment, or a NO-OP if unsupported.
 
@@ -1969,6 +1970,8 @@ def provision_project_env(
     literal. A stack that declares no ``env_provisioner`` (every other language + Go),
     an unknown/unaccepted language, or a stack with no resolvable layout profile is a
     strict NO-OP unless a test environment is explicitly declared.
+    An isolated caller may supply an empty, disposable environment directory
+    for the provisioner's files and state while using the real project manifest.
     All paths derive from the resolved :class:`LayoutProfile` (canonical package name
     + roots); nothing is hardcoded.
     """
@@ -2004,11 +2007,14 @@ def provision_project_env(
             action="unsupported",
             detail=f"no layout profile resolved for language {language!r}",
         )
+    environment_options = {"environment_root": environment_root} if environment_root is not None else {}
     if test_environment is None:
-        return provisioner.provision(root, profile=profile, propose_dependencies=propose_dependencies)
+        return provisioner.provision(
+            root, profile=profile, propose_dependencies=propose_dependencies, **environment_options,
+        )
     return provisioner.provision(
         root, profile=profile, propose_dependencies=propose_dependencies,
-        declaration=test_environment, asset_specs=assets, config=config,
+        declaration=test_environment, asset_specs=assets, config=config, **environment_options,
     )
 
 

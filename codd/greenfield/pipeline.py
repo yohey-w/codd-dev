@@ -92,7 +92,8 @@ CLI string works unchanged.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -102,6 +103,7 @@ import os
 from pathlib import Path, PurePosixPath
 import shlex
 import shutil
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -2517,7 +2519,10 @@ class GreenfieldPipeline:
                 "manifest set), not a code defect."
             )
 
-    def _provision_env(self, project_root: Path) -> None:
+    def _provision_env(
+        self, project_root: Path, *, environment_root: Path | None = None,
+        repair_replies: dict[tuple[str, str], str | Exception] | None = None,
+    ) -> None:
         """Provision and, where supported, repair the stack's test environment."""
         from codd.project_types import provision_project_env
         from codd.test_environment import read_test_environment
@@ -2532,20 +2537,37 @@ class GreenfieldPipeline:
                 "Correct the test environment declaration in the test strategy.",
             ) from exc
 
+        repair_key = None
+
         def propose_dependencies(prompt: str) -> str:
+            nonlocal repair_key
             from codd.ai_invoke import invoke_read_only, resolve_ai_command
             from codd.elicit.engine import _collect_requirements
 
-            self.echo("[greenfield] verify: attempting to repair missing dependency declarations")
             requirements = _collect_requirements(project_root, max_chars=40000)
-            return invoke_read_only(
-                resolve_ai_command(config, self.ai_command, command_name="implement"),
-                f"{prompt}\n\nProject requirements:\n{requirements}",
-                project_root=project_root,
-                config=config,
-                stage="greenfield verify",
+            command = resolve_ai_command(config, self.ai_command, command_name="implement")
+            request = f"{prompt}\n\nProject requirements:\n{requirements}"
+            repair_key = (command, request)
+            if repair_replies is not None and repair_key in repair_replies:
+                previous = repair_replies[repair_key]
+                if isinstance(previous, Exception):
+                    raise previous
+                return previous
+            self.echo("[greenfield] verify: attempting to repair missing dependency declarations")
+            reply = invoke_read_only(
+                command, request, project_root=project_root, config=config, stage="greenfield verify",
+                **({"recover": False} if repair_replies is not None else {}),
             )
+            if repair_replies is not None:
+                repair_replies[repair_key] = reply
+            return reply
 
+        def remember_failed_repair(detail: str) -> None:
+            if repair_replies is not None and repair_key is not None:
+                if not isinstance(repair_replies.get(repair_key), Exception):
+                    repair_replies[repair_key] = ValueError(detail)
+
+        environment_options = {"environment_root": environment_root} if environment_root is not None else {}
         try:
             result = provision_project_env(
                 project_root,
@@ -2555,16 +2577,22 @@ class GreenfieldPipeline:
                 test_dirs=test_dirs,
                 config=config,
                 propose_dependencies=propose_dependencies,
+                **environment_options,
                 **({"test_environment": declaration} if declaration is not None else {}),
             )
         except OSError as exc:
+            remember_failed_repair(str(exc))
             raise EnvironmentProvisionError(
                 f"test-execution environment provisioning failed before verify: {exc}",
                 "Check read and write access to the project and its test-environment state.",
             ) from exc
+        except Exception as exc:
+            remember_failed_repair(str(exc))
+            raise
         for notice in result.notices:
             self.echo(f"[greenfield] verify: {notice}")
         if not result.ok:
+            remember_failed_repair(result.detail)
             raise EnvironmentProvisionError(
                 "test-execution environment provisioning failed before verify: "
                 f"{result.detail}",
@@ -2573,30 +2601,42 @@ class GreenfieldPipeline:
         if result.action == "provisioned":
             self.echo(f"[greenfield] verify: provisioned test environment — {result.detail}")
 
+    @contextmanager
     def _prepare_oracle_test_executable(
         self, project_root: Path, config: dict[str, Any], executable: str, *,
         reuse_test_environment: bool,
-    ) -> str | None:
+        repair_replies: dict[tuple[str, str], str | Exception],
+    ) -> Iterator[str | None]:
         """Select the interpreter from the same PATH prepend as verification."""
         from codd.repair.verify_runner import VerifyRunner
 
-        try:
-            if not reuse_test_environment:
-                self._provision_env(project_root)
-            prepend = VerifyRunner(project_root, config)._exec_path_prepend()
-            interpreter = shutil.which(executable, path=os.pathsep.join(prepend)) if prepend else None
-            if interpreter is None:
-                raise ValueError(f"{executable!r} is missing from the provisioned test environment")
-        except Exception as exc:
-            # Provisioning is advisory at implement time, even when verify would stop.
-            reason = " ".join(str(exc).splitlines()).strip() or type(exc).__name__
-            self.echo(
-                f"[greenfield] implement-oracle: project test environment unavailable ({reason}); "
-                "collecting with CoDD's interpreter"
-            )
-            return None
-        self.echo(f"[greenfield] implement-oracle: collecting with project test environment ({interpreter!r})")
-        return interpreter
+        with ExitStack() as stack:
+            environment_root = None
+            try:
+                if not reuse_test_environment:
+                    # Keep every evaluation independent of user environments and of
+                    # the state artifact owned by C and verify.
+                    environment_root = Path(stack.enter_context(TemporaryDirectory(
+                        prefix="codd-oracle-", ignore_cleanup_errors=True,
+                    )))
+                    self._provision_env(
+                        project_root, environment_root=environment_root, repair_replies=repair_replies,
+                    )
+                prepend = VerifyRunner(project_root, config, exec_env_root=environment_root)._exec_path_prepend()
+                interpreter = shutil.which(executable, path=os.pathsep.join(prepend)) if prepend else None
+                if interpreter is None:
+                    raise ValueError(f"{executable!r} is missing from the provisioned test environment")
+            except Exception as exc:
+                # Provisioning is advisory at implement time, even when verify would stop.
+                reason = " ".join(str(exc).splitlines()).strip() or type(exc).__name__
+                self.echo(
+                    f"[greenfield] implement-oracle: project test environment unavailable ({reason}); "
+                    "collecting with CoDD's interpreter"
+                )
+                interpreter = None
+            else:
+                self.echo(f"[greenfield] implement-oracle: collecting with project test environment ({interpreter!r})")
+            yield interpreter
 
     def _enforce_implement_oracle_gate(
         self,
@@ -2718,6 +2758,7 @@ class GreenfieldPipeline:
                 prepare_test_executable=partial(
                     self._prepare_oracle_test_executable, project_root, config,
                     reuse_test_environment=reuse_test_environment,
+                    repair_replies={},
                 ),
             )
         except OracleScopeError as exc:
@@ -2986,7 +3027,11 @@ class GreenfieldPipeline:
         scoped_tasks = repairable
 
         allowed = tuple(getattr(scope, "allowed_paths", ()) or ())
-        with _OracleWriteFence(project_root, allowed_paths=allowed, echo=self.echo) as fence:
+        language = resolve_verify_language(config, language=getattr(self, "language", None))
+        with _OracleWriteFence(
+            project_root, allowed_paths=allowed, echo=self.echo,
+            environment_paths=_feedback_environment_paths(config, language),
+        ) as fence:
             self._reimplement_tasks(project_root, scoped_tasks, feedback, config, feedback_rows=feedback_rows)
             fence.enforce()
 
@@ -3845,6 +3890,23 @@ _FENCE_TRACKED_SUFFIXES = frozenset(
 )
 
 
+def _feedback_language_profile(config: dict[str, Any], language: str | None):
+    from codd.languages.contract import resolve_language_profile
+    from codd.languages.registry import UnknownLanguageError
+
+    project = config.get("project")
+    settings = {**config, "project": {**(project if isinstance(project, dict) else {}), "language": language}}
+    try:
+        return resolve_language_profile(settings)
+    except UnknownLanguageError:
+        return None
+
+
+def _feedback_environment_paths(config: dict[str, Any], language: str | None) -> tuple[str, ...]:
+    profile = _feedback_language_profile(config, language)
+    return profile.tests.feedback_environment_paths if profile and profile.tests else ()
+
+
 class _OracleWriteFence:
     """Restrict a SCOPED oracle rerun's writes to the scope's ``allowed_paths``.
 
@@ -3862,10 +3924,19 @@ class _OracleWriteFence:
     construct a fence in that case.
     """
 
-    def __init__(self, project_root: Path, *, allowed_paths: tuple[str, ...], echo: Callable[[str], str]):
+    def __init__(
+        self, project_root: Path, *, allowed_paths: tuple[str, ...],
+        echo: Callable[[str], None], environment_paths: tuple[str, ...] = (),
+    ):
         self._root = Path(project_root).resolve()
         self._allowed_files, self._allowed_dirs = self._split_allowed(allowed_paths)
         self._echo = echo
+        self._environment_paths = {self._root / path for path in environment_paths}
+        for path in tuple(self._environment_paths):
+            try:
+                self._environment_paths.add(path.resolve())
+            except (OSError, RuntimeError):
+                continue
         self._snapshot: dict[str, bytes] = {}
 
     def __enter__(self) -> "_OracleWriteFence":
@@ -3982,17 +4053,36 @@ class _OracleWriteFence:
         return out
 
     def _iter_tracked_files(self):
-        import os
-
         for dirpath, dirnames, filenames in os.walk(self._root):
-            dirnames[:] = [d for d in dirnames if d not in _FENCE_EXCLUDE_DIRS]
+            directory = Path(dirpath)
+            dirnames[:] = [
+                name for name in dirnames
+                if name not in _FENCE_EXCLUDE_DIRS and directory / name not in self._environment_paths
+            ]
             for name in filenames:
-                if PurePosixPath(name).suffix in _FENCE_TRACKED_SUFFIXES:
-                    yield Path(dirpath) / name
+                path = directory / name
+                if path.suffix in _FENCE_TRACKED_SUFFIXES and not self._is_environment_path(path):
+                    yield path
+
+    def _is_environment_path(self, path: Path, *, resolve: bool = False) -> bool:
+        if not self._environment_paths:
+            return False
+        if any(path.is_relative_to(env) for env in self._environment_paths):
+            return True
+        if resolve or path.is_symlink():
+            try:
+                target = path.resolve()
+            except (OSError, RuntimeError):
+                return False
+            return any(target.is_relative_to(env) for env in self._environment_paths)
+        return False
 
     def _restore(self, rel: str, content: bytes) -> None:
         target = self._root / rel
         try:
+            # A rerun can replace a formerly tracked parent with a symlink.
+            if self._is_environment_path(target, resolve=True):
+                return
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content)
         except OSError as exc:
@@ -4001,6 +4091,8 @@ class _OracleWriteFence:
     def _remove(self, rel: str) -> None:
         target = self._root / rel
         try:
+            if self._is_environment_path(target, resolve=True):
+                return
             target.unlink()
         except OSError as exc:
             self._echo(f"[greenfield] implement-oracle: write-fence could not remove {rel} ({exc}).")

@@ -24,11 +24,11 @@ from codd.greenfield.pipeline import (
     EnvironmentProvisionError,
     StageError,
     _declared_output_is_file_path,
+    _feedback_language_profile,
     _is_glob_decl,
 )
 from codd.languages.builtin_adapters import ensure_builtin_adapters_registered
-from codd.languages.contract import resolve_language_profile
-from codd.languages.registry import UnknownLanguageError, default_adapter_registry
+from codd.languages.registry import default_adapter_registry
 from codd.operational_e2e_audit import _COVER_MARKER_RE
 from codd.reference_resolution import AUDIT_RELATIVE_PATH
 from codd.repair.verify_runner import VerifyRunner, _command_output_tail
@@ -781,12 +781,7 @@ def run_implement_test_feedback(pipeline, root, tasks, record, options) -> None:
     if not options.get("coverage_gate", True) or not coverage_gate_enabled(config):
         skip("coverage and authenticity gates are disabled")
         return
-    try:
-        project = config.get("project")
-        settings = {**config, "project": {**(project if isinstance(project, dict) else {}), "language": language}}
-        profile = resolve_language_profile(settings)
-    except UnknownLanguageError:
-        profile = None
+    profile = _feedback_language_profile(config, language)
     adapter_id = profile.tests.feedback_adapter if profile and profile.tests else None
     adapter = None
     if adapter_id:

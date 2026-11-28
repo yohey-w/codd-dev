@@ -60,6 +60,8 @@ output`` / ``_collection_failure_is_third_party_only`` / ``PythonToolRun`` /
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import ast
 import shlex
 import subprocess  # noqa: S404 — argv is sys.executable + pytest, shell run is the legacy parity behaviour
@@ -1649,24 +1651,26 @@ class PythonCompositeOracleAdapter:
         (``ctx.language_profile.layout`` + ``ctx.package_name``) — Cut A.3: NO legacy
         ``LayoutProfile.source_root`` read.
         """
-        interpreter = None
-        if ctx.prepare_test_executable is not None:
-            interpreter = ctx.prepare_test_executable(pytest_launcher(ctx.language_profile)[0])
-        source_root, package_root, test_root = _py_layout_from_layout_spec(ctx)
-        project_root = ctx.project_root
-        config = ctx.config
-        scope = _python_oracle_scope(project_root, source_root, test_root)
-        all_files = scope.expected_files
-        tools: list[PythonToolRun] = [
-            _run_python_compile_layer(project_root, all_files),
-            _run_python_first_party_import_layer(
-                project_root, source_root, package_root, test_root, scope, all_files
-            ),
-            _run_python_pytest_collect_layer(
-                project_root, source_root, package_root, test_root, scope, config,
-                profile=ctx.language_profile, interpreter=interpreter,
-            ),
-        ]
+        prepared = (
+            ctx.prepare_test_executable(pytest_launcher(ctx.language_profile)[0])
+            if ctx.prepare_test_executable is not None else nullcontext()
+        )
+        with prepared as interpreter:
+            source_root, package_root, test_root = _py_layout_from_layout_spec(ctx)
+            project_root = ctx.project_root
+            config = ctx.config
+            scope = _python_oracle_scope(project_root, source_root, test_root)
+            all_files = scope.expected_files
+            tools: list[PythonToolRun] = [
+                _run_python_compile_layer(project_root, all_files),
+                _run_python_first_party_import_layer(
+                    project_root, source_root, package_root, test_root, scope, all_files
+                ),
+                _run_python_pytest_collect_layer(
+                    project_root, source_root, package_root, test_root, scope, config,
+                    profile=ctx.language_profile, interpreter=interpreter,
+                ),
+            ]
         lint_mode = _python_lint_mode(config)
         if lint_mode != "off":
             tools.append(

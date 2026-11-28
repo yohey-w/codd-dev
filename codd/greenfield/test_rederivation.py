@@ -431,9 +431,10 @@ def run_test_rederivation(
     # surface only). Reuse the shipped ``_OracleWriteFence`` (the vb_rerun_scope
     # fence): it mechanically reverts any out-of-scope write, so even a model that
     # tries to edit src cannot. Lazy import to avoid a module-load cycle.
-    from codd.greenfield.pipeline import _OracleWriteFence
+    from codd.greenfield.pipeline import _OracleWriteFence, _feedback_environment_paths, resolve_verify_language
 
     allowed = _fence_allowed_paths(eligible_paths, test_dirs, config)
+    environment_paths = _feedback_environment_paths(config, resolve_verify_language(config, project_root=project_root))
     echo(
         f"[greenfield] test re-derivation ({trigger or 'blocked-test'}): re-deriving "
         f"{len(eligible_paths)} test file(s) from the design across {len(eligible_tasks)} "
@@ -448,7 +449,7 @@ def run_test_rederivation(
         so a crashed draw leaves NO partial transcription (in- OR out-of-scope),
         and the exception is RETURNED for the caller's honest RED terminal.
         """
-        with _OracleWriteFence(project_root, allowed_paths=allowed, echo=echo) as fence:
+        with _OracleWriteFence(project_root, allowed_paths=allowed, echo=echo, environment_paths=environment_paths) as fence:
             try:
                 for task in eligible_tasks:
                     implement_runner(task, feedback)
