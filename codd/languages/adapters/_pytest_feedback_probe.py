@@ -38,6 +38,19 @@ _SHELL_EXECUTION_ERROR = re.compile(
 )
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_load_initial_conftests(early_config):
+    cache_dir = os.environ.get("CODD_TEST_FEEDBACK_CACHE_DIR")
+    if cache_dir and early_config.pluginmanager.hasplugin("cacheprovider"):
+        # Override only cache_dir after pytest reads user options and before the
+        # cache provider configures its cache. Pytest has no scalar ini setter.
+        try:
+            early_config._inicache["cache_dir"] = cache_dir
+        except (AttributeError, TypeError):
+            # Unknown pytest internals: keep the project's cache rather than fail the run.
+            pass
+
+
 def pytest_configure(config):
     config.pluginmanager.register(_Probe(), "codd-feedback-observer")
 

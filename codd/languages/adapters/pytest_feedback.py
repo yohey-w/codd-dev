@@ -48,6 +48,7 @@ class PytestFeedbackAdapter:
             # Python's cache resolution. Default to a private cache for this run.
             "PYTHONPYCACHEPREFIX": str(scratch / "pycache"),
             "PYTEST_PLUGINS": ",".join(filter(None, (env.get("PYTEST_PLUGINS"), _PROBE.stem))),
+            "CODD_TEST_FEEDBACK_CACHE_DIR": str(scratch / "pytest-cache"),
             "CODD_TEST_FEEDBACK_ROOT": str(project_root),
             "CODD_TEST_FEEDBACK_SOURCES": json.dumps(source_dirs),
             "CODD_TEST_FEEDBACK_REPORT": str(scratch),
