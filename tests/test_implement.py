@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import re
 import subprocess
+from types import SimpleNamespace
 
 from click.testing import CliRunner
+import pytest
 import yaml
 
 import codd.implementer as implementer_module
@@ -17,6 +20,8 @@ from codd.implementer import (
     _build_implementation_prompt,
     _parse_file_payloads,
 )
+from codd.implementer import chunked_runner
+from codd.llm.impl_step_deriver import ImplStep, ImplStepCacheRecord, impl_step_cache_path, write_impl_step_cache
 
 
 def _write_doc(
@@ -444,6 +449,235 @@ def test_implementation_prompt_states_test_framework_for_python():
 
     assert "pytest" in prompt
     assert "import pytest" in prompt
+
+
+MEASUREMENT_HEADING = "Elapsed-time measurements:"
+MEASUREMENT_SENTENCE = (
+    "When a test measures elapsed time, define for each measured target where it starts, completes and fails, "
+    "correlate them on one monotonic clock, check the measuring path against a response whose completion is known "
+    "and one that is cut short, and on failure record which events and times the verdict used."
+)
+MEASUREMENT_GUIDANCE = f"{MEASUREMENT_HEADING}\n- {MEASUREMENT_SENTENCE}\n\n"
+MEASUREMENT_FRAGMENTS = (
+    "Elapsed-time measurements",
+    "When a test measures elapsed time",
+    "define for each measured target",
+    "where it starts, completes and fails",
+    "one monotonic clock",
+    "check the measuring path against a response",
+    "one that is cut short",
+    "which events and times the verdict used",
+)
+CERTIFICATE_HEADING = "Test-only certificates:"
+CERTIFICATE_SENTENCE = (
+    "A test-only TLS certificate that tests expect to be valid (for a local HTTPS or mail server the tests start) "
+    "MUST become valid well before it is issued (for example, a day earlier) and stay valid beyond the run, "
+    "so a system clock adjusted during the run cannot make it not yet valid; "
+    "certificates whose validity a test deliberately limits or breaks (invalid, expired, short-lived or rotated) are exempt."
+)
+CERTIFICATE_GUIDANCE = f"{CERTIFICATE_HEADING}\n- {CERTIFICATE_SENTENCE}\n\n"
+CERTIFICATE_FRAGMENTS = (
+    "Test-only certificates",
+    "A test-only TLS certificate",
+    "become valid well before it is issued",
+    "stay valid beyond the run",
+    "a system clock adjusted during the run",
+    "cannot make it not yet valid",
+    "certificates a test deliberately makes invalid or expired are exempt",
+    "certificates whose validity a test deliberately limits or breaks",
+    "The readiness check connects with the same trust",
+)
+
+
+@pytest.mark.parametrize(
+    ("language", "output_paths", "expected_outputs"),
+    [
+        pytest.param("python", ["tests/test_reporter.py"], [], id="python"),
+        pytest.param("typescript", ["tests/reporter.spec.ts"], [], id="typescript"),
+        pytest.param(None, ["tests/test_reporter.py"], [], id="unspecified-language"),
+        pytest.param("python", ["src/test_reporter.py"], [], id="colocated-test"),
+        pytest.param(
+            "python", ["src", "checks"], ["src/reporter.py", "checks/reporting.py"],
+            id="mixed-outputs-with-configured-test-root",
+        ),
+    ],
+)
+def test_test_writing_prompt_states_measurement_rule_once(language, output_paths, expected_outputs):
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": language}, "scan": {"test_dirs": ["tests", "checks"]}},
+        design_context=DesignContext(
+            node_id="design:system",
+            path=Path("docs/design/system_design.md"),
+            content="# System Design\n",
+        ),
+        spec=ImplementSpec("design:system", output_paths, expected_outputs=expected_outputs),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+
+    assert prompt.count(MEASUREMENT_GUIDANCE) == 1
+    assert prompt.count(MEASUREMENT_HEADING) == 1
+    assert prompt.count(MEASUREMENT_SENTENCE) == 1
+    assert prompt.count(CERTIFICATE_GUIDANCE) == 1
+    assert prompt.count(CERTIFICATE_HEADING) == 1
+    assert prompt.count(CERTIFICATE_SENTENCE) == 1
+    assert "The readiness check connects with the same trust" not in prompt
+
+
+@pytest.mark.parametrize("condition", ["expired", "invalid"])
+def test_test_writing_prompt_allows_rejecting_an_untrusted_certificate(condition):
+    requirement = (
+        "Wait for the server to report readiness over its startup channel. "
+        f"The only HTTPS test server presents a deliberately {condition} certificate. "
+        "Verify that the client rejects the certificate on its first TLS connection."
+    )
+    dependency = implementer_module.DependencyDocument(
+        "req:tls", Path("docs/requirements/tls.md"), requirement,
+    )
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "python"}},
+        design_context=DesignContext(
+            node_id="test:test-strategy",
+            path=Path("docs/test/test_strategy.md"),
+            content="# Test Strategy\n",
+        ),
+        spec=ImplementSpec("test:test-strategy", ["tests/test_tls.py"]),
+        dependency_documents=[dependency],
+        conventions=[],
+        coding_principles=None,
+    )
+
+    assert requirement in prompt
+    assert CERTIFICATE_GUIDANCE in prompt
+    assert "(invalid, expired, short-lived or rotated) are exempt." in prompt
+    assert "The readiness check connects with the same trust" not in prompt
+
+
+@pytest.mark.parametrize(
+    ("design_node", "design_path", "output_paths", "expected_outputs"),
+    [
+        pytest.param(
+            "design:system", "docs/design/system_design.md", ["src/reporter.py"], [],
+            id="source-only",
+        ),
+        pytest.param(
+            "test:test-strategy", "docs/test/test_strategy.md", ["src/reporter.py"], [],
+            id="source-from-test-strategy",
+        ),
+        pytest.param(
+            "test:test-strategy", "docs/test/test_strategy.md",
+            ["src/reporter.py", "tests/test_reporter.py"], ["src/reporter.py"],
+            id="declared-source-with-broader-routing",
+        ),
+        pytest.param(
+            "test:test-strategy", "docs/test/test_strategy.md", ["tests"], [],
+            id="directory-only",
+        ),
+    ],
+)
+def test_non_test_writing_prompt_omits_measurement_rule(
+    design_node, design_path, output_paths, expected_outputs,
+):
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": "python"}},
+        design_context=DesignContext(
+            node_id=design_node,
+            path=Path(design_path),
+            content="# Design\n",
+        ),
+        spec=ImplementSpec(design_node, output_paths, expected_outputs=expected_outputs),
+        dependency_documents=[],
+        conventions=[],
+        coding_principles=None,
+    )
+
+    for fragment in (*MEASUREMENT_FRAGMENTS, *CERTIFICATE_FRAGMENTS):
+        assert fragment not in prompt
+
+
+@pytest.mark.parametrize(
+    ("output_paths", "step_outputs", "main_digests"),
+    [
+        pytest.param(
+            ["tests/test_latency.py"], [["tests/test_latency.py"]],
+            ["a8c1c320282fbcf51178a531af67310266aeb8f05b250daeb8ca94ec6e9a2377"],
+            id="declared-test",
+        ),
+        pytest.param(
+            ["src", "checks"], [["checks/reporting.py", "checks/helpers.py"], ["src/auth.py"]],
+            ["bdf5b898845fe8887cd3261fdb8c8a0cc7c10474f4129cf3c61f5431e5aa6535",
+             "86dd8f71646f4d344a0e37cb983e2feb1251146cd8208807673fdad932b1cc98"],
+            id="test-chunk-and-source-chunk",
+        ),
+        pytest.param(
+            ["tests/test_latency.py", "src"], [["src/auth.py"]],
+            ["3416c130dcd6a7e26a944585ce1f5fa19121535ce559079174b5485dff8650ed"],
+            id="source-declaration-with-broader-routing",
+        ),
+        pytest.param(
+            ["tests/"], [["tests/"]],
+            ["cceef9f3fc59d734e097a591845cc7707c6cf6fea826058ff8bd0815fdffe4b9"],
+            id="directory-only",
+        ),
+        pytest.param(
+            ["tests/test_latency.py"], [[]],
+            ["5bbb6009bd9aba4c345157853932822f6245d4252fbb30a773e1ab9ee7af3858"],
+            id="configured-test-output",
+        ),
+        pytest.param(
+            ["src"], [[]],
+            ["3f78e3ee7eb97df01ace609e68379feed9714da560a16894087c6d36ca5df224"],
+            id="test-hint-only",
+        ),
+    ],
+)
+def test_chunked_run_prompts_match_main(
+    tmp_path, monkeypatch, output_paths, step_outputs, main_digests,
+):
+    project = _setup_project(tmp_path, language="python")
+    task = "docs/design/auth.md"
+    config_path = project / "codd/codd.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["scan"]["test_dirs"].append("checks/")
+    config["implement"]["default_output_paths"][task] = output_paths
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    steps = [
+        ImplStep.from_dict({
+            "id": f"step_{index}",
+            "kind": "edit",
+            "rationale": "Build the declared files.",
+            "source_design_section": "Auth Design",
+            "expected_outputs": outputs,
+            "target_path_hint": "tests/test_latency.py" if not outputs else None,
+            "approved": True,
+        })
+        for index, outputs in enumerate(step_outputs)
+    ]
+    write_impl_step_cache(
+        impl_step_cache_path(task, {"project_root": project}),
+        ImplStepCacheRecord("fake", "key", task, "doc", "template", "now", [task], steps),
+    )
+    prompts = []
+
+    def invoke(_self, command, prompt, _project_root):
+        assert command == "mock-ai --print"
+        prompts.append(prompt)
+        return "Done.", 0
+
+    monkeypatch.setattr(chunked_runner.ChunkedRunner, "_invoke", invoke)
+    monkeypatch.setattr(chunked_runner, "time", SimpleNamespace(monotonic=lambda: 0.0))
+    result = CliRunner().invoke(main, [
+        "implement", "run", "--path", str(project), "--task", task, "--chunk-size", "1",
+    ], catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    assert len(prompts) == len(main_digests)
+    for prompt, main_digest in zip(prompts, main_digests, strict=True):
+        for fragment in (*MEASUREMENT_FRAGMENTS, *CERTIFICATE_FRAGMENTS):
+            assert fragment not in prompt
+        # Full prompts captured on main 63adbee with the same inputs.
+        assert hashlib.sha256(prompt.encode("utf-8")).hexdigest() == main_digest
 
 
 def test_implementation_prompt_omits_test_framework_when_spec_is_not_test_related():
