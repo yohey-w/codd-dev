@@ -397,6 +397,8 @@ class _Feedback:
             result.unavailable = _MISSING_SELECTED_CASE
         if purpose == "isolate":
             round_record["isolated_seconds"] += time.monotonic() - started
+        # Resolve ownership against the artifacts used to start this run.
+        self.snapshot.restore(target)
         event = {
             "purpose": purpose, "command": self.display, "cwd": str(self.cwd),
             "executed_cases": len(result.cases), "failures_and_errors": len(result.failures),
@@ -521,6 +523,7 @@ class _Feedback:
         from codd.greenfield.pipeline import _enforce_stage_coverage_gate
 
         case_ids = list(dict.fromkeys(f["case"] for f in failures))
+        returned_failures = {(f["case"], f["origin"], f["phase"]) for f in failures}
         try:
             # prepare() provisioned the round's environment before snapshotting
             # it. Judge the candidate in that same environment.
@@ -563,7 +566,9 @@ class _Feedback:
                 return f"candidate could not verify {case}", suite
             if case in regressions and result.cases[case] != "passed":
                 return f"previously passing test now fails in isolation: {case}", suite
-            isolated_after += sum(self.owner(failure) == owner for failure in result.failures)
+            isolated_after += sum(
+                (f["case"], f["origin"], f["phase"]) in returned_failures for f in result.failures
+            )
         attempt["isolated_after"] = isolated_after
         if isolated_after >= len(failures):
             return "isolated failures and errors did not decrease", suite
