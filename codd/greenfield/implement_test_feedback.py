@@ -448,13 +448,13 @@ class _Feedback:
         for failure in failures:
             by_case[failure["case"]].add((failure["origin"], failure["phase"]))
         reproduced_for_owner = []
-        for case, signature in by_case.items():
+        # Cap each pass over an owner's failures and keep cumulative round counts.
+        for index, (case, signature) in enumerate(by_case.items()):
             remaining = self.timeout - round_record["isolated_seconds"]
-            count = isolated_by_owner.get(owner, 0)
-            if count >= _MAX_ISOLATED_CASES or remaining <= 0:
+            if index >= _MAX_ISOLATED_CASES or remaining <= 0:
                 limited.add(case)
                 continue
-            isolated_by_owner[owner] = count + 1
+            isolated_by_owner[owner] = isolated_by_owner.get(owner, 0) + 1
             round_record["isolated"] += 1
             isolated = self.run_tests(round_record, "isolate", case, remaining)
             collection_failed = (
@@ -563,7 +563,7 @@ class _Feedback:
                 return f"candidate could not verify {case}", suite
             if case in regressions and result.cases[case] != "passed":
                 return f"previously passing test now fails in isolation: {case}", suite
-            isolated_after += len(result.failures)
+            isolated_after += sum(self.owner(failure) == owner for failure in result.failures)
         attempt["isolated_after"] = isolated_after
         if isolated_after >= len(failures):
             return "isolated failures and errors did not decrease", suite
@@ -701,11 +701,13 @@ class _Feedback:
                 for attempt in recorded["attempts"] if attempt.get("interrupted")
             )
             limited = set(round_record.get("cases_outside_isolation_budget", ()))
-            groups = []
+            unreproduced = set()
             isolation_problem = None
             while not suite.unavailable and suite.failures:
-                groups = self.owner_groups(suite)
-                pending = [(owner, failures) for owner, failures in groups if owner not in handled]
+                pending = [
+                    (owner, failures) for owner, failures in self.owner_groups(suite)
+                    if owner not in handled and owner not in unreproduced
+                ]
                 if not pending:
                     break
                 owner, owned_failures = pending[0]
@@ -719,18 +721,23 @@ class _Feedback:
                 if time_exhausted:
                     round_record["isolation_time_exhausted"] = True
                     self.emit("isolation time budget exhausted")
-                if isolation_problem or time_exhausted:
+                if isolation_problem:
                     break
-                handled.add(owner)
-                if not failures:
-                    continue
-                suite, reprovisioned = self.attempt(round_record, tasks[owner], failures, suite)
-                if not suite.unavailable and (reprovisioned or self.has_helper(failures)):
-                    round_record["screened"].clear()
-                    purpose = "suite after reprovisioning" if reprovisioned else "suite after helper decision"
-                    suite = self.run_tests(round_record, purpose)
-            # Use ownership in the full suite to decide whether to end feedback.
-            stop = bool(suite.unavailable) or not suite.failures or not groups
+                if failures:
+                    handled.add(owner)
+                    suite, reprovisioned = self.attempt(round_record, tasks[owner], failures, suite)
+                    if reprovisioned or round_record["attempts"][-1]["decision"] == "accepted":
+                        unreproduced.clear()
+                    if not suite.unavailable and (reprovisioned or self.has_helper(failures)):
+                        round_record["screened"].clear()
+                        purpose = "suite after reprovisioning" if reprovisioned else "suite after helper decision"
+                        suite = self.run_tests(round_record, purpose)
+                else:
+                    unreproduced.add(owner)
+                if time_exhausted:
+                    break
+            # Use ownership in the final full suite to decide whether to end feedback.
+            stop = bool(suite.unavailable) or not self.owner_groups(suite)
             if limited:
                 self.emit(f"{len(limited)} failing case(s) left outside the isolation budget")
             if round_record.get("baseline_saved"):
