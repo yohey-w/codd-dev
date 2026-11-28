@@ -14,6 +14,7 @@ import codd.generator as generator_module
 from codd.cli import main
 from codd.design_consistency import DesignConsistencyError
 from codd.generator import generate_wave
+from codd.project_types import ProjectCapabilities
 from codd.scanner import _extract_frontmatter
 
 
@@ -463,10 +464,6 @@ def test_unmanaged_generation_prompts_match_legacy_bytes(tmp_path, mock_ai_cli):
         "- The readiness check MUST prove that the server answering is the one this run started "
         "(for example, a per-run token the server reports, or the address the started process itself reports), "
         "not merely that some server answers on that address.\n",
-        "- A test-only TLS certificate that tests expect to be valid (for a local HTTPS or mail server the tests start) MUST become valid "
-        "well before it is issued (for example, a day earlier) and stay valid beyond the run, so a system clock adjusted during the run "
-        "cannot make it not yet valid; certificates a test deliberately makes invalid or expired are exempt. The readiness check connects "
-        "with the same trust and name verification the consumer uses and reports the verification reason, time and validity window when it fails.\n",
     ):
         assert prompts[0].count(added) == 1
         prompts[0] = prompts[0].replace(added, "", 1)
@@ -1268,16 +1265,35 @@ operation_flow:
     assert operation["expected_outcomes"] == ["assignment persists"]
 
 
-CERTIFICATE_RULE = (
-    "- A test-only TLS certificate that tests expect to be valid (for a local HTTPS or mail server the tests start) MUST become valid "
-    "well before it is issued (for example, a day earlier) and stay valid beyond the run, so a system clock adjusted during the run "
-    "cannot make it not yet valid; certificates a test deliberately makes invalid or expired are exempt. The readiness check connects "
-    "with the same trust and name verification the consumer uses and reports the verification reason, time and validity window when it fails."
+@pytest.mark.parametrize(
+    ("node_id", "output", "modality"),
+    [
+        pytest.param("design:system", "docs/design/system_design.md", "browser", id="design"),
+        pytest.param("test:test-strategy", "docs/test/test_strategy.md", "browser", id="browser"),
+        pytest.param("test:test-strategy", "docs/test/test_strategy.md", "cli", id="cli"),
+        pytest.param("test:test-strategy", "docs/test/test_strategy.md", "device", id="device"),
+        pytest.param("test:e2e", "tests/e2e/test_reporter.py", "none", id="direct-test-code"),
+    ],
 )
+def test_generation_prompt_omits_measurement_rule(node_id, output, modality):
+    artifact = generator_module.WaveArtifact(
+        wave=1,
+        node_id=node_id,
+        output=output,
+        title="Reporter",
+        depends_on=[],
+        conventions=[],
+    )
+    prompt = generator_module._build_generation_prompt(
+        artifact, [], [], capabilities=ProjectCapabilities(e2e_modality=modality),
+    )
 
-
-def test_python_http_strategy_rules_ask_for_a_backdated_test_certificate():
-    from codd.generator import _python_http_e2e_doc_lines
-
-    lines = _python_http_e2e_doc_lines()
-    assert lines.count(CERTIFICATE_RULE) == 1
+    for fragment in (
+        "When a test measures elapsed time",
+        "define for each measured target",
+        "one monotonic clock",
+        "check the measuring path against a response",
+        "one that is cut short",
+        "which events and times the verdict used",
+    ):
+        assert fragment not in prompt

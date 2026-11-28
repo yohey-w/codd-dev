@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-import pytest
 import re
 import subprocess
 
 from click.testing import CliRunner
+import pytest
 import yaml
 
 import codd.implementer as implementer_module
@@ -452,49 +452,85 @@ MEASUREMENT_RULE = (
     "correlate them on one monotonic clock, check the measuring path against a response whose completion is known "
     "and one that is cut short, and on failure record which events and times the verdict used.\n"
 )
-CERTIFICATE_RULE = (
-    "- A test-only TLS certificate that tests expect to be valid (for a local HTTPS or mail server the tests start) MUST become valid "
-    "well before it is issued (for example, a day earlier) and stay valid beyond the run, so a system clock adjusted during the run "
-    "cannot make it not yet valid; certificates a test deliberately makes invalid or expired are exempt. The readiness check connects "
-    "with the same trust and name verification the consumer uses and reports the verification reason, time and validity window when it fails.\n"
-)
 
 
-@pytest.mark.parametrize("language", ["python", "typescript", None])
-def test_test_writing_prompt_states_measurement_and_certificate_rules(language):
-    prompt = _build_implementation_prompt(
-        config={"project": {"language": language}} if language else {},
-        design_context=DesignContext(
-            node_id="test:test-strategy",
-            path=Path("docs/test/test_strategy.md"),
-            content="# Test Strategy\n",
+@pytest.mark.parametrize(
+    ("language", "output_paths", "expected_outputs"),
+    [
+        pytest.param("python", ["tests/test_reporter.py"], [], id="python"),
+        pytest.param("typescript", ["tests/reporter.spec.ts"], [], id="typescript"),
+        pytest.param(None, ["tests/test_reporter.py"], [], id="unspecified-language"),
+        pytest.param("python", ["src/test_reporter.py"], [], id="colocated-test"),
+        pytest.param(
+            "python", ["src", "checks"], ["src/reporter.py", "checks/reporting.py"],
+            id="mixed-outputs-with-configured-test-root",
         ),
-        spec=ImplementSpec("test:test-strategy", ["tests"]),
+    ],
+)
+def test_test_writing_prompt_states_measurement_rule_once(language, output_paths, expected_outputs):
+    prompt = _build_implementation_prompt(
+        config={"project": {"language": language}, "scan": {"test_dirs": ["tests", "checks"]}},
+        design_context=DesignContext(
+            node_id="design:system",
+            path=Path("docs/design/system_design.md"),
+            content="# System Design\n",
+        ),
+        spec=ImplementSpec("design:system", output_paths, expected_outputs=expected_outputs),
         dependency_documents=[],
         conventions=[],
         coding_principles=None,
     )
 
     assert prompt.count(MEASUREMENT_RULE) == 1
-    assert prompt.count(CERTIFICATE_RULE) == 1
 
 
-def test_source_prompt_omits_measurement_and_certificate_rules():
+@pytest.mark.parametrize(
+    ("design_node", "design_path", "output_paths", "expected_outputs"),
+    [
+        pytest.param(
+            "design:system", "docs/design/system_design.md", ["src/reporter.py"], [],
+            id="source-only",
+        ),
+        pytest.param(
+            "test:test-strategy", "docs/test/test_strategy.md", ["src/reporter.py"], [],
+            id="source-from-test-strategy",
+        ),
+        pytest.param(
+            "test:test-strategy", "docs/test/test_strategy.md",
+            ["src/reporter.py", "tests/test_reporter.py"], ["src/reporter.py"],
+            id="declared-source-with-broader-routing",
+        ),
+        pytest.param(
+            "test:test-strategy", "docs/test/test_strategy.md", ["tests"], [],
+            id="directory-only",
+        ),
+    ],
+)
+def test_non_test_writing_prompt_omits_measurement_rule(
+    design_node, design_path, output_paths, expected_outputs,
+):
     prompt = _build_implementation_prompt(
         config={"project": {"language": "python"}},
         design_context=DesignContext(
-            node_id="design:system",
-            path=Path("docs/design/system_design.md"),
-            content="# System Design\n",
+            node_id=design_node,
+            path=Path(design_path),
+            content="# Design\n",
         ),
-        spec=ImplementSpec("design:system", ["src"]),
+        spec=ImplementSpec(design_node, output_paths, expected_outputs=expected_outputs),
         dependency_documents=[],
         conventions=[],
         coding_principles=None,
     )
 
-    assert MEASUREMENT_RULE not in prompt
-    assert CERTIFICATE_RULE not in prompt
+    for fragment in (
+        "When a test measures elapsed time",
+        "define for each measured target",
+        "one monotonic clock",
+        "check the measuring path against a response",
+        "one that is cut short",
+        "which events and times the verdict used",
+    ):
+        assert fragment not in prompt
 
 
 def test_implementation_prompt_omits_test_framework_when_spec_is_not_test_related():

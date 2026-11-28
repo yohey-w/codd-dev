@@ -203,12 +203,11 @@ class ImplementSpec:
     dependency_design_nodes: list[str] = field(default_factory=list)
     #: The task's DECLARED expected-output file paths (verbatim from the DAG's
     #: DerivedTask), as opposed to ``output_paths`` (the broader routing/scope
-    #: prefix an implement run is allowed to write under). Used ONLY to look up
-    #: pre-existing file content for the prompt (see
-    #: ``_existing_output_files_context``) — never for path validation/routing,
-    #: so a non-path entry (a bare symbol like ``module:Foo.bar``) is harmless
-    #: here. Empty for callers that never had DAG-derived expected outputs
-    #: (configured ``implement_targets`` / direct ``implement_tasks`` callers).
+    #: prefix an implement run is allowed to write under). Used to scope prompt
+    #: guidance to declared artifacts and to look up pre-existing file content
+    #: (see ``_existing_output_files_context``). Empty for callers without
+    #: DAG-derived expected outputs (configured ``implement_targets`` /
+    #: direct ``implement_tasks`` callers).
     expected_outputs: list[str] = field(default_factory=list)
     #: The DAG task's own ``title``/``description`` (verbatim from its
     #: DerivedTask). ``design_node`` for a derived task is its
@@ -3676,7 +3675,12 @@ def _build_implementation_prompt(
     output_text = ", ".join(spec.output_paths)
     example_output = spec.output_paths[0]
     # Use the same file/directory rule as output creation and completeness.
-    from codd.greenfield.pipeline import _declared_output_is_file_path
+    from codd.greenfield.pipeline import (
+        _KIND_TEST,
+        _classify_declared_output,
+        _declared_output_is_file_path,
+    )
+
     if not _declared_output_is_file_path(example_output):
         example_output = f"{example_output.rstrip('/')}/<filename>{default_extension}"
     lines = [
@@ -3834,17 +3838,6 @@ def _build_implementation_prompt(
                 ]
             )
 
-        lines.extend(
-            [
-                "Measurements and test-only certificates:",
-                "- When a test measures elapsed time, define for each measured target where it starts, completes and fails, "
-                "correlate them on one monotonic clock, check the measuring path against a response whose completion is known "
-                "and one that is cut short, and on failure record which events and times the verdict used.",
-                "- A test-only TLS certificate that tests expect to be valid (for a local HTTPS or mail server the tests start) MUST become valid well before it is issued (for example, a day earlier) and stay valid beyond the run, so a system clock adjusted during the run cannot make it not yet valid; certificates a test deliberately makes invalid or expired are exempt. The readiness check connects with the same trust and name verification the consumer uses and reports the verification reason, time and validity window when it fails.",
-                "",
-            ]
-        )
-
         # VB CONTRACT PROJECTION (2026-07-03): enumerate the CLOSED verifiable-
         # behavior id list + assertion-quality + coverage-is-completion rules,
         # read from the SAME truth source the deterministic gate reconciles
@@ -3917,6 +3910,14 @@ def _build_implementation_prompt(
                     "",
                 ]
             )
+
+    declared_outputs = spec.expected_outputs or spec.output_paths
+    if any(_classify_declared_output(path, config) == _KIND_TEST for path in declared_outputs):
+        lines.append(
+            "- When a test measures elapsed time, define for each measured target where it starts, completes and fails, "
+            "correlate them on one monotonic clock, check the measuring path against a response whose completion is known "
+            "and one that is cut short, and on failure record which events and times the verdict used."
+        )
 
     lines.extend([
         "Required output format (repeat this block for each file and output nothing else):",
